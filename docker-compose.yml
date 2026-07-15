@@ -1,0 +1,24 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-storage:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant-storage:

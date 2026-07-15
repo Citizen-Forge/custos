@@ -1,0 +1,20 @@
+{
+  "ollama": {
+    "baseUrl": "http://192.168.250.219:11434",
+    "model": "qwen2.5:14b-instruct-q4_K_M"
+  },
+  "tasks": {
+    "general": [
+      { "provider": "anthropic", "priority": 1 },
+      { "provider": "ollama", "priority": 2 }
+    ],
+    "permissionClassifier": [
+      { "provider": "ollama", "priority": 1 },
+      { "provider": "anthropic", "priority": 2 }
+    ],
+    "memoryCurator": [
+      { "provider": "ollama", "priority": 1 },
+      { "provider": "anthropic", "priority": 2 }
+    ]
+  }
+}
