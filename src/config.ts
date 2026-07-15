@@ -2,25 +2,39 @@ import { readFile } from "node:fs/promises";
 import type { TaskKind } from "./types.js";
 
 export interface ProviderEntry {
-  provider: "anthropic" | "ollama";
+  /** References either "anthropic" or a key in `ollamaInstances`. */
+  provider: string;
   priority: number;
+}
+
+export interface OllamaInstanceConfig {
+  baseUrl: string;
+  model: string;
 }
 
 export interface GatewayConfig {
   anthropic?: { apiKey?: string };
-  ollama?: { baseUrl: string; model: string };
+  /** Named Ollama model instances so different tasks can use different
+   * models (e.g. a small fast one for permission classification, a bigger
+   * one for general use) while sharing the same underlying server. */
+  ollamaInstances: Record<string, OllamaInstanceConfig>;
   tasks: Record<TaskKind, ProviderEntry[]>;
 }
 
+const OLLAMA_HOST = "http://192.168.250.219:11434";
+
 const DEFAULT_CONFIG: GatewayConfig = {
-  ollama: { baseUrl: "http://192.168.250.219:11434", model: "qwen2.5:14b-instruct-q4_K_M" },
+  ollamaInstances: {
+    ollama: { baseUrl: OLLAMA_HOST, model: "qwen2.5:14b-instruct-q4_K_M" },
+    "ollama-fast": { baseUrl: OLLAMA_HOST, model: "qwen2.5:3b-instruct" },
+  },
   tasks: {
     general: [
       { provider: "anthropic", priority: 1 },
       { provider: "ollama", priority: 2 },
     ],
     permissionClassifier: [
-      { provider: "ollama", priority: 1 },
+      { provider: "ollama-fast", priority: 1 },
       { provider: "anthropic", priority: 2 },
     ],
     memoryCurator: [
@@ -42,7 +56,7 @@ export async function loadConfig(path = process.env.GATEWAY_CONFIG_PATH ?? "data
     ...DEFAULT_CONFIG,
     ...fileConfig,
     anthropic: { ...DEFAULT_CONFIG.anthropic, ...fileConfig.anthropic },
-    ollama: { ...DEFAULT_CONFIG.ollama, ...fileConfig.ollama } as GatewayConfig["ollama"],
+    ollamaInstances: { ...DEFAULT_CONFIG.ollamaInstances, ...fileConfig.ollamaInstances },
     tasks: { ...DEFAULT_CONFIG.tasks, ...fileConfig.tasks },
   };
 

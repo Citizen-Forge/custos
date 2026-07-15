@@ -19,13 +19,14 @@ async function main() {
   const providers: Record<string, import("./providers/types.js").Provider> = {
     anthropic: new AnthropicProvider({ apiKey: config.anthropic?.apiKey }),
   };
-  if (config.ollama) {
-    providers.ollama = new OllamaProvider(config.ollama);
+  for (const [name, instance] of Object.entries(config.ollamaInstances)) {
+    providers[name] = new OllamaProvider(instance);
   }
 
   const router = new ProviderRouter(providers, config);
   const memoryStore = new MemoryStore(QDRANT_URL, EMBEDDING_VECTOR_SIZE);
-  const embedding = { baseUrl: config.ollama?.baseUrl ?? "http://localhost:11434", model: EMBEDDING_MODEL };
+  const primaryOllama = config.ollamaInstances.ollama ?? Object.values(config.ollamaInstances)[0];
+  const embedding = { baseUrl: primaryOllama?.baseUrl ?? "http://localhost:11434", model: EMBEDDING_MODEL };
 
   startCurator({ router, store: memoryStore, embedding }, CURATOR_INTERVAL_MS);
 
