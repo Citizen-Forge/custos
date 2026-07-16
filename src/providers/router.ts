@@ -1,6 +1,6 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type TaskKind } from "../types.js";
 import type { Provider, ProviderResponse } from "./types.js";
-import type { GatewayConfig } from "../config.js";
+import type { GatewayConfig, ProviderEntry } from "../config.js";
 
 const DEFAULT_COOLDOWN_MS = 60_000;
 
@@ -28,11 +28,25 @@ export class ProviderRouter {
     private readonly config: GatewayConfig,
   ) {}
 
+  /** Looks up a fixed task's configured priority list. */
   async complete(task: TaskKind, request: AnthropicMessagesRequest, signal?: AbortSignal): Promise<ProviderResponse> {
-    const entries = [...this.config.tasks[task]].sort((a, b) => a.priority - b.priority);
+    return this.completeWithEntries(this.config.tasks[task], request, signal, `task "${task}"`);
+  }
+
+  /** Runs the same priority/failover logic against an explicit entry list
+   * instead of a fixed task -- used for complexity-tier routing, where the
+   * entry list is picked dynamically per-turn rather than being one of the
+   * fixed task kinds. */
+  async completeWithEntries(
+    entries: ProviderEntry[],
+    request: AnthropicMessagesRequest,
+    signal?: AbortSignal,
+    label = "entries",
+  ): Promise<ProviderResponse> {
+    const sorted = [...entries].sort((a, b) => a.priority - b.priority);
     let lastError: Error | undefined;
 
-    for (const entry of entries) {
+    for (const entry of sorted) {
       const provider = this.providers[entry.provider];
       if (!provider) continue;
       if (!this.cooldowns.isAvailable(provider.name)) continue;
@@ -49,6 +63,6 @@ export class ProviderRouter {
       }
     }
 
-    throw lastError ?? new ProviderUnavailableError(`no provider configured/available for task "${task}"`);
+    throw lastError ?? new ProviderUnavailableError(`no provider configured/available for ${label}`);
   }
 }

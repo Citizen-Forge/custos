@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { Readable } from "node:stream";
-import type { ProviderRouter } from "../providers/router.js";
+import type { Runtime } from "../runtime.js";
 import type { AnthropicMessagesRequest, AnthropicMessagesResponse } from "../types.js";
 import { ProviderUnavailableError } from "../types.js";
 import { createPreToolUseHandler, type PreToolUseHookInput } from "../permissions/hook-handler.js";
@@ -9,21 +9,20 @@ import { AskTracker } from "../permissions/ask-tracker.js";
 import { ingestExchange } from "../memory/ingest.js";
 import { searchMemory } from "../memory/search.js";
 import type { MemoryStore } from "../memory/store.js";
-import type { EmbeddingConfig } from "../memory/embeddings.js";
 import { createUserPromptSubmitHandler, type UserPromptSubmitInput } from "../memory/hook-handlers.js";
 import { reconstructFromAnthropicSSE } from "../memory/stream-reconstruct.js";
+import { classifyComplexity, isFreshUserTurn } from "../routing/complexity.js";
 
 export interface RouteDeps {
-  router: ProviderRouter;
+  runtime: Runtime;
   memoryStore: MemoryStore;
-  embedding: EmbeddingConfig;
 }
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const askTracker = new AskTracker();
-  const preToolUseHandler = createPreToolUseHandler(deps.router, askTracker);
+  const preToolUseHandler = createPreToolUseHandler(deps.runtime, askTracker);
   const postToolUseHandler = createPostToolUseHandler(askTracker);
-  const userPromptSubmitHandler = createUserPromptSubmitHandler(deps.memoryStore, deps.embedding);
+  const userPromptSubmitHandler = createUserPromptSubmitHandler(deps.memoryStore, deps.runtime);
 
   app.get("/health", async () => ({ ok: true }));
 
@@ -32,7 +31,14 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
     let providerResponse;
     try {
-      providerResponse = await deps.router.complete("general", body);
+      const routing = deps.runtime.config.complexityRouting;
+      if (routing.enabled && isFreshUserTurn(body)) {
+        const tier = await classifyComplexity(deps.runtime.router, body);
+        reply.header("x-custos-complexity-tier", tier);
+        providerResponse = await deps.runtime.router.completeWithEntries(routing.tiers[tier], body, undefined, `complexity tier "${tier}"`);
+      } else {
+        providerResponse = await deps.runtime.router.complete("general", body);
+      }
     } catch (err) {
       const message = err instanceof ProviderUnavailableError ? err.message : "internal gateway error";
       reply.code(err instanceof ProviderUnavailableError ? 503 : 500);
@@ -86,6 +92,6 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.post("/memory/search", async (req) => {
     const { query, limit } = req.body as { query: string; limit?: number };
-    return { results: await searchMemory(deps.memoryStore, deps.embedding, query, limit) };
+    return { results: await searchMemory(deps.memoryStore, deps.runtime.embedding, query, limit) };
   });
 }

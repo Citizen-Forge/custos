@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Custos Admin</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14161a;
+    --panel: #1c1f26;
+    --border: #2b2f38;
+    --text: #e4e6eb;
+    --muted: #8b93a1;
+    --accent: #5b9dd9;
+    --danger: #d9705b;
+    --ok: #5bd98f;
+    --warn: #d9c15b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 24px 28px 80px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  section.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+  section.panel h2 { margin: 0 0 4px; font-size: 15px; }
+  section.panel .desc { color: var(--muted); font-size: 12.5px; margin: 0 0 16px; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  label { color: var(--muted); font-size: 12.5px; min-width: 70px; }
+  input[type=text], input[type=password], select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 9px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  input[type=text], input[type=password] { flex: 1; min-width: 160px; }
+  button {
+    background: #262a33;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 13px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { background: #2f3440; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge.ok { background: rgba(91,217,143,0.15); color: var(--ok); }
+  .badge.warn { background: rgba(217,193,91,0.15); color: var(--warn); }
+  .badge.off { background: rgba(139,147,161,0.15); color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .priority-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+  .priority-item { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+  .priority-item .num { color: var(--muted); font-variant-numeric: tabular-nums; width: 18px; }
+  .priority-item select { flex: 1; }
+  .task-block { margin-bottom: 18px; }
+  .task-block h3 { font-size: 13px; margin: 0 0 8px; color: var(--text); }
+  pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    margin: 0 0 8px;
+  }
+  .copy-row { display: flex; justify-content: flex-end; margin-top: -4px; margin-bottom: 12px; }
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 13px;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.15s, transform 0.15s;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  hr.sep { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  .small { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Custos</h1>
+  <p>Providers, model routing, and Claude Code setup</p>
+</header>
+<main id="app">
+  <section class="panel"><p class="small">Loading…</p></section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (sel, el = document) => el.querySelector(sel);
+const el = (tag, attrs = {}, children = []) => {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "text") node.textContent = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) if (c) node.appendChild(c);
+  return node;
+};
+
+let state = null;
+
+function showToast(message, isError = false) {
+  const t = $("#toast");
+  t.textContent = message;
+  t.className = "toast show" + (isError ? " error" : "");
+  clearTimeout(showToast._timer);
+  showToast._timer = setTimeout(() => { t.className = "toast"; }, 3000);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { "content-type": "application/json", ...(opts.headers || {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+async function loadState() {
+  state = await api("/admin/api/state");
+  render();
+}
+
+async function reloadAfter(promise, successMessage) {
+  try {
+    await promise;
+    showToast(successMessage);
+    await loadState();
+  } catch (err) {
+    showToast(err.message, true);
+  }
+}
+
+function render() {
+  const app = $("#app");
+  app.innerHTML = "";
+  app.appendChild(renderAnthropicPanel());
+  app.appendChild(renderOllamaPanel());
+  app.appendChild(renderTasksPanel());
+  app.appendChild(renderComplexityPanel());
+  app.appendChild(renderSetupPanel());
+}
+
+// -- Anthropic -----------------------------------------------------------
+
+function renderAnthropicPanel() {
+  const { anthropic } = state;
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Anthropic" }));
+  section.appendChild(el("p", { class: "desc", text: "OAuth (your Claude subscription) or an API key. OAuth is tried first if connected." }));
+
+  const oauthRow = el("div", { class: "row" });
+  const badge = anthropic.oauth.connected
+    ? el("span", { class: "badge ok", text: `Connected via ${anthropic.oauth.source === "claude-code" ? "Claude Code's session" : "Custos login"}` })
+    : el("span", { class: "badge off", text: "Not connected" });
+  oauthRow.appendChild(el("label", { text: "OAuth" }));
+  oauthRow.appendChild(badge);
+  if (anthropic.oauth.connected) {
+    oauthRow.appendChild(el("button", { class: "danger", text: "Disconnect", onclick: () => reloadAfter(api("/admin/api/oauth/disconnect", { method: "POST" }), "OAuth disconnected") }));
+  } else {
+    oauthRow.appendChild(el("button", { class: "primary", text: "Connect via OAuth", onclick: startOAuthFlow }));
+  }
+  section.appendChild(oauthRow);
+  section.appendChild(el("div", { id: "oauth-flow-area" }));
+
+  section.appendChild(el("hr", { class: "sep" }));
+
+  const keyRow = el("div", { class: "row" });
+  keyRow.appendChild(el("label", { text: "API key" }));
+  const keyInput = el("input", { type: "password", placeholder: anthropic.apiKeyMasked || "sk-ant-..." });
+  keyRow.appendChild(keyInput);
+  keyRow.appendChild(el("button", { class: "primary", text: "Save", onclick: () => {
+    if (!keyInput.value) return showToast("Enter a key first", true);
+    reloadAfter(api("/admin/api/anthropic-key", { method: "PUT", body: { apiKey: keyInput.value } }), "API key saved");
+  }}));
+  if (anthropic.apiKeySource !== "none") {
+    keyRow.appendChild(el("button", { text: "Clear", onclick: () => reloadAfter(api("/admin/api/anthropic-key", { method: "PUT", body: { apiKey: null } }), "API key cleared") }));
+  }
+  section.appendChild(keyRow);
+  const sourceNote = anthropic.apiKeySource === "env" ? "using ANTHROPIC_API_KEY from the environment" :
+    anthropic.apiKeySource === "file" ? `configured (${anthropic.apiKeyMasked})` : "not configured -- used only as a fallback if OAuth is unavailable";
+  section.appendChild(el("p", { class: "small", text: sourceNote }));
+
+  return section;
+}
+
+async function startOAuthFlow() {
+  const mode = confirm("Use your Claude Pro/Max subscription? Cancel to create an API key instead (Console mode).") ? "max" : "console";
+  try {
+    const { flowId, authorizationUrl } = await api("/admin/api/oauth/start", { method: "POST", body: { mode } });
+    window.open(authorizationUrl, "_blank");
+    const area = $("#oauth-flow-area");
+    area.innerHTML = "";
+    const row = el("div", { class: "row" });
+    row.appendChild(el("label", { text: "Code" }));
+    const input = el("input", { type: "text", placeholder: "paste the code#state shown on the page you just opened" });
+    row.appendChild(input);
+    row.appendChild(el("button", { class: "primary", text: "Complete", onclick: () => reloadAfter(
+      api("/admin/api/oauth/complete", { method: "POST", body: { flowId, code: input.value } }),
+      "OAuth connected"
+    )}));
+    area.appendChild(row);
+  } catch (err) {
+    showToast(err.message, true);
+  }
+}
+
+// -- Ollama instances ------------------------------------------------------
+
+function renderOllamaPanel() {
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Ollama instances" }));
+  section.appendChild(el("p", { class: "desc", text: "Named model instances on your Ollama server(s) -- give a task a fast small model or a bigger capable one." }));
+
+  const table = el("table");
+  table.appendChild(el("tr", {}, [
+    el("th", { text: "Name" }), el("th", { text: "Base URL" }), el("th", { text: "Model" }), el("th", { text: "" }),
+  ]));
+  for (const [name, instance] of Object.entries(state.ollamaInstances)) {
+    table.appendChild(el("tr", {}, [
+      el("td", { text: name }),
+      el("td", { text: instance.baseUrl }),
+      el("td", { text: instance.model }),
+      el("td", {}, [
+        el("button", { text: "Delete", class: "danger", onclick: () => reloadAfter(
+          api(`/admin/api/ollama-instances/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
+        )}),
+      ]),
+    ]));
+  }
+  section.appendChild(table);
+
+  section.appendChild(el("hr", { class: "sep" }));
+  section.appendChild(el("p", { class: "small", text: "Add or update an instance" }));
+  const nameInput = el("input", { type: "text", placeholder: "name (e.g. ollama-fast)" });
+  const urlInput = el("input", { type: "text", placeholder: "http://host:11434" });
+  const modelInput = el("input", { type: "text", placeholder: "model name" });
+  const modelsHint = el("div", { class: "small" });
+
+  const row1 = el("div", { class: "row" }, [nameInput, urlInput]);
+  const row2 = el("div", { class: "row" }, [
+    modelInput,
+    el("button", { text: "List models", onclick: async () => {
+      if (!urlInput.value) return showToast("Enter a base URL first", true);
+      try {
+        const { models } = await api(`/admin/api/ollama-models?baseUrl=${encodeURIComponent(urlInput.value)}`);
+        modelsHint.textContent = models.length ? `Available: ${models.join(", ")}` : "No models found on that server";
+      } catch (err) {
+        modelsHint.textContent = err.message;
+      }
+    }}),
+    el("button", { class: "primary", text: "Save", onclick: () => {
+      if (!nameInput.value || !urlInput.value || !modelInput.value) return showToast("Fill in name, base URL, and model", true);
+      reloadAfter(api(`/admin/api/ollama-instances/${encodeURIComponent(nameInput.value)}`, { method: "PUT", body: { baseUrl: urlInput.value, model: modelInput.value } }), "Instance saved");
+    }}),
+  ]);
+  section.appendChild(row1);
+  section.appendChild(row2);
+  section.appendChild(modelsHint);
+
+  return section;
+}
+
+// -- Task priorities ---------------------------------------------------
+
+const TASK_LABELS = {
+  general: "General (everyday Claude Code traffic)",
+  permissionClassifier: "Permission classifier",
+  memoryCurator: "Memory curator",
+  complexityClassifier: "Complexity classifier",
+};
+
+function renderPriorityEditor(entries, providerNames, onSave) {
+  const wrap = el("div");
+  let current = entries.map((e) => ({ ...e }));
+
+  function renumber() {
+    current = current.map((e, i) => ({ ...e, priority: i + 1 }));
+  }
+
+  function redraw() {
+    list.innerHTML = "";
+    current.forEach((entry, i) => {
+      const select = el("select", { onchange: (ev) => { current[i].provider = ev.target.value; } });
+      for (const name of providerNames) {
+        const opt = el("option", { value: name, text: name });
+        if (name === entry.provider) opt.setAttribute("selected", "selected");
+        select.appendChild(opt);
+      }
+      const item = el("div", { class: "priority-item" }, [
+        el("span", { class: "num", text: String(i + 1) }),
+        select,
+        el("button", { text: "↑", onclick: () => { if (i > 0) { [current[i - 1], current[i]] = [current[i], current[i - 1]]; renumber(); redraw(); } } }),
+        el("button", { text: "↓", onclick: () => { if (i < current.length - 1) { [current[i + 1], current[i]] = [current[i], current[i + 1]]; renumber(); redraw(); } } }),
+        el("button", { class: "danger", text: "Remove", onclick: () => { current.splice(i, 1); renumber(); redraw(); } }),
+      ]);
+      list.appendChild(item);
+    });
+  }
+
+  const list = el("div", { class: "priority-list" });
+  const controls = el("div", { class: "row" }, [
+    el("button", { text: "+ Add fallback", onclick: () => { current.push({ provider: providerNames[0], priority: current.length + 1 }); redraw(); } }),
+    el("button", { class: "primary", text: "Save", onclick: () => onSave(current) }),
+  ]);
+  wrap.appendChild(list);
+  wrap.appendChild(controls);
+  redraw();
+  return wrap;
+}
+
+function renderTasksPanel() {
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Task routing" }));
+  section.appendChild(el("p", { class: "desc", text: "Priority order per task -- the gateway tries each in order and falls over to the next on a rate limit or outage." }));
+
+  for (const [taskKind, entries] of Object.entries(state.tasks)) {
+    const block = el("div", { class: "task-block" });
+    block.appendChild(el("h3", { text: TASK_LABELS[taskKind] || taskKind }));
+    block.appendChild(renderPriorityEditor(entries, state.providerNames, (updated) =>
+      reloadAfter(api(`/admin/api/tasks/${taskKind}`, { method: "PUT", body: { entries: updated } }), "Saved")
+    ));
+    section.appendChild(block);
+  }
+
+  return section;
+}
+
+// -- Complexity routing --------------------------------------------------
+
+function renderComplexityPanel() {
+  const { complexityRouting } = state;
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Per-turn complexity routing" }));
+  section.appendChild(el("p", { class: "desc", text: "Classifies each fresh human message (not tool-loop hops) as low/medium/high complexity and routes it to a different tier of models. Adds one extra classifier call before every human turn." }));
+
+  const toggleRow = el("div", { class: "row" });
+  const badge = complexityRouting.enabled ? el("span", { class: "badge ok", text: "Enabled" }) : el("span", { class: "badge off", text: "Disabled" });
+  toggleRow.appendChild(badge);
+  toggleRow.appendChild(el("button", { text: complexityRouting.enabled ? "Disable" : "Enable", onclick: () =>
+    reloadAfter(api("/admin/api/complexity-routing", { method: "PUT", body: { enabled: !complexityRouting.enabled, tiers: complexityRouting.tiers } }), "Saved")
+  }));
+  section.appendChild(toggleRow);
+
+  for (const [tier, entries] of Object.entries(complexityRouting.tiers)) {
+    const block = el("div", { class: "task-block" });
+    block.appendChild(el("h3", { text: tier.charAt(0).toUpperCase() + tier.slice(1) + " complexity" }));
+    block.appendChild(renderPriorityEditor(entries, state.providerNames, (updated) => {
+      const nextTiers = { ...complexityRouting.tiers, [tier]: updated };
+      reloadAfter(api("/admin/api/complexity-routing", { method: "PUT", body: { enabled: complexityRouting.enabled, tiers: nextTiers } }), "Saved");
+    }));
+    section.appendChild(block);
+  }
+
+  return section;
+}
+
+// -- Setup instructions --------------------------------------------------
+
+function copyButton(text) {
+  return el("div", { class: "copy-row" }, [
+    el("button", { text: "Copy", onclick: () => { navigator.clipboard.writeText(text); showToast("Copied"); } }),
+  ]);
+}
+
+function renderSetupPanel() {
+  const { setup } = state;
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Claude Code setup" }));
+  section.appendChild(el("p", { class: "desc", text: "Add both of these to point Claude Code at Custos." }));
+
+  section.appendChild(el("p", { class: "small", text: "1. Environment variable" }));
+  section.appendChild(el("pre", { text: setup.envExport }));
+  section.appendChild(copyButton(setup.envExport));
+
+  section.appendChild(el("p", { class: "small", text: "2. Add to ~/.claude/settings.json" }));
+  section.appendChild(el("pre", { text: setup.hooksJson }));
+  section.appendChild(copyButton(setup.hooksJson));
+  section.appendChild(el("p", { class: "small", text: "If you already have PreToolUse hooks registered, merge the array entries rather than replacing the whole block." }));
+
+  return section;
+}
+
+loadState().catch((err) => {
+  $("#app").innerHTML = "";
+  $("#app").appendChild(el("section", { class: "panel" }, [el("p", { text: "Failed to load: " + err.message })]));
+});
+</script>
+</body>
+</html>

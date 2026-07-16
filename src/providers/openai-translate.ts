@@ -19,7 +19,7 @@ interface OpenAIRequest {
   tools?: { type: "function"; function: { name: string; description?: string; parameters: unknown } }[];
 }
 
-function blockText(content: string | AnthropicContentBlock[]): string {
+export function blockText(content: string | AnthropicContentBlock[]): string {
   if (typeof content === "string") return content;
   return content
     .filter((b) => b.type === "text")

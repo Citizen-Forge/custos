@@ -1,4 +1,4 @@
-import type { ProviderRouter } from "../providers/router.js";
+import type { Runtime } from "../runtime.js";
 import { isAlwaysSafeTool, isSafeBashCommand } from "./safety.js";
 import { classifyAction } from "./classifier.js";
 import type { AskTracker } from "./ask-tracker.js";
@@ -28,7 +28,7 @@ export interface PreToolUseHookOutput {
 // re-classified live, because for commands like `rm`/`chmod`/`curl` safety
 // depends on arguments, not the verb, and caching by verb would let one
 // benign invocation silently whitelist a catastrophic one later.
-export function createPreToolUseHandler(router: ProviderRouter, askTracker: AskTracker) {
+export function createPreToolUseHandler(runtime: Runtime, askTracker: AskTracker) {
   return async function handle(input: PreToolUseHookInput): Promise<PreToolUseHookOutput> {
     const respond = (permissionDecision: "allow" | "deny" | "ask", permissionDecisionReason: string): PreToolUseHookOutput => ({
       hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision, permissionDecisionReason },
@@ -42,7 +42,7 @@ export function createPreToolUseHandler(router: ProviderRouter, askTracker: AskT
       return respond("allow", "safe read-only verb, no shell composition");
     }
 
-    const { decision, reason } = await classifyAction(router, input.tool_name, input.tool_input);
+    const { decision, reason } = await classifyAction(runtime.router, input.tool_name, input.tool_input);
     if (decision === "ask") {
       askTracker.recordAsk(input.session_id, input.tool_name, input.tool_input, reason);
     }

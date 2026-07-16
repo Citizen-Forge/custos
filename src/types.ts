@@ -38,7 +38,10 @@ export interface AnthropicErrorBody {
 }
 
 /** Task categories the router assigns provider priority lists to. */
-export type TaskKind = "general" | "permissionClassifier" | "memoryCurator";
+export type TaskKind = "general" | "permissionClassifier" | "memoryCurator" | "complexityClassifier";
+
+/** Complexity tiers for per-turn model routing (see routing/complexity.ts). */
+export type ComplexityTier = "low" | "medium" | "high";
 
 /** Raised by a provider when the request should fail over to the next priority. */
 export class ProviderUnavailableError extends Error {

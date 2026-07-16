@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +26,13 @@ export async function saveTokens(tokens: TokenSet): Promise<void> {
   await writeFile(CREDENTIALS_PATH, JSON.stringify(tokens, null, 2), "utf8");
 }
 
+/** Removes Custos's own stored tokens. Doesn't affect Claude Code's own
+ * credentials file -- if Custos has no tokens of its own afterward, the
+ * next request just re-imports from Claude Code again if that's present. */
+export async function clearTokens(): Promise<void> {
+  await rm(CREDENTIALS_PATH, { force: true });
+}
+
 /**
  * One-time convenience: pull the token Claude Code itself is already logged
  * in with, so `npm run login` isn't required if the CLI on this machine is
@@ -47,6 +54,24 @@ async function importFromClaudeCode(): Promise<TokenSet | null> {
     refreshToken: oauth.refreshToken,
     expiresAt: oauth.expiresAt,
   };
+}
+
+export interface OAuthStatus {
+  connected: boolean;
+  source?: "custos" | "claude-code";
+  expiresAt?: number;
+}
+
+/** Reports whether an OAuth session is available and where it came from,
+ * without ever exposing the token itself. */
+export async function getOAuthStatus(): Promise<OAuthStatus> {
+  const stored = await loadStoredTokens();
+  if (stored) return { connected: true, source: "custos", expiresAt: stored.expiresAt };
+
+  const imported = await importFromClaudeCode();
+  if (imported) return { connected: true, source: "claude-code", expiresAt: imported.expiresAt };
+
+  return { connected: false };
 }
 
 /** Returns a valid (non-expired) access token, refreshing and persisting if needed. */

@@ -97,8 +97,11 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
   return factsStored;
 }
 
-export function startCurator(deps: CuratorDeps, intervalMs: number): NodeJS.Timeout {
+/** Takes a deps thunk rather than a fixed object so a live config reload
+ * (e.g. from the admin UI) is picked up on the next tick instead of
+ * requiring a restart. */
+export function startCurator(getDeps: () => CuratorDeps, intervalMs: number): NodeJS.Timeout {
   return setInterval(() => {
-    runCuratorPass(deps).catch((err) => console.error("curator pass failed:", err));
+    runCuratorPass(getDeps()).catch((err) => console.error("curator pass failed:", err));
   }, intervalMs);
 }

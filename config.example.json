@@ -21,6 +21,27 @@
     "memoryCurator": [
       { "provider": "ollama", "priority": 1 },
       { "provider": "anthropic", "priority": 2 }
+    ],
+    "complexityClassifier": [
+      { "provider": "ollama-fast", "priority": 1 },
+      { "provider": "anthropic", "priority": 2 }
     ]
+  },
+  "complexityRouting": {
+    "enabled": false,
+    "tiers": {
+      "low": [
+        { "provider": "ollama-fast", "priority": 1 },
+        { "provider": "anthropic", "priority": 2 }
+      ],
+      "medium": [
+        { "provider": "ollama", "priority": 1 },
+        { "provider": "anthropic", "priority": 2 }
+      ],
+      "high": [
+        { "provider": "anthropic", "priority": 1 },
+        { "provider": "ollama", "priority": 2 }
+      ]
+    }
   }
 }

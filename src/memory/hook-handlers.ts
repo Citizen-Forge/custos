@@ -1,5 +1,5 @@
 import type { MemoryStore } from "./store.js";
-import type { EmbeddingConfig } from "./embeddings.js";
+import type { Runtime } from "../runtime.js";
 import { searchMemory } from "./search.js";
 
 function formatContext(results: { topic: string; text: string; score: number }[]): string {
@@ -18,9 +18,9 @@ export interface UserPromptSubmitInput {
 // fires on every prompt, including a session's first one, so a separate
 // SessionStart hook would be redundant (it fires before any prompt exists,
 // so it has nothing to search against yet).
-export function createUserPromptSubmitHandler(store: MemoryStore, embedding: EmbeddingConfig) {
+export function createUserPromptSubmitHandler(store: MemoryStore, runtime: Runtime) {
   return async function handle(input: UserPromptSubmitInput) {
-    const results = await searchMemory(store, embedding, input.prompt, 6);
+    const results = await searchMemory(store, runtime.embedding, input.prompt, 6);
     return {
       hookSpecificOutput: {
         hookEventName: "UserPromptSubmit" as const,
