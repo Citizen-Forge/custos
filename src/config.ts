@@ -1,14 +1,19 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { TaskKind, ComplexityTier } from "./types.js";
+import type { OpenAICompatibleInstanceConfig } from "./providers/openai-compatible.js";
 
 export interface ProviderEntry {
-  /** References either "anthropic" or a key in `ollamaInstances`. */
+  /** References either "anthropic" or a key in `openaiCompatibleInstances`. */
   provider: string;
   priority: number;
 }
 
-export interface OllamaInstanceConfig {
+export interface EmbeddingProviderConfig {
+  /** Ollama's *native* API root (no "/v1" suffix) -- embeddings use
+   * Ollama's own /api/embeddings, not the OpenAI-compat chat path, so
+   * this is intentionally separate from any openaiCompatibleInstances
+   * entry even when it happens to point at the same server. */
   baseUrl: string;
   model: string;
 }
@@ -23,22 +28,26 @@ export interface ComplexityRoutingConfig {
 
 export interface GatewayConfig {
   anthropic?: { apiKey?: string };
-  /** Named Ollama model instances so different tasks can use different
-   * models (e.g. a small fast one for permission classification, a bigger
-   * one for general use) while sharing the same underlying server. */
-  ollamaInstances: Record<string, OllamaInstanceConfig>;
+  /** Named instances of any OpenAI-chat-completions-compatible provider --
+   * Ollama, OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter, etc.
+   * Named (not typed by brand) so different tasks can use different
+   * models/providers, e.g. a small fast one for permission classification
+   * and a bigger one for general use. */
+  openaiCompatibleInstances: Record<string, OpenAICompatibleInstanceConfig>;
+  embeddingProvider: EmbeddingProviderConfig;
   tasks: Record<TaskKind, ProviderEntry[]>;
   complexityRouting: ComplexityRoutingConfig;
 }
 
-const OLLAMA_HOST = "http://192.168.250.219:11434";
+const OLLAMA_HOST = "http://localhost:11434";
 const CONFIG_PATH = process.env.GATEWAY_CONFIG_PATH ?? "data/config.json";
 
 const DEFAULT_CONFIG: GatewayConfig = {
-  ollamaInstances: {
-    ollama: { baseUrl: OLLAMA_HOST, model: "qwen2.5:14b-instruct-q4_K_M" },
-    "ollama-fast": { baseUrl: OLLAMA_HOST, model: "qwen2.5:3b-instruct" },
+  openaiCompatibleInstances: {
+    ollama: { baseUrl: `${OLLAMA_HOST}/v1`, model: "qwen2.5:14b-instruct-q4_K_M" },
+    "ollama-fast": { baseUrl: `${OLLAMA_HOST}/v1`, model: "qwen2.5:3b-instruct" },
   },
+  embeddingProvider: { baseUrl: OLLAMA_HOST, model: "nomic-embed-text" },
   tasks: {
     general: [
       { provider: "anthropic", priority: 1 },
@@ -101,7 +110,8 @@ export async function loadConfig(): Promise<GatewayConfig> {
     ...DEFAULT_CONFIG,
     ...fileConfig,
     anthropic: { ...DEFAULT_CONFIG.anthropic, ...fileConfig.anthropic },
-    ollamaInstances: { ...DEFAULT_CONFIG.ollamaInstances, ...fileConfig.ollamaInstances },
+    openaiCompatibleInstances: { ...DEFAULT_CONFIG.openaiCompatibleInstances, ...fileConfig.openaiCompatibleInstances },
+    embeddingProvider: { ...DEFAULT_CONFIG.embeddingProvider, ...fileConfig.embeddingProvider },
     tasks: { ...DEFAULT_CONFIG.tasks, ...fileConfig.tasks },
     complexityRouting: {
       ...DEFAULT_CONFIG.complexityRouting,

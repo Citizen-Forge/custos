@@ -2,34 +2,52 @@ import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../type
 import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason } from "./openai-translate.js";
 import type { Provider, ProviderResponse } from "./types.js";
 
-export interface OllamaProviderConfig {
+export interface OpenAICompatibleInstanceConfig {
+  /** Full path prefix up to (not including) "/chat/completions" -- e.g.
+   * "http://localhost:11434/v1", "https://api.openai.com/v1",
+   * "https://generativelanguage.googleapis.com/v1beta/openai". Matches how
+   * OpenAI SDKs configure `base_url`, which several of these providers
+   * (Gemini in particular) rely on to place the compat layer at a
+   * non-"/v1" path. */
   baseUrl: string;
   model: string;
+  /** Omit for servers that don't need auth (a local Ollama). */
+  apiKey?: string;
 }
 
-export class OllamaProvider implements Provider {
-  readonly name = "ollama";
-
-  constructor(private readonly config: OllamaProviderConfig) {}
+/**
+ * Any provider speaking the OpenAI chat/completions wire format --
+ * OpenAI itself, Ollama, DeepSeek, Gemini (via its OpenAI-compat layer),
+ * Groq, Mistral, xAI, OpenRouter, etc. `name` is the config-file instance
+ * key (e.g. "openai", "ollama-fast"), used for cooldown tracking and
+ * error messages -- it does not need to match the actual provider brand.
+ */
+export class OpenAICompatibleProvider implements Provider {
+  constructor(
+    readonly name: string,
+    private readonly config: OpenAICompatibleInstanceConfig,
+  ) {}
 
   async complete(request: AnthropicMessagesRequest, signal?: AbortSignal): Promise<ProviderResponse> {
     const openaiRequest = toOpenAIRequest(request, this.config.model);
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) headers.authorization = `Bearer ${this.config.apiKey}`;
 
     let res: Response;
     try {
-      res = await fetch(`${this.config.baseUrl}/v1/chat/completions`, {
+      res = await fetch(`${this.config.baseUrl}/chat/completions`, {
         method: "POST",
         signal,
-        headers: { "content-type": "application/json" },
+        headers,
         body: JSON.stringify(openaiRequest),
       });
     } catch (err) {
-      throw new ProviderUnavailableError(`ollama: unreachable at ${this.config.baseUrl} (${(err as Error).message})`);
+      throw new ProviderUnavailableError(`${this.name}: unreachable at ${this.config.baseUrl} (${(err as Error).message})`);
     }
 
     if (!res.ok) {
       if (res.status === 429 || res.status >= 500) {
-        throw new ProviderUnavailableError(`ollama: HTTP ${res.status}`);
+        throw new ProviderUnavailableError(`${this.name}: HTTP ${res.status}`);
       }
       const text = await res.text().catch(() => "");
       return { status: res.status, headers: res.headers, body: new Blob([text]).stream() };
@@ -48,9 +66,10 @@ export class OllamaProvider implements Provider {
 
 /**
  * Best-effort OpenAI SSE -> Anthropic SSE translation for a single text
- * and/or single tool-call turn. Ollama rarely emits parallel tool calls in
- * one turn, so this doesn't attempt to multiplex multiple concurrent
- * content blocks.
+ * and/or single tool-call turn. Most of these providers rarely emit
+ * parallel tool calls in one turn, so this doesn't attempt to multiplex
+ * multiple concurrent content blocks. Only verified live against Ollama;
+ * other providers' streaming quirks (if any) aren't individually checked.
  */
 function translateStream(openaiRes: Response, model: string): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -84,8 +103,7 @@ function translateStream(openaiRes: Response, model: string): ReadableStream<Uin
       const { done, value } = await reader.read();
       if (done) {
         // The upstream connection closed without an explicit finish_reason
-        // (shouldn't normally happen -- Ollama always sends one -- but
-        // don't leave the client hanging if it does).
+        // (shouldn't normally happen, but don't leave the client hanging).
         finish(controller, "stop");
         return;
       }

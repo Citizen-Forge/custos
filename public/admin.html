@@ -188,7 +188,7 @@ function render() {
   const app = $("#app");
   app.innerHTML = "";
   app.appendChild(renderAnthropicPanel());
-  app.appendChild(renderOllamaPanel());
+  app.appendChild(renderInstancesPanel());
   app.appendChild(renderTasksPanel());
   app.appendChild(renderComplexityPanel());
   app.appendChild(renderSetupPanel());
@@ -258,25 +258,26 @@ async function startOAuthFlow() {
   }
 }
 
-// -- Ollama instances ------------------------------------------------------
+// -- Model provider instances ---------------------------------------------
 
-function renderOllamaPanel() {
+function renderInstancesPanel() {
   const section = el("section", { class: "panel" });
-  section.appendChild(el("h2", { text: "Ollama instances" }));
-  section.appendChild(el("p", { class: "desc", text: "Named model instances on your Ollama server(s) -- give a task a fast small model or a bigger capable one." }));
+  section.appendChild(el("h2", { text: "Model providers" }));
+  section.appendChild(el("p", { class: "desc", text: "Any provider speaking the OpenAI chat-completions format: Ollama, OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter, or a custom endpoint. Give a task a fast cheap model or a bigger capable one." }));
 
   const table = el("table");
   table.appendChild(el("tr", {}, [
-    el("th", { text: "Name" }), el("th", { text: "Base URL" }), el("th", { text: "Model" }), el("th", { text: "" }),
+    el("th", { text: "Name" }), el("th", { text: "Base URL" }), el("th", { text: "Model" }), el("th", { text: "API key" }), el("th", { text: "" }),
   ]));
-  for (const [name, instance] of Object.entries(state.ollamaInstances)) {
+  for (const [name, instance] of Object.entries(state.instances)) {
     table.appendChild(el("tr", {}, [
       el("td", { text: name }),
       el("td", { text: instance.baseUrl }),
       el("td", { text: instance.model }),
+      el("td", { text: instance.apiKeyConfigured ? instance.apiKeyMasked : "—" }),
       el("td", {}, [
         el("button", { text: "Delete", class: "danger", onclick: () => reloadAfter(
-          api(`/admin/api/ollama-instances/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
+          api(`/admin/api/instances/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
         )}),
       ]),
     ]));
@@ -285,31 +286,56 @@ function renderOllamaPanel() {
 
   section.appendChild(el("hr", { class: "sep" }));
   section.appendChild(el("p", { class: "small", text: "Add or update an instance" }));
+
   const nameInput = el("input", { type: "text", placeholder: "name (e.g. ollama-fast)" });
-  const urlInput = el("input", { type: "text", placeholder: "http://host:11434" });
+  const urlInput = el("input", { type: "text", placeholder: "base URL" });
   const modelInput = el("input", { type: "text", placeholder: "model name" });
+  const keyInput = el("input", { type: "password", placeholder: "API key (leave blank if none)" });
   const modelsHint = el("div", { class: "small" });
 
+  const presetSelect = el("select", { onchange: (ev) => {
+    const preset = state.providerPresets.find((p) => p.id === ev.target.value);
+    if (preset && preset.id !== "custom") urlInput.value = preset.baseUrl;
+    if (preset && !nameInput.value) nameInput.value = preset.id;
+  }});
+  for (const preset of state.providerPresets) {
+    presetSelect.appendChild(el("option", { value: preset.id, text: preset.label }));
+  }
+
+  const row0 = el("div", { class: "row" }, [el("label", { text: "Preset" }), presetSelect]);
   const row1 = el("div", { class: "row" }, [nameInput, urlInput]);
-  const row2 = el("div", { class: "row" }, [
-    modelInput,
+  const row2 = el("div", { class: "row" }, [modelInput, keyInput]);
+  const row3 = el("div", { class: "row" }, [
     el("button", { text: "List models", onclick: async () => {
       if (!urlInput.value) return showToast("Enter a base URL first", true);
       try {
-        const { models } = await api(`/admin/api/ollama-models?baseUrl=${encodeURIComponent(urlInput.value)}`);
-        modelsHint.textContent = models.length ? `Available: ${models.join(", ")}` : "No models found on that server";
+        const { models } = await api("/admin/api/instances/probe-models", { method: "POST", body: { baseUrl: urlInput.value, apiKey: keyInput.value || undefined } });
+        modelsHint.textContent = models.length ? `Available: ${models.join(", ")}` : "No models found";
       } catch (err) {
         modelsHint.textContent = err.message;
       }
     }}),
     el("button", { class: "primary", text: "Save", onclick: () => {
       if (!nameInput.value || !urlInput.value || !modelInput.value) return showToast("Fill in name, base URL, and model", true);
-      reloadAfter(api(`/admin/api/ollama-instances/${encodeURIComponent(nameInput.value)}`, { method: "PUT", body: { baseUrl: urlInput.value, model: modelInput.value } }), "Instance saved");
+      reloadAfter(api(`/admin/api/instances/${encodeURIComponent(nameInput.value)}`, { method: "PUT", body: { baseUrl: urlInput.value, model: modelInput.value, apiKey: keyInput.value || undefined } }), "Instance saved");
     }}),
   ]);
+  section.appendChild(row0);
   section.appendChild(row1);
   section.appendChild(row2);
+  section.appendChild(row3);
   section.appendChild(modelsHint);
+
+  section.appendChild(el("hr", { class: "sep" }));
+  section.appendChild(el("p", { class: "small", text: `Embeddings (used for memory search) come from Ollama's native API, currently ${state.embeddingProvider.baseUrl} / ${state.embeddingProvider.model}` }));
+  const embUrl = el("input", { type: "text", placeholder: "http://host:11434 (no /v1)", value: state.embeddingProvider.baseUrl });
+  const embModel = el("input", { type: "text", placeholder: "embedding model", value: state.embeddingProvider.model });
+  section.appendChild(el("div", { class: "row" }, [
+    embUrl, embModel,
+    el("button", { class: "primary", text: "Save", onclick: () => reloadAfter(
+      api("/admin/api/embedding-provider", { method: "PUT", body: { baseUrl: embUrl.value, model: embModel.value } }), "Embedding provider saved"
+    )}),
+  ]));
 
   return section;
 }

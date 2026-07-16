@@ -11,6 +11,24 @@ import { OAuthFlowTracker } from "../auth/oauth-flow-tracker.js";
 const TASK_KINDS: TaskKind[] = ["general", "permissionClassifier", "memoryCurator", "complexityClassifier"];
 const COMPLEXITY_TIERS: ComplexityTier[] = ["low", "medium", "high"];
 
+// Presets for the admin UI's "add instance" form. All of these speak the
+// OpenAI chat/completions wire format either natively or via a documented
+// compatibility layer -- baseUrl already includes whatever version/path
+// prefix that provider needs (matches how OpenAI client SDKs configure
+// `base_url`). Tool-calling fidelity varies by provider and hasn't been
+// individually verified against each one beyond Ollama.
+const PROVIDER_PRESETS = [
+  { id: "ollama", label: "Ollama (local)", baseUrl: "http://localhost:11434/v1", needsApiKey: false },
+  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", needsApiKey: true },
+  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", needsApiKey: true },
+  { id: "gemini", label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", needsApiKey: true },
+  { id: "groq", label: "Groq", baseUrl: "https://api.groq.com/openai/v1", needsApiKey: true },
+  { id: "mistral", label: "Mistral", baseUrl: "https://api.mistral.ai/v1", needsApiKey: true },
+  { id: "xai", label: "xAI (Grok)", baseUrl: "https://api.x.ai/v1", needsApiKey: true },
+  { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsApiKey: true },
+  { id: "custom", label: "Custom", baseUrl: "", needsApiKey: true },
+];
+
 function maskApiKey(key: string): string {
   if (key.length <= 10) return "*".repeat(key.length);
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
@@ -29,7 +47,7 @@ function buildSetupInstructions() {
   return { baseUrl, envExport, hooksJson: JSON.stringify(settingsSnippet, null, 2) };
 }
 
-function findOllamaInstanceUsages(config: GatewayConfig, name: string): string[] {
+function findInstanceUsages(config: GatewayConfig, name: string): string[] {
   const usages: string[] = [];
   for (const [taskKind, entries] of Object.entries(config.tasks)) {
     if (entries.some((e) => e.provider === name)) usages.push(`task:${taskKind}`);
@@ -45,6 +63,15 @@ async function updateConfig(runtime: Runtime, mutate: (cfg: GatewayConfig) => Ga
   await saveConfig(next);
   await runtime.reload();
   return runtime.config;
+}
+
+function maskInstances(instances: GatewayConfig["openaiCompatibleInstances"]) {
+  return Object.fromEntries(
+    Object.entries(instances).map(([name, instance]) => [
+      name,
+      { baseUrl: instance.baseUrl, model: instance.model, apiKeyConfigured: Boolean(instance.apiKey), apiKeyMasked: instance.apiKey ? maskApiKey(instance.apiKey) : null },
+    ]),
+  );
 }
 
 export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): void {
@@ -67,8 +94,10 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
         apiKeyMasked: config.anthropic?.apiKey ? maskApiKey(config.anthropic.apiKey) : null,
         oauth,
       },
-      ollamaInstances: config.ollamaInstances,
-      providerNames: ["anthropic", ...Object.keys(config.ollamaInstances)],
+      instances: maskInstances(config.openaiCompatibleInstances),
+      embeddingProvider: config.embeddingProvider,
+      providerNames: ["anthropic", ...Object.keys(config.openaiCompatibleInstances)],
+      providerPresets: PROVIDER_PRESETS,
       tasks: config.tasks,
       complexityRouting: config.complexityRouting,
       setup: buildSetupInstructions(),
@@ -119,54 +148,69 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
     return { ok: true, oauth: await getOAuthStatus() };
   });
 
-  // -- Ollama instances --------------------------------------------------
+  // -- Model provider instances --------------------------------------------
 
-  app.put("/admin/api/ollama-instances/:name", async (req, reply) => {
+  app.put("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, model } = req.body as { baseUrl: string; model: string };
+    const { baseUrl, model, apiKey } = req.body as { baseUrl: string; model: string; apiKey?: string | null };
     if (!baseUrl || !model) {
       reply.code(400);
       return { error: "baseUrl and model are required" };
     }
     await updateConfig(runtime, (cfg) => ({
       ...cfg,
-      ollamaInstances: { ...cfg.ollamaInstances, [name]: { baseUrl, model } },
+      openaiCompatibleInstances: { ...cfg.openaiCompatibleInstances, [name]: { baseUrl, model, apiKey: apiKey || undefined } },
     }));
     return { ok: true };
   });
 
-  app.delete("/admin/api/ollama-instances/:name", async (req, reply) => {
+  app.delete("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const usages = findOllamaInstanceUsages(runtime.config, name);
+    const usages = findInstanceUsages(runtime.config, name);
     if (usages.length > 0) {
       reply.code(409);
       return { error: `"${name}" is still referenced by: ${usages.join(", ")} -- remove those references first` };
     }
     await updateConfig(runtime, (cfg) => {
-      const { [name]: _removed, ...rest } = cfg.ollamaInstances;
-      return { ...cfg, ollamaInstances: rest };
+      const { [name]: _removed, ...rest } = cfg.openaiCompatibleInstances;
+      return { ...cfg, openaiCompatibleInstances: rest };
     });
     return { ok: true };
   });
 
-  app.get("/admin/api/ollama-models", async (req, reply) => {
-    const { baseUrl } = req.query as { baseUrl?: string };
+  // POST (not GET+querystring) because this may carry a real third-party
+  // API key while probing an as-yet-unsaved instance -- keeping it out of
+  // URLs avoids it landing in access logs.
+  app.post("/admin/api/instances/probe-models", async (req, reply) => {
+    const { baseUrl, apiKey } = req.body as { baseUrl?: string; apiKey?: string };
     if (!baseUrl) {
       reply.code(400);
-      return { error: "baseUrl query param is required" };
+      return { error: "baseUrl is required" };
     }
     try {
-      const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(10_000) });
+      const headers: Record<string, string> = {};
+      if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+      const res = await fetch(`${baseUrl}/models`, { headers, signal: AbortSignal.timeout(10_000) });
       if (!res.ok) {
         reply.code(502);
-        return { error: `Ollama returned HTTP ${res.status}` };
+        return { error: `HTTP ${res.status} from ${baseUrl}/models` };
       }
-      const json = (await res.json()) as { models: { name: string }[] };
-      return { models: json.models.map((m) => m.name) };
+      const json = (await res.json()) as { data?: { id: string }[] };
+      return { models: (json.data ?? []).map((m) => m.id) };
     } catch (err) {
       reply.code(502);
       return { error: `couldn't reach ${baseUrl}: ${(err as Error).message}` };
     }
+  });
+
+  app.put("/admin/api/embedding-provider", async (req, reply) => {
+    const { baseUrl, model } = req.body as { baseUrl: string; model: string };
+    if (!baseUrl || !model) {
+      reply.code(400);
+      return { error: "baseUrl and model are required" };
+    }
+    await updateConfig(runtime, (cfg) => ({ ...cfg, embeddingProvider: { baseUrl, model } }));
+    return { ok: true };
   });
 
   // -- Task priorities & complexity routing -------------------------------

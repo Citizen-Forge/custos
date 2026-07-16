@@ -1,13 +1,22 @@
 {
-  "ollamaInstances": {
+  "openaiCompatibleInstances": {
     "ollama": {
-      "baseUrl": "http://192.168.250.219:11434",
+      "baseUrl": "http://localhost:11434/v1",
       "model": "qwen2.5:14b-instruct-q4_K_M"
     },
     "ollama-fast": {
-      "baseUrl": "http://192.168.250.219:11434",
+      "baseUrl": "http://localhost:11434/v1",
       "model": "qwen2.5:3b-instruct"
+    },
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-4.1-mini",
+      "apiKey": "sk-..."
     }
+  },
+  "embeddingProvider": {
+    "baseUrl": "http://localhost:11434",
+    "model": "nomic-embed-text"
   },
   "tasks": {
     "general": [

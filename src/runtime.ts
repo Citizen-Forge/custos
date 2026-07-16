@@ -1,11 +1,9 @@
 import { AnthropicProvider } from "./providers/anthropic.js";
-import { OllamaProvider } from "./providers/ollama.js";
+import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { ProviderRouter } from "./providers/router.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import type { Provider } from "./providers/types.js";
 import type { EmbeddingConfig } from "./memory/embeddings.js";
-
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL ?? "nomic-embed-text";
 
 /**
  * Holds the currently-active config-derived objects (providers, router,
@@ -25,14 +23,12 @@ export class Runtime {
     const providers: Record<string, Provider> = {
       anthropic: new AnthropicProvider({ apiKey: config.anthropic?.apiKey }),
     };
-    for (const [name, instance] of Object.entries(config.ollamaInstances)) {
-      providers[name] = new OllamaProvider(instance);
+    for (const [name, instance] of Object.entries(config.openaiCompatibleInstances)) {
+      providers[name] = new OpenAICompatibleProvider(name, instance);
     }
-
-    const primaryOllama = config.ollamaInstances.ollama ?? Object.values(config.ollamaInstances)[0];
 
     this.config = config;
     this.router = new ProviderRouter(providers, config);
-    this.embedding = { baseUrl: primaryOllama?.baseUrl ?? "http://localhost:11434", model: EMBEDDING_MODEL };
+    this.embedding = config.embeddingProvider;
   }
 }
