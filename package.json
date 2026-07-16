@@ -1,6 +1,6 @@
 {
   "name": "custos",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Anthropic-format LLM proxy with permission gating and semantic memory for Claude Code",
   "private": true,
   "type": "module",
