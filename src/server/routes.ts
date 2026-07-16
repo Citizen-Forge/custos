@@ -4,11 +4,14 @@ import type { ProviderRouter } from "../providers/router.js";
 import type { AnthropicMessagesRequest, AnthropicMessagesResponse } from "../types.js";
 import { ProviderUnavailableError } from "../types.js";
 import { createPreToolUseHandler, type PreToolUseHookInput } from "../permissions/hook-handler.js";
+import { createPostToolUseHandler, type PostToolUseHookInput } from "../permissions/post-tool-use-handler.js";
+import { AskTracker } from "../permissions/ask-tracker.js";
 import { ingestExchange } from "../memory/ingest.js";
 import { searchMemory } from "../memory/search.js";
 import type { MemoryStore } from "../memory/store.js";
 import type { EmbeddingConfig } from "../memory/embeddings.js";
 import { createUserPromptSubmitHandler, type UserPromptSubmitInput } from "../memory/hook-handlers.js";
+import { reconstructFromAnthropicSSE } from "../memory/stream-reconstruct.js";
 
 export interface RouteDeps {
   router: ProviderRouter;
@@ -17,7 +20,9 @@ export interface RouteDeps {
 }
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
-  const preToolUseHandler = createPreToolUseHandler(deps.router);
+  const askTracker = new AskTracker();
+  const preToolUseHandler = createPreToolUseHandler(deps.router, askTracker);
+  const postToolUseHandler = createPostToolUseHandler(askTracker);
   const userPromptSubmitHandler = createUserPromptSubmitHandler(deps.memoryStore, deps.embedding);
 
   app.get("/health", async () => ({ ok: true }));
@@ -44,8 +49,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     }
 
     if (body.stream) {
-      // Streamed responses are relayed as-is; ingestion of streamed
-      // exchanges into memory is not implemented yet (see README).
+      if (providerResponse.status === 200) {
+        const [clientStream, ingestStream] = providerResponse.body.tee();
+        reconstructFromAnthropicSSE(ingestStream, body.model)
+          .then((reconstructed) => ingestExchange(body, reconstructed))
+          .catch((err) => req.log.error({ err }, "failed to ingest streamed exchange"));
+        return reply.send(Readable.fromWeb(clientStream as never));
+      }
       return reply.send(Readable.fromWeb(providerResponse.body as never));
     }
 
@@ -64,6 +74,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.post("/hooks/pretooluse", async (req) => {
     return preToolUseHandler(req.body as PreToolUseHookInput);
+  });
+
+  app.post("/hooks/posttooluse", async (req) => {
+    return postToolUseHandler(req.body as PostToolUseHookInput);
   });
 
   app.post("/hooks/user-prompt-submit", async (req) => {

@@ -104,7 +104,7 @@ interface OpenAIResponse {
   usage?: { prompt_tokens: number; completion_tokens: number };
 }
 
-function mapFinishReason(reason: string): string {
+export function mapFinishReason(reason: string): string {
   switch (reason) {
     case "length":
       return "max_tokens";

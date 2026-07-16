@@ -3,8 +3,9 @@
 An Anthropic-Messages-format proxy that Claude Code talks to instead of `api.anthropic.com` directly. It adds:
 
 - **Multi-provider routing** — Anthropic (OAuth or API key) and a local Ollama server, with per-task priority lists and automatic failover (e.g. Anthropic session/rate limit hit -> falls back to Ollama until it recovers).
-- **Permission gating** — a `PreToolUse` hook backend with a learned whitelist. Read-only tools always pass; unseen actions go to an LLM classifier (`allow`/`deny`/`ask`); allow/deny decisions are cached so the same class of action isn't re-classified every time.
-- **Context memory** — every `/v1/messages` exchange is logged; a periodic curator extracts durable facts via an LLM and embeds them into Qdrant; a `UserPromptSubmit` hook does semantic search on each new prompt and injects relevant memory back into context.
+- **Permission gating** — a `PreToolUse` hook backend. Read-only tools and a small set of argument-invariant-safe Bash verbs (`ls`, `cat`, `pwd`, etc. -- only when there's no shell redirection/chaining) pass instantly; everything else goes to an LLM classifier (`allow`/`deny`/`ask`) live, every single time. Deliberately no allow/deny caching beyond that static safe set: for commands like `rm`/`chmod`/`curl`, safety depends on arguments, not the verb, so caching by verb would let one benign invocation silently whitelist a catastrophic one later.
+- **Context memory** — every `/v1/messages` exchange (streaming or not) is logged; a periodic curator extracts durable facts via an LLM and embeds them into Qdrant; a `UserPromptSubmit` hook does semantic search on each new prompt and injects relevant memory back into context.
+- **Ask-outcome log** — a `PostToolUse` hook correlates calls the classifier returned `ask` for with whether they later executed, logged to `data/ask-outcomes.jsonl` for review. This is observability only, not a bypass: Claude Code has no documented hook that reports what a human actually clicked at the interactive permission prompt (`PermissionRequest` fires *before* the dialog, not after), so "it executed" can't be cleanly attributed to a human's yes vs. Claude Code's own permission system approving it independently.
 
 ## Why a proxy, not just hooks
 
@@ -47,15 +48,23 @@ Add to `~/.claude/settings.json`:
       {
         "hooks": [{ "type": "http", "url": "http://localhost:8787/hooks/user-prompt-submit", "timeout": 15 }]
       }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [{ "type": "http", "url": "http://localhost:8787/hooks/posttooluse", "timeout": 10 }]
+      }
     ]
   }
 }
 ```
 
+Note that you already have `claude-permission-hook.exe` registered on `PreToolUse` with matcher `.*` -- adding Custos's hook means two PreToolUse hooks fire on every tool call. How Claude Code combines two hook verdicts (whether a `deny` from either wins, or `ask` overrides `allow`, etc.) hasn't been confirmed against the docs -- check that before relying on both being active together.
+
+`PostToolUse` is optional: it only powers the best-effort ask-outcome log described below, nothing else depends on it.
+
 ## Known limitations (v1)
 
-- Streaming (`stream: true`) responses are relayed live but not yet ingested into memory — only non-streaming exchanges get curated. Most Claude Code traffic is streaming, so the curator currently sees a partial slice of activity; buffering+teeing streamed responses into ingestion is the natural next step.
 - The Ollama translation layer handles one text block and one tool call per turn; it doesn't multiplex true parallel tool calls in a single turn.
-- The permission whitelist only caches `allow`/`deny`; an `ask` decision hands off to Claude Code's normal interactive prompt and the human's actual answer isn't fed back into the whitelist yet (would need a `PostToolUse`/`Notification` hook to close that loop).
 - Session boundaries for memory ingestion are approximate — the Messages API carries no stable conversation id, so the curator works off rolling daily logs rather than exact per-session grouping.
 - The OAuth client_id/endpoints are reverse-engineered (matching Claude Code's own login flow); Anthropic can change or restrict them without notice.
+- The session-limit-aware cooldown reads Anthropic's documented rate-limit reset headers (`anthropic-ratelimit-unified-5h-reset`, etc.) but hasn't been exercised against a real 429 yet -- only verified by code review of the header names, not a live triggered limit.

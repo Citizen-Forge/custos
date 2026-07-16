@@ -1,7 +1,7 @@
 import type { ProviderRouter } from "../providers/router.js";
-import { Whitelist } from "./whitelist.js";
-import { isAlwaysSafe, signatureFor } from "./signature.js";
+import { isAlwaysSafeTool, isSafeBashCommand } from "./safety.js";
 import { classifyAction } from "./classifier.js";
+import type { AskTracker } from "./ask-tracker.js";
 
 // Matches Claude Code's PreToolUse hook stdin/response contract
 // (code.claude.com/docs/en/hooks.md).
@@ -22,27 +22,29 @@ export interface PreToolUseHookOutput {
   };
 }
 
-export function createPreToolUseHandler(router: ProviderRouter) {
-  const whitelist = new Whitelist();
-
+// No allow/deny caching by design: only a small, argument-invariant set of
+// verbs bypasses the classifier. Everything else -- including a command
+// this exact classifier already saw and allowed a moment ago -- is
+// re-classified live, because for commands like `rm`/`chmod`/`curl` safety
+// depends on arguments, not the verb, and caching by verb would let one
+// benign invocation silently whitelist a catastrophic one later.
+export function createPreToolUseHandler(router: ProviderRouter, askTracker: AskTracker) {
   return async function handle(input: PreToolUseHookInput): Promise<PreToolUseHookOutput> {
     const respond = (permissionDecision: "allow" | "deny" | "ask", permissionDecisionReason: string): PreToolUseHookOutput => ({
       hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision, permissionDecisionReason },
     });
 
-    if (isAlwaysSafe(input.tool_name)) {
+    if (isAlwaysSafeTool(input.tool_name)) {
       return respond("allow", "always-safe read-only tool");
     }
 
-    const signature = signatureFor(input.tool_name, input.tool_input);
-    const cached = await whitelist.get(signature);
-    if (cached) {
-      return respond(cached.decision, `whitelisted: ${cached.reason}`);
+    if (input.tool_name === "Bash" && typeof input.tool_input.command === "string" && isSafeBashCommand(input.tool_input.command)) {
+      return respond("allow", "safe read-only verb, no shell composition");
     }
 
     const { decision, reason } = await classifyAction(router, input.tool_name, input.tool_input);
-    if (decision === "allow" || decision === "deny") {
-      await whitelist.set(signature, decision, reason);
+    if (decision === "ask") {
+      askTracker.recordAsk(input.session_id, input.tool_name, input.tool_input, reason);
     }
     return respond(decision, reason);
   };

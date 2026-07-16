@@ -1,5 +1,5 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
-import { toOpenAIRequest, fromOpenAIResponse } from "./openai-translate.js";
+import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason } from "./openai-translate.js";
 import type { Provider, ProviderResponse } from "./types.js";
 
 export interface OllamaProviderConfig {
@@ -61,17 +61,32 @@ function translateStream(openaiRes: Response, model: string): ReadableStream<Uin
   let textBlockOpen = false;
   let toolBlockOpen = false;
   let buffer = "";
+  let closed = false;
 
   const sse = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
+  const finish = (controller: ReadableStreamDefaultController<Uint8Array>, finishReason: string) => {
+    if (closed) return;
+    closed = true;
+    if (textBlockOpen || toolBlockOpen) controller.enqueue(encoder.encode(sse("content_block_stop", { type: "content_block_stop", index: 0 })));
+    controller.enqueue(
+      encoder.encode(sse("message_delta", { type: "message_delta", delta: { stop_reason: mapFinishReason(finishReason) }, usage: {} })),
+    );
+    controller.enqueue(encoder.encode(sse("message_stop", { type: "message_stop" })));
+    controller.close();
+    void reader.cancel().catch(() => {});
+  };
+
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      if (closed) return;
+
       const { done, value } = await reader.read();
       if (done) {
-        if (textBlockOpen || toolBlockOpen) controller.enqueue(encoder.encode(sse("content_block_stop", { type: "content_block_stop", index: 0 })));
-        controller.enqueue(encoder.encode(sse("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: {} })));
-        controller.enqueue(encoder.encode(sse("message_stop", { type: "message_stop" })));
-        controller.close();
+        // The upstream connection closed without an explicit finish_reason
+        // (shouldn't normally happen -- Ollama always sends one -- but
+        // don't leave the client hanging if it does).
+        finish(controller, "stop");
         return;
       }
 
@@ -87,7 +102,10 @@ function translateStream(openaiRes: Response, model: string): ReadableStream<Uin
 
         const chunk = JSON.parse(payload) as {
           id: string;
-          choices: { delta: { content?: string; tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+          choices: {
+            delta: { content?: string; tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[] };
+            finish_reason?: string | null;
+          }[];
         };
 
         if (!messageStarted) {
@@ -102,7 +120,8 @@ function translateStream(openaiRes: Response, model: string): ReadableStream<Uin
           );
         }
 
-        const delta = chunk.choices[0]?.delta;
+        const choice = chunk.choices[0];
+        const delta = choice?.delta;
         if (delta?.content) {
           if (!textBlockOpen) {
             textBlockOpen = true;
@@ -130,6 +149,11 @@ function translateStream(openaiRes: Response, model: string): ReadableStream<Uin
               encoder.encode(sse("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: call.function.arguments } })),
             );
           }
+        }
+
+        if (choice?.finish_reason) {
+          finish(controller, choice.finish_reason);
+          return;
         }
       }
     },

@@ -51,10 +51,39 @@ export class AnthropicProvider implements Provider {
   /** Turn rate-limit / usage-limit responses into a failover signal for the router. */
   private classify(res: Response): ProviderResponse {
     if (res.status === 429) {
-      const retryAfterHeader = res.headers.get("retry-after");
-      const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : undefined;
-      throw new ProviderUnavailableError("anthropic: rate limited", retryAfterMs);
+      throw new ProviderUnavailableError("anthropic: rate limited", this.cooldownFor(res.headers));
     }
     return { status: res.status, headers: res.headers, body: res.body };
+  }
+
+  /**
+   * Anthropic returns several reset timestamps on every request (per-minute
+   * request/token limits, and the 5-hour rolling subscription-usage window
+   * that Claude Code's own "session limit" refers to). Prefer the furthest-
+   * out one that's actually present: the 5h unified reset if we're getting
+   * throttled on subscription usage, otherwise the per-minute token/request
+   * reset. Falls back to `retry-after` (plain seconds) and finally a
+   * generic default if none of these headers are present.
+   */
+  private cooldownFor(headers: Headers): number | undefined {
+    const resetCandidates = [
+      headers.get("anthropic-ratelimit-unified-5h-reset"),
+      headers.get("anthropic-ratelimit-tokens-reset"),
+      headers.get("anthropic-ratelimit-requests-reset"),
+    ];
+
+    for (const iso of resetCandidates) {
+      if (!iso) continue;
+      const resetMs = Date.parse(iso) - Date.now();
+      if (Number.isFinite(resetMs) && resetMs > 0) return resetMs;
+    }
+
+    const retryAfterHeader = headers.get("retry-after");
+    if (retryAfterHeader) {
+      const seconds = Number(retryAfterHeader);
+      if (Number.isFinite(seconds)) return seconds * 1000;
+    }
+
+    return undefined;
   }
 }
