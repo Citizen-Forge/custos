@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Custos Remote</title>
+<link rel="stylesheet" href="/vendor/xterm.css" />
+<style>
+  :root { color-scheme: dark; --bg: #14161a; --border: #2b2f38; --text: #e4e6eb; --muted: #8b93a1; --danger: #d9705b; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; }
+  header { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  header .title { font-weight: 600; }
+  .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.connected { background: #5bd98f; }
+  .dot.error { background: var(--danger); }
+  #term-wrap { flex: 1; min-height: 0; padding: 8px; }
+  #terminal { height: 100%; }
+  .message { padding: 24px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">Custos Remote</span>
+  <span class="status"><span class="dot" id="dot"></span><span id="status-text">Connecting…</span></span>
+</header>
+<div id="term-wrap"><div id="terminal"></div></div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script>
+const statusText = document.getElementById("status-text");
+const dot = document.getElementById("dot");
+function setStatus(text, cls) {
+  statusText.textContent = text;
+  dot.className = "dot" + (cls ? " " + cls : "");
+}
+
+const token = new URLSearchParams(location.search).get("token");
+if (!token) {
+  document.getElementById("term-wrap").innerHTML = '<p class="message">No session token in the URL. Start a session from the admin UI and use the link it gives you.</p>';
+} else {
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    theme: { background: "#14161a", foreground: "#e4e6eb" },
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(document.getElementById("terminal"));
+  fitAddon.fit();
+
+  const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${wsProtocol}//${location.host}/remote/ws?token=${encodeURIComponent(token)}`);
+
+  ws.addEventListener("open", () => {
+    setStatus("Connected", "connected");
+    ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  });
+  ws.addEventListener("close", (ev) => {
+    setStatus(ev.reason ? `Disconnected: ${ev.reason}` : "Disconnected", "error");
+  });
+  ws.addEventListener("error", () => setStatus("Connection error", "error"));
+  ws.addEventListener("message", (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "output") term.write(msg.data);
+  });
+
+  term.onData((data) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+  });
+
+  const resizeObserver = new ResizeObserver(() => {
+    fitAddon.fit();
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  });
+  resizeObserver.observe(document.getElementById("term-wrap"));
+}
+</script>
+</body>
+</html>

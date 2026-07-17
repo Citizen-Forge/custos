@@ -76,7 +76,8 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
     try {
       const json = JSON.parse(responseText);
       const contentText: string = json.content?.[0]?.text ?? responseText;
-      facts = JSON.parse(contentText.trim());
+      const parsed = JSON.parse(contentText.trim());
+      if (Array.isArray(parsed)) facts = parsed;
     } catch {
       facts = [];
     }

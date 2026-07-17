@@ -1,7 +1,9 @@
 import Fastify from "fastify";
+import websocket from "@fastify/websocket";
 import { Runtime } from "./runtime.js";
 import { registerRoutes } from "./server/routes.js";
 import { registerAdminRoutes } from "./server/admin-routes.js";
+import { registerRemoteRoutes } from "./server/remote-routes.js";
 import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
 
@@ -19,8 +21,10 @@ async function main() {
   startCurator(() => ({ router: runtime.router, store: memoryStore, embedding: runtime.embedding }), CURATOR_INTERVAL_MS);
 
   const app = Fastify({ logger: true, bodyLimit: 20 * 1024 * 1024 });
+  await app.register(websocket);
   registerRoutes(app, { runtime, memoryStore });
   registerAdminRoutes(app, runtime);
+  registerRemoteRoutes(app);
 
   await app.listen({ port: PORT, host: "0.0.0.0" });
 }

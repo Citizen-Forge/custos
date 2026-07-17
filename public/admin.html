@@ -171,6 +171,7 @@ async function api(path, opts = {}) {
 
 async function loadState() {
   state = await api("/admin/api/state");
+  state.remote = await api("/admin/api/remote/status");
   render();
 }
 
@@ -191,6 +192,7 @@ function render() {
   app.appendChild(renderInstancesPanel());
   app.appendChild(renderTasksPanel());
   app.appendChild(renderComplexityPanel());
+  app.appendChild(renderRemotePanel());
   app.appendChild(renderSetupPanel());
 }
 
@@ -429,6 +431,39 @@ function renderComplexityPanel() {
       reloadAfter(api("/admin/api/complexity-routing", { method: "PUT", body: { enabled: complexityRouting.enabled, tiers: nextTiers } }), "Saved");
     }));
     section.appendChild(block);
+  }
+
+  return section;
+}
+
+// -- Remote control --------------------------------------------------
+
+function renderRemotePanel() {
+  const { remote } = state;
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Remote control" }));
+  section.appendChild(el("p", { class: "desc", text: "Runs \"claude\" in a real terminal inside this container and streams it to a browser tab -- steer a session from your phone, tablet, or another computer. The link below is a bearer credential: anyone with it can type into this session. Don't share it, and don't expose this port past a network you trust." }));
+
+  if (remote.active) {
+    section.appendChild(el("div", { class: "row" }, [
+      el("span", { class: "badge ok", text: `Active -- ${remote.connectedClients} connected` }),
+    ]));
+    const urlRow = el("div", { class: "row" });
+    const urlInput = el("input", { type: "text", value: remote.connectUrl });
+    urlInput.readOnly = true;
+    urlRow.appendChild(urlInput);
+    urlRow.appendChild(el("button", { text: "Copy link", onclick: () => { navigator.clipboard.writeText(remote.connectUrl); showToast("Copied"); } }));
+    urlRow.appendChild(el("button", { text: "Open", onclick: () => window.open(remote.connectUrl, "_blank") }));
+    section.appendChild(urlRow);
+    section.appendChild(el("p", { class: "small", text: `Working directory: ${remote.cwd}` }));
+    section.appendChild(el("div", { class: "row" }, [
+      el("button", { class: "danger", text: "Stop session", onclick: () => reloadAfter(api("/admin/api/remote/stop", { method: "POST" }), "Session stopped") }),
+    ]));
+  } else {
+    section.appendChild(el("div", { class: "row" }, [
+      el("span", { class: "badge off", text: "No active session" }),
+      el("button", { class: "primary", text: "Start session", onclick: () => reloadAfter(api("/admin/api/remote/start", { method: "POST" }), "Session started") }),
+    ]));
   }
 
   return section;
