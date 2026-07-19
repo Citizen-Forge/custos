@@ -11,7 +11,9 @@
     "openai": {
       "baseUrl": "https://api.openai.com/v1",
       "model": "gpt-4.1-mini",
-      "apiKey": "sk-..."
+      "apiKey": "sk-...",
+      "pricing": { "inputPerMillion": 0.4, "outputPerMillion": 1.6 },
+      "budget": { "limitUsd": 20, "periodDays": 30 }
     }
   },
   "embeddingProvider": {
@@ -20,8 +22,9 @@
   },
   "tasks": {
     "general": [
-      { "provider": "anthropic", "priority": 1 },
-      { "provider": "ollama", "priority": 2 }
+      { "provider": "openai", "priority": 1 },
+      { "provider": "anthropic", "priority": 2 },
+      { "provider": "ollama", "priority": 3 }
     ],
     "permissionClassifier": [
       { "provider": "ollama-fast", "priority": 1 },

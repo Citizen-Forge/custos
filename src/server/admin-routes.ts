@@ -7,6 +7,7 @@ import type { TaskKind, ComplexityTier } from "../types.js";
 import { startOAuthFlow, exchangeCode, type OAuthMode } from "../auth/oauth.js";
 import { getOAuthStatus, saveTokens, clearTokens } from "../auth/credentials.js";
 import { OAuthFlowTracker } from "../auth/oauth-flow-tracker.js";
+import type { PricingConfig, BudgetConfig } from "../providers/spend-tracker.js";
 
 const TASK_KINDS: TaskKind[] = ["general", "permissionClassifier", "memoryCurator", "complexityClassifier"];
 const COMPLEXITY_TIERS: ComplexityTier[] = ["low", "medium", "high"];
@@ -65,13 +66,25 @@ async function updateConfig(runtime: Runtime, mutate: (cfg: GatewayConfig) => Ga
   return runtime.config;
 }
 
-function maskInstances(instances: GatewayConfig["openaiCompatibleInstances"]) {
-  return Object.fromEntries(
-    Object.entries(instances).map(([name, instance]) => [
-      name,
-      { baseUrl: instance.baseUrl, model: instance.model, apiKeyConfigured: Boolean(instance.apiKey), apiKeyMasked: instance.apiKey ? maskApiKey(instance.apiKey) : null },
-    ]),
+async function describeInstances(runtime: Runtime) {
+  const entries = await Promise.all(
+    Object.entries(runtime.config.openaiCompatibleInstances).map(async ([name, instance]) => {
+      const spend = instance.pricing ? await runtime.spendTracker.getSpend(name, instance.budget) : null;
+      return [
+        name,
+        {
+          baseUrl: instance.baseUrl,
+          model: instance.model,
+          apiKeyConfigured: Boolean(instance.apiKey),
+          apiKeyMasked: instance.apiKey ? maskApiKey(instance.apiKey) : null,
+          pricing: instance.pricing ?? null,
+          budget: instance.budget ?? null,
+          spentUsd: spend?.spentUsd ?? 0,
+        },
+      ] as const;
+    }),
   );
+  return Object.fromEntries(entries);
 }
 
 export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): void {
@@ -94,7 +107,7 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
         apiKeyMasked: config.anthropic?.apiKey ? maskApiKey(config.anthropic.apiKey) : null,
         oauth,
       },
-      instances: maskInstances(config.openaiCompatibleInstances),
+      instances: await describeInstances(runtime),
       embeddingProvider: config.embeddingProvider,
       providerNames: ["anthropic", ...Object.keys(config.openaiCompatibleInstances)],
       providerPresets: PROVIDER_PRESETS,
@@ -152,14 +165,27 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
 
   app.put("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, model, apiKey } = req.body as { baseUrl: string; model: string; apiKey?: string | null };
+    const { baseUrl, model, apiKey, pricing, budget } = req.body as {
+      baseUrl: string;
+      model: string;
+      apiKey?: string | null;
+      pricing?: PricingConfig | null;
+      budget?: BudgetConfig | null;
+    };
     if (!baseUrl || !model) {
       reply.code(400);
       return { error: "baseUrl and model are required" };
     }
+    if (budget && !pricing) {
+      reply.code(400);
+      return { error: "a budget requires pricing to be set too, otherwise there's no cost to check it against" };
+    }
     await updateConfig(runtime, (cfg) => ({
       ...cfg,
-      openaiCompatibleInstances: { ...cfg.openaiCompatibleInstances, [name]: { baseUrl, model, apiKey: apiKey || undefined } },
+      openaiCompatibleInstances: {
+        ...cfg.openaiCompatibleInstances,
+        [name]: { baseUrl, model, apiKey: apiKey || undefined, pricing: pricing ?? undefined, budget: budget ?? undefined },
+      },
     }));
     return { ok: true };
   });

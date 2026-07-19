@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Custos Login</title>
+<style>
+  :root { color-scheme: dark; --bg: #14161a; --panel: #1c1f26; --border: #2b2f38; --text: #e4e6eb; --muted: #8b93a1; --accent: #5b9dd9; --danger: #d9705b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  form { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 28px; width: 320px; display: flex; flex-direction: column; gap: 12px; }
+  h1 { margin: 0 0 4px; font-size: 18px; }
+  input { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 9px 11px; font-size: 14px; }
+  button { background: var(--accent); border: none; color: #0d1117; font-weight: 600; border-radius: 6px; padding: 10px; font-size: 14px; cursor: pointer; }
+  button:hover { filter: brightness(1.08); }
+  .error { color: var(--danger); font-size: 13px; min-height: 16px; }
+</style>
+</head>
+<body>
+<form id="form">
+  <h1>Custos</h1>
+  <input type="password" id="password" placeholder="Admin password" autofocus />
+  <button type="submit">Sign in</button>
+  <div class="error" id="error"></div>
+</form>
+<script>
+document.getElementById("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const password = document.getElementById("password").value;
+  const errorEl = document.getElementById("error");
+  errorEl.textContent = "";
+  const res = await fetch("/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (res.ok) {
+    const params = new URLSearchParams(location.search);
+    location.href = params.get("next") || "/admin";
+  } else {
+    errorEl.textContent = "Wrong password";
+  }
+});
+</script>
+</body>
+</html>

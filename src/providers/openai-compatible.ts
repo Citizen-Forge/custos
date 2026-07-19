@@ -1,6 +1,7 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
 import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason } from "./openai-translate.js";
 import type { Provider, ProviderResponse } from "./types.js";
+import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
 
 export interface OpenAICompatibleInstanceConfig {
   /** Full path prefix up to (not including) "/chat/completions" -- e.g.
@@ -13,6 +14,12 @@ export interface OpenAICompatibleInstanceConfig {
   model: string;
   /** Omit for servers that don't need auth (a local Ollama). */
   apiKey?: string;
+  /** Omit for providers with no per-call billing to track (a local Ollama,
+   * or anything covered by a flat subscription) -- required for budget
+   * enforcement to mean anything, since cost has to be computed somehow. */
+  pricing?: PricingConfig;
+  /** Omit for unlimited. Requires `pricing` to actually take effect. */
+  budget?: BudgetConfig;
 }
 
 /**

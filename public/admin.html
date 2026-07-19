@@ -29,9 +29,14 @@
   header {
     padding: 20px 28px;
     border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
   }
   header h1 { margin: 0; font-size: 18px; font-weight: 600; }
   header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  header button { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; }
+  header button:hover { color: var(--text); border-color: var(--muted); }
   main {
     max-width: 920px;
     margin: 0 auto;
@@ -127,8 +132,11 @@
 </head>
 <body>
 <header>
-  <h1>Custos</h1>
-  <p>Providers, model routing, and Claude Code setup</p>
+  <div>
+    <h1>Custos</h1>
+    <p>Providers, model routing, and Claude Code setup</p>
+  </div>
+  <button onclick="fetch('/logout', {method: 'POST'}).then(() => location.href = '/login')">Log out</button>
 </header>
 <main id="app">
   <section class="panel"><p class="small">Loading…</p></section>
@@ -164,6 +172,10 @@ async function api(path, opts = {}) {
     headers: { "content-type": "application/json", ...(opts.headers || {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  if (res.status === 401) {
+    location.href = "/login?next=" + encodeURIComponent(location.pathname);
+    return new Promise(() => {}); // never resolves -- we're navigating away
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
   return json;
@@ -193,6 +205,7 @@ function render() {
   app.appendChild(renderTasksPanel());
   app.appendChild(renderComplexityPanel());
   app.appendChild(renderRemotePanel());
+  app.appendChild(renderSecurityPanel());
   app.appendChild(renderSetupPanel());
 }
 
@@ -269,14 +282,18 @@ function renderInstancesPanel() {
 
   const table = el("table");
   table.appendChild(el("tr", {}, [
-    el("th", { text: "Name" }), el("th", { text: "Base URL" }), el("th", { text: "Model" }), el("th", { text: "API key" }), el("th", { text: "" }),
+    el("th", { text: "Name" }), el("th", { text: "Base URL" }), el("th", { text: "Model" }), el("th", { text: "API key" }), el("th", { text: "Budget" }), el("th", { text: "" }),
   ]));
   for (const [name, instance] of Object.entries(state.instances)) {
+    const budgetText = instance.budget
+      ? `$${instance.spentUsd.toFixed(2)} / $${instance.budget.limitUsd} per ${instance.budget.periodDays}d`
+      : instance.pricing ? "tracked, no cap" : "—";
     table.appendChild(el("tr", {}, [
       el("td", { text: name }),
       el("td", { text: instance.baseUrl }),
       el("td", { text: instance.model }),
       el("td", { text: instance.apiKeyConfigured ? instance.apiKeyMasked : "—" }),
+      el("td", { text: budgetText }),
       el("td", {}, [
         el("button", { text: "Delete", class: "danger", onclick: () => reloadAfter(
           api(`/admin/api/instances/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
@@ -317,9 +334,23 @@ function renderInstancesPanel() {
         modelsHint.textContent = err.message;
       }
     }}),
+  ]);
+
+  section.appendChild(el("p", { class: "small", text: "Optional: budget-based fallback. If set, this instance is skipped once its spend cap is hit for the current period, and the router falls through to the next entry in that task's priority list -- same mechanism as the rate-limit cooldown, triggered by cost instead." }));
+  const inputPriceInput = el("input", { type: "text", placeholder: "$ per 1M input tokens" });
+  const outputPriceInput = el("input", { type: "text", placeholder: "$ per 1M output tokens" });
+  const budgetLimitInput = el("input", { type: "text", placeholder: "budget cap in $ (optional)" });
+  const budgetPeriodInput = el("input", { type: "text", placeholder: "period in days (default 30)" });
+  const row4 = el("div", { class: "row" }, [inputPriceInput, outputPriceInput, budgetLimitInput, budgetPeriodInput]);
+
+  const row5 = el("div", { class: "row" }, [
     el("button", { class: "primary", text: "Save", onclick: () => {
       if (!nameInput.value || !urlInput.value || !modelInput.value) return showToast("Fill in name, base URL, and model", true);
-      reloadAfter(api(`/admin/api/instances/${encodeURIComponent(nameInput.value)}`, { method: "PUT", body: { baseUrl: urlInput.value, model: modelInput.value, apiKey: keyInput.value || undefined } }), "Instance saved");
+      const hasPricing = inputPriceInput.value || outputPriceInput.value;
+      if (budgetLimitInput.value && !hasPricing) return showToast("A budget needs pricing set too", true);
+      const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : undefined;
+      const budget = budgetLimitInput.value ? { limitUsd: Number(budgetLimitInput.value), periodDays: Number(budgetPeriodInput.value) || 30 } : undefined;
+      reloadAfter(api(`/admin/api/instances/${encodeURIComponent(nameInput.value)}`, { method: "PUT", body: { baseUrl: urlInput.value, model: modelInput.value, apiKey: keyInput.value || undefined, pricing, budget } }), "Instance saved");
     }}),
   ]);
   section.appendChild(row0);
@@ -327,6 +358,8 @@ function renderInstancesPanel() {
   section.appendChild(row2);
   section.appendChild(row3);
   section.appendChild(modelsHint);
+  section.appendChild(row4);
+  section.appendChild(row5);
 
   section.appendChild(el("hr", { class: "sep" }));
   section.appendChild(el("p", { class: "small", text: `Embeddings (used for memory search) come from Ollama's native API, currently ${state.embeddingProvider.baseUrl} / ${state.embeddingProvider.model}` }));
@@ -465,6 +498,23 @@ function renderRemotePanel() {
       el("button", { class: "primary", text: "Start session", onclick: () => reloadAfter(api("/admin/api/remote/start", { method: "POST" }), "Session started") }),
     ]));
   }
+
+  return section;
+}
+
+// -- Security --------------------------------------------------
+
+function renderSecurityPanel() {
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Security" }));
+  section.appendChild(el("p", { class: "desc", text: "Change the admin password used to sign in here and access remote control." }));
+
+  const current = el("input", { type: "password", placeholder: "Current password" });
+  const next = el("input", { type: "password", placeholder: "New password (min 8 chars)" });
+  section.appendChild(el("div", { class: "row" }, [current, next, el("button", { class: "primary", text: "Change password", onclick: () => {
+    if (!current.value || !next.value) return showToast("Fill in both fields", true);
+    reloadAfter(api("/admin/api/change-password", { method: "POST", body: { currentPassword: current.value, newPassword: next.value } }), "Password changed");
+  }})]));
 
   return section;
 }

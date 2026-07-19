@@ -18,6 +18,12 @@ export interface RouteDeps {
   memoryStore: MemoryStore;
 }
 
+function recordSpend(runtime: Runtime, providerName: string, usage: { input_tokens: number; output_tokens: number }): void {
+  const instance = runtime.config.openaiCompatibleInstances[providerName];
+  if (!instance?.pricing) return; // anthropic and unpriced instances (e.g. Ollama) are never tracked
+  void runtime.spendTracker.record(providerName, instance.pricing, usage, instance.budget);
+}
+
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const askTracker = new AskTracker();
   const preToolUseHandler = createPreToolUseHandler(deps.runtime, askTracker);
@@ -46,6 +52,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     }
 
     reply.code(providerResponse.status);
+    reply.header("x-custos-provider", providerResponse.providerName);
     providerResponse.headers.forEach((value, key) => {
       if (key.toLowerCase() !== "content-length") reply.header(key, value);
     });
@@ -58,7 +65,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       if (providerResponse.status === 200) {
         const [clientStream, ingestStream] = providerResponse.body.tee();
         reconstructFromAnthropicSSE(ingestStream, body.model)
-          .then((reconstructed) => ingestExchange(body, reconstructed))
+          .then((reconstructed) => {
+            void ingestExchange(body, reconstructed);
+            recordSpend(deps.runtime, providerResponse.providerName, reconstructed.usage);
+          })
           .catch((err) => req.log.error({ err }, "failed to ingest streamed exchange"));
         return reply.send(Readable.fromWeb(clientStream as never));
       }
@@ -70,6 +80,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       try {
         const parsed = JSON.parse(text) as AnthropicMessagesResponse;
         void ingestExchange(body, parsed);
+        recordSpend(deps.runtime, providerResponse.providerName, parsed.usage);
       } catch {
         // Non-JSON success body (shouldn't happen); skip ingestion.
       }
