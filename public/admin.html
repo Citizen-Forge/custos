@@ -184,6 +184,9 @@ async function api(path, opts = {}) {
 async function loadState() {
   state = await api("/admin/api/state");
   state.remote = await api("/admin/api/remote/status");
+  if (!state.remote.active) {
+    state.recentConversations = (await api("/admin/api/remote/conversations")).conversations;
+  }
   render();
 }
 
@@ -495,8 +498,25 @@ function renderRemotePanel() {
   } else {
     section.appendChild(el("div", { class: "row" }, [
       el("span", { class: "badge off", text: "No active session" }),
-      el("button", { class: "primary", text: "Start session", onclick: () => reloadAfter(api("/admin/api/remote/start", { method: "POST" }), "Session started") }),
+      el("button", { class: "primary", text: "Start new session", onclick: () => reloadAfter(api("/admin/api/remote/start", { method: "POST" }), "Session started") }),
     ]));
+
+    const conversations = state.recentConversations || [];
+    if (conversations.length > 0) {
+      section.appendChild(el("hr", { class: "sep" }));
+      section.appendChild(el("p", { class: "small", text: "Or resume a recent conversation -- Claude opens with a summary of where it left off (not a literal replay; see README)." }));
+      const list = el("div", { class: "priority-list" });
+      for (const conv of conversations) {
+        const when = new Date(conv.lastActiveAt).toLocaleString();
+        list.appendChild(el("div", { class: "priority-item" }, [
+          el("span", { class: "small", text: `${conv.preview || "(no preview)"} -- ${when} (${conv.exchangeCount} exchanges)` }),
+          el("button", { class: "primary", text: "Resume", onclick: () => reloadAfter(
+            api("/admin/api/remote/start", { method: "POST", body: { resumeConversationId: conv.id } }), "Session started"
+          )}),
+        ]));
+      }
+      section.appendChild(list);
+    }
   }
 
   return section;

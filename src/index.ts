@@ -33,7 +33,7 @@ async function main() {
   registerAuthRoutes(app);
   registerRoutes(app, { runtime, memoryStore });
   registerAdminRoutes(app, runtime);
-  registerRemoteRoutes(app);
+  registerRemoteRoutes(app, runtime);
 
   await app.listen({ port: PORT, host: "0.0.0.0" });
 }

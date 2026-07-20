@@ -26,7 +26,13 @@ export class RemoteSessionManager {
     return this.session;
   }
 
-  start(cwd = WORKSPACE_DIR): RemoteSession {
+  /** initialPrompt, if given, is passed as a positional CLI argument --
+   * Claude Code's normal `claude "some prompt"` usage, which starts an
+   * interactive session and submits that text as the first turn. Used to
+   * prime a fresh session with a resume summary (see memory/conversations.ts)
+   * without needing a shell (node-pty spawns with an argv array, so no
+   * escaping/injection concern even though this text is LLM-generated). */
+  start(cwd = WORKSPACE_DIR, initialPrompt?: string): RemoteSession {
     if (this.session) {
       throw new Error("a remote session is already active -- stop it first");
     }
@@ -41,7 +47,7 @@ export class RemoteSessionManager {
     }
     env.ANTHROPIC_BASE_URL = `http://localhost:${PORT}`;
 
-    const proc = pty.spawn("claude", [], {
+    const proc = pty.spawn("claude", initialPrompt ? [initialPrompt] : [], {
       name: "xterm-256color",
       cols: 80,
       rows: 24,

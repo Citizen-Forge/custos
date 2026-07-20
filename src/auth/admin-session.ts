@@ -50,10 +50,15 @@ async function writeAuthFile(auth: AuthFile): Promise<void> {
 export async function ensureAdminPassword(): Promise<void> {
   if (await readAuthFile()) return;
 
-  const password = process.env.ADMIN_PASSWORD ?? randomBytes(16).toString("base64url");
+  // Deliberately `||`, not `??`: docker-compose's `${ADMIN_PASSWORD:-}`
+  // passes an empty string (not an absent var) when unset, and `??` only
+  // falls back on null/undefined -- with `??` this would silently seed an
+  // empty-string password, which is as bad as no auth at all.
+  const envPassword = process.env.ADMIN_PASSWORD || "";
+  const password = envPassword || randomBytes(16).toString("base64url");
   await writeAuthFile({ passwordHash: hashPassword(password) });
 
-  if (!process.env.ADMIN_PASSWORD) {
+  if (!envPassword) {
     console.log("=".repeat(60));
     console.log(`Generated admin password: ${password}`);
     console.log("Save this now -- it will not be shown again. Change it");
