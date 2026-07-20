@@ -36,7 +36,10 @@ function maskApiKey(key: string): string {
 }
 
 function buildSetupInstructions() {
-  const baseUrl = process.env.GATEWAY_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 8787}`;
+  // `||` not `??`: docker-compose's `${GATEWAY_PUBLIC_URL:-}` passes an
+  // empty string, not an absent var, when unset (same footgun as
+  // ADMIN_PASSWORD -- see admin-session.ts).
+  const baseUrl = process.env.GATEWAY_PUBLIC_URL || `http://localhost:${process.env.PORT ?? 8787}`;
   const envExport = `export ANTHROPIC_BASE_URL=${baseUrl}`;
   const settingsSnippet = {
     hooks: {

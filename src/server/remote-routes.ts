@@ -7,7 +7,8 @@ import { listConversations, buildResumeSummary } from "../memory/conversations.j
 import type { Runtime } from "../runtime.js";
 
 function publicUrl(): string {
-  return process.env.GATEWAY_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 8787}`;
+  // `||` not `??` -- see admin-routes.ts's buildSetupInstructions for why.
+  return process.env.GATEWAY_PUBLIC_URL || `http://localhost:${process.env.PORT ?? 8787}`;
 }
 
 function resumePrompt(summary: string): string {

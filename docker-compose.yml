@@ -7,6 +7,11 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # The externally-reachable URL for this instance (behind a reverse
+      # proxy/tunnel) -- used to build the ANTHROPIC_BASE_URL/settings.json
+      # snippet correctly and to enable secure cookies. Leave unset for a
+      # plain local/LAN deployment.
+      - GATEWAY_PUBLIC_URL=${GATEWAY_PUBLIC_URL:-}
     volumes:
       - ./data:/app/data
       # The directory a remote-control session actually operates in --
