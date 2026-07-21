@@ -1,6 +1,8 @@
 import * as pty from "node-pty";
 import { randomBytes } from "node:crypto";
 import type { WebSocket } from "ws";
+import { syncSpawnedSessionCredentials } from "../auth/credentials.js";
+import type { Runtime } from "../runtime.js";
 
 const PORT = process.env.PORT ?? "8787";
 
@@ -24,6 +26,8 @@ export class RemoteSessionManager {
   private sessions = new Map<string, RemoteSession>();
   private byToken = new Map<string, RemoteSession>();
 
+  constructor(private runtime: Runtime) {}
+
   get(chatId: string): RemoteSession | null {
     return this.sessions.get(chatId) ?? null;
   }
@@ -38,10 +42,16 @@ export class RemoteSessionManager {
    * prime a fresh session with a resume summary (see memory/conversations.ts)
    * without needing a shell (node-pty spawns with an argv array, so no
    * escaping/injection concern even though this text is LLM-generated). */
-  start(chatId: string, cwd: string, initialPrompt?: string): RemoteSession {
+  async start(chatId: string, cwd: string, initialPrompt?: string): Promise<RemoteSession> {
     if (this.sessions.has(chatId)) {
       throw new Error("this chat already has a live session -- stop it first");
     }
+
+    // So the spawned CLI opens already authenticated instead of hitting its
+    // own /login -- projects Custos's own connected OAuth session into
+    // ~/.claude/.credentials.json, the file the real CLI reads. No-op if
+    // Custos hasn't connected its own OAuth (see syncSpawnedSessionCredentials).
+    await syncSpawnedSessionCredentials();
 
     // Recursive by design: the spawned CLI's own traffic goes back through
     // Custos itself, so a remote-controlled session gets the same
@@ -52,6 +62,12 @@ export class RemoteSessionManager {
       if (value !== undefined) env[key] = value;
     }
     env.ANTHROPIC_BASE_URL = `http://localhost:${PORT}`;
+    // The spawned CLI's own requests hit Custos's client-auth-guard just
+    // like any other Claude Code install pointed at this proxy -- without
+    // this they'd get 401'd the moment a client API key is configured.
+    if (this.runtime.config.clientApiKey) {
+      env.ANTHROPIC_API_KEY = this.runtime.config.clientApiKey;
+    }
 
     const proc = pty.spawn("claude", initialPrompt ? [initialPrompt] : [], {
       name: "xterm-256color",

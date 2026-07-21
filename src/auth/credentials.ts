@@ -74,19 +74,46 @@ export async function getOAuthStatus(): Promise<OAuthStatus> {
   return { connected: false };
 }
 
+/** Custos's own stored tokens (not an import), refreshed and persisted if
+ * close to expiring. Null if Custos has never connected its own OAuth
+ * session -- callers that also want to fall back to an import from Claude
+ * Code's own credentials file should use getValidAccessToken instead. */
+async function getValidOwnTokenSet(): Promise<TokenSet | null> {
+  const stored = await loadStoredTokens();
+  if (!stored) return null;
+  if (stored.expiresAt - Date.now() < REFRESH_MARGIN_MS) {
+    const refreshed = await refreshTokens(stored.refreshToken);
+    await saveTokens(refreshed);
+    return refreshed;
+  }
+  return stored;
+}
+
 /** Returns a valid (non-expired) access token, refreshing and persisting if needed. */
 export async function getValidAccessToken(): Promise<string | null> {
-  let tokens = (await loadStoredTokens()) ?? (await importFromClaudeCode());
-  if (!tokens) return null;
+  const own = await getValidOwnTokenSet();
+  if (own) return own.accessToken;
 
-  if (tokens.expiresAt - Date.now() < REFRESH_MARGIN_MS) {
-    tokens = await refreshTokens(tokens.refreshToken);
-    await saveTokens(tokens);
-  } else {
-    // Persist an import from Claude Code so future calls don't need to
-    // re-read its credentials file, and refresh cycles stay independent.
-    await saveTokens(tokens);
-  }
+  const imported = await importFromClaudeCode();
+  if (!imported) return null;
+  // Persist an import from Claude Code so future calls don't need to
+  // re-read its credentials file, and refresh cycles stay independent.
+  await saveTokens(imported);
+  return imported.accessToken;
+}
 
-  return tokens.accessToken;
+/**
+ * Projects Custos's own connected OAuth session into the file format the
+ * real Claude Code CLI reads (~/.claude/.credentials.json), so a
+ * remote-spawned `claude` process is already authenticated and skips its
+ * own /login. Only acts when Custos has its OWN tokens (getValidOwnTokenSet,
+ * not the import fallback) -- if Custos has never connected via the admin
+ * panel's OAuth flow, this is a no-op, so it never clobbers a deliberately
+ * host-mounted ~/.claude with nothing new to offer.
+ */
+export async function syncSpawnedSessionCredentials(): Promise<void> {
+  const tokens = await getValidOwnTokenSet();
+  if (!tokens) return;
+  await mkdir(dirname(CLAUDE_CODE_CREDENTIALS_PATH), { recursive: true });
+  await writeFile(CLAUDE_CODE_CREDENTIALS_PATH, JSON.stringify({ claudeAiOauth: tokens }, null, 2), "utf8");
 }

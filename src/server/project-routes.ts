@@ -105,7 +105,7 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
 
     const chat = await chats.createChat(id, title?.trim() || "New chat");
     try {
-      const session = manager.start(chat.id, project.workspaceDir, initialPrompt);
+      const session = await manager.start(chat.id, project.workspaceDir, initialPrompt);
       return { chat, token: session.token, connectUrl: connectUrl(session.token) };
     } catch (err) {
       await chats.deleteChat(chat.id);
@@ -159,7 +159,7 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       return { error: "project not found" };
     }
     try {
-      const session = manager.start(chat.id, project.workspaceDir);
+      const session = await manager.start(chat.id, project.workspaceDir);
       await chats.markChatStarted(chat.id);
       return { token: session.token, connectUrl: connectUrl(session.token) };
     } catch (err) {

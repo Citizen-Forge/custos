@@ -37,7 +37,7 @@ async function main() {
   registerAuthRoutes(app);
   registerRoutes(app, { runtime, memoryStore });
   registerAdminRoutes(app, runtime);
-  const remoteSessionManager = new RemoteSessionManager();
+  const remoteSessionManager = new RemoteSessionManager(runtime);
   registerRemoteRoutes(app, remoteSessionManager);
   registerProjectRoutes(app, runtime, remoteSessionManager);
 
