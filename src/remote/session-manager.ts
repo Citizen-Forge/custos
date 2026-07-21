@@ -2,10 +2,10 @@ import * as pty from "node-pty";
 import { randomBytes } from "node:crypto";
 import type { WebSocket } from "ws";
 
-const WORKSPACE_DIR = process.env.CUSTOS_WORKSPACE_DIR ?? "/workspace";
 const PORT = process.env.PORT ?? "8787";
 
 export interface RemoteSession {
+  chatId: string;
   token: string;
   proc: pty.IPty;
   clients: Set<WebSocket>;
@@ -14,16 +14,22 @@ export interface RemoteSession {
 }
 
 /**
- * Single active PTY-hosted `claude` session at a time (matches Remote
- * Control's own "session mode" -- simpler than juggling concurrent
- * sessions for a v1). Multiple WebSocket clients can attach to the one
- * session and all see the same output; any of them can type into it.
+ * One live PTY-hosted `claude` process per chat, all running concurrently
+ * -- chats across one or more projects can be active at the same time,
+ * matching how VS Code lets several Claude Code sessions run side by side
+ * in different tabs. Multiple WebSocket clients can attach to the same
+ * chat's session and all see the same output; any of them can type into it.
  */
 export class RemoteSessionManager {
-  private session: RemoteSession | null = null;
+  private sessions = new Map<string, RemoteSession>();
+  private byToken = new Map<string, RemoteSession>();
 
-  get current(): RemoteSession | null {
-    return this.session;
+  get(chatId: string): RemoteSession | null {
+    return this.sessions.get(chatId) ?? null;
+  }
+
+  list(): RemoteSession[] {
+    return [...this.sessions.values()];
   }
 
   /** initialPrompt, if given, is passed as a positional CLI argument --
@@ -32,9 +38,9 @@ export class RemoteSessionManager {
    * prime a fresh session with a resume summary (see memory/conversations.ts)
    * without needing a shell (node-pty spawns with an argv array, so no
    * escaping/injection concern even though this text is LLM-generated). */
-  start(cwd = WORKSPACE_DIR, initialPrompt?: string): RemoteSession {
-    if (this.session) {
-      throw new Error("a remote session is already active -- stop it first");
+  start(chatId: string, cwd: string, initialPrompt?: string): RemoteSession {
+    if (this.sessions.has(chatId)) {
+      throw new Error("this chat already has a live session -- stop it first");
     }
 
     // Recursive by design: the spawned CLI's own traffic goes back through
@@ -56,27 +62,30 @@ export class RemoteSessionManager {
     });
 
     const token = randomBytes(24).toString("base64url");
-    const session: RemoteSession = { token, proc, clients: new Set(), startedAt: Date.now(), cwd };
+    const session: RemoteSession = { chatId, token, proc, clients: new Set(), startedAt: Date.now(), cwd };
 
     proc.onExit(() => {
-      if (this.session === session) {
-        for (const client of session.clients) client.close(1000, "session ended");
-        this.session = null;
-      }
+      for (const client of session.clients) client.close(1000, "session ended");
+      this.sessions.delete(chatId);
+      this.byToken.delete(token);
     });
 
-    this.session = session;
+    this.sessions.set(chatId, session);
+    this.byToken.set(token, session);
     return session;
   }
 
-  stop(): void {
-    if (!this.session) return;
-    for (const client of this.session.clients) client.close(1000, "session stopped");
-    this.session.proc.kill();
-    this.session = null;
+  stop(chatId: string): boolean {
+    const session = this.sessions.get(chatId);
+    if (!session) return false;
+    for (const client of session.clients) client.close(1000, "session stopped");
+    session.proc.kill();
+    this.sessions.delete(chatId);
+    this.byToken.delete(session.token);
+    return true;
   }
 
   findByToken(token: string): RemoteSession | null {
-    return this.session && this.session.token === token ? this.session : null;
+    return this.byToken.get(token) ?? null;
   }
 }

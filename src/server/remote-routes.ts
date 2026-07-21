@@ -3,62 +3,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RawData } from "ws";
 import { RemoteSessionManager } from "../remote/session-manager.js";
-import { listConversations, buildResumeSummary } from "../memory/conversations.js";
-import type { Runtime } from "../runtime.js";
 
-function publicUrl(): string {
-  // `||` not `??` -- see admin-routes.ts's buildSetupInstructions for why.
-  return process.env.GATEWAY_PUBLIC_URL || `http://localhost:${process.env.PORT ?? 8787}`;
-}
-
-function resumePrompt(summary: string): string {
-  return `Resuming a previous conversation. Here's a summary of where it left off:\n\n${summary}\n\nPlease continue from here.`;
-}
-
-export function registerRemoteRoutes(app: FastifyInstance, runtime: Runtime): void {
-  const manager = new RemoteSessionManager();
-
-  app.post("/admin/api/remote/start", async (req, reply) => {
-    const { resumeConversationId } = (req.body ?? {}) as { resumeConversationId?: string };
-    try {
-      let initialPrompt: string | undefined;
-      if (resumeConversationId) {
-        const summary = await buildResumeSummary(runtime.router, resumeConversationId);
-        if (!summary) {
-          reply.code(404);
-          return { error: "that conversation wasn't found (it may be too old -- only the last ~2 weeks are scanned)" };
-        }
-        initialPrompt = resumePrompt(summary);
-      }
-      const session = manager.start(undefined, initialPrompt);
-      return { token: session.token, connectUrl: `${publicUrl()}/remote?token=${session.token}` };
-    } catch (err) {
-      reply.code(409);
-      return { error: (err as Error).message };
-    }
-  });
-
-  app.get("/admin/api/remote/conversations", async () => {
-    return { conversations: await listConversations() };
-  });
-
-  app.post("/admin/api/remote/stop", async () => {
-    manager.stop();
-    return { ok: true };
-  });
-
-  app.get("/admin/api/remote/status", async () => {
-    const session = manager.current;
-    if (!session) return { active: false };
-    return {
-      active: true,
-      connectUrl: `${publicUrl()}/remote?token=${session.token}`,
-      connectedClients: session.clients.size,
-      startedAt: session.startedAt,
-      cwd: session.cwd,
-    };
-  });
-
+export function registerRemoteRoutes(app: FastifyInstance, manager: RemoteSessionManager): void {
   app.get("/remote", async (_req, reply) => {
     const html = await readFile(join(process.cwd(), "public", "remote.html"), "utf8");
     reply.header("content-type", "text/html; charset=utf-8");

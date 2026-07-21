@@ -183,10 +183,11 @@ async function api(path, opts = {}) {
 
 async function loadState() {
   state = await api("/admin/api/state");
-  state.remote = await api("/admin/api/remote/status");
-  if (!state.remote.active) {
-    state.recentConversations = (await api("/admin/api/remote/conversations")).conversations;
+  state.projects = (await api("/admin/api/projects")).projects;
+  for (const project of state.projects) {
+    project.chats = (await api(`/admin/api/projects/${project.id}/chats`)).chats;
   }
+  state.recentConversations = (await api("/admin/api/remote/conversations")).conversations;
   render();
 }
 
@@ -207,7 +208,7 @@ function render() {
   app.appendChild(renderInstancesPanel());
   app.appendChild(renderTasksPanel());
   app.appendChild(renderComplexityPanel());
-  app.appendChild(renderRemotePanel());
+  app.appendChild(renderProjectsPanel());
   app.appendChild(renderSecurityPanel());
   app.appendChild(renderSetupPanel());
 }
@@ -472,54 +473,111 @@ function renderComplexityPanel() {
   return section;
 }
 
-// -- Remote control --------------------------------------------------
+// -- Projects / remote control ----------------------------------------
 
-function renderRemotePanel() {
-  const { remote } = state;
+function renderProjectsPanel() {
   const section = el("section", { class: "panel" });
-  section.appendChild(el("h2", { text: "Remote control" }));
-  section.appendChild(el("p", { class: "desc", text: "Runs \"claude\" in a real terminal inside this container and streams it to a browser tab -- steer a session from your phone, tablet, or another computer. The link below is a bearer credential: anyone with it can type into this session. Don't share it, and don't expose this port past a network you trust." }));
+  section.appendChild(el("h2", { text: "Projects" }));
+  section.appendChild(el("p", { class: "desc", text: "Each project is a workspace folder. Chats run \"claude\" in a real terminal inside this container, scoped to that folder, and stream over WebSocket -- steer them from your phone, another computer, or the Custos desktop app. A chat's connect link is a bearer credential: anyone with it can type into that session. Don't share it, and don't expose this port past a network you trust." }));
 
-  if (remote.active) {
-    section.appendChild(el("div", { class: "row" }, [
-      el("span", { class: "badge ok", text: `Active -- ${remote.connectedClients} connected` }),
-    ]));
-    const urlRow = el("div", { class: "row" });
-    const urlInput = el("input", { type: "text", value: remote.connectUrl });
-    urlInput.readOnly = true;
-    urlRow.appendChild(urlInput);
-    urlRow.appendChild(el("button", { text: "Copy link", onclick: () => { navigator.clipboard.writeText(remote.connectUrl); showToast("Copied"); } }));
-    urlRow.appendChild(el("button", { text: "Open", onclick: () => window.open(remote.connectUrl, "_blank") }));
-    section.appendChild(urlRow);
-    section.appendChild(el("p", { class: "small", text: `Working directory: ${remote.cwd}` }));
-    section.appendChild(el("div", { class: "row" }, [
-      el("button", { class: "danger", text: "Stop session", onclick: () => reloadAfter(api("/admin/api/remote/stop", { method: "POST" }), "Session stopped") }),
-    ]));
-  } else {
-    section.appendChild(el("div", { class: "row" }, [
-      el("span", { class: "badge off", text: "No active session" }),
-      el("button", { class: "primary", text: "Start new session", onclick: () => reloadAfter(api("/admin/api/remote/start", { method: "POST" }), "Session started") }),
-    ]));
+  section.appendChild(el("div", { class: "row" }, [
+    el("button", { class: "primary", text: "New project", onclick: async () => {
+      const name = prompt("Project name:");
+      if (!name || !name.trim()) return;
+      reloadAfter(api("/admin/api/projects", { method: "POST", body: { name: name.trim() } }), "Project created");
+    }}),
+  ]));
 
-    const conversations = state.recentConversations || [];
-    if (conversations.length > 0) {
-      section.appendChild(el("hr", { class: "sep" }));
-      section.appendChild(el("p", { class: "small", text: "Or resume a recent conversation -- Claude opens with a summary of where it left off (not a literal replay; see README)." }));
-      const list = el("div", { class: "priority-list" });
-      for (const conv of conversations) {
-        const when = new Date(conv.lastActiveAt).toLocaleString();
-        list.appendChild(el("div", { class: "priority-item" }, [
-          el("span", { class: "small", text: `${conv.preview || "(no preview)"} -- ${when} (${conv.exchangeCount} exchanges)` }),
-          el("button", { class: "primary", text: "Resume", onclick: () => reloadAfter(
-            api("/admin/api/remote/start", { method: "POST", body: { resumeConversationId: conv.id } }), "Session started"
-          )}),
-        ]));
-      }
-      section.appendChild(list);
+  const projects = state.projects || [];
+  if (projects.length === 0) {
+    section.appendChild(el("p", { class: "small", text: "No projects yet." }));
+  }
+
+  for (const project of projects) {
+    section.appendChild(el("hr", { class: "sep" }));
+    section.appendChild(renderProject(project));
+  }
+
+  const conversations = state.recentConversations || [];
+  if (conversations.length > 0 && projects.length > 0) {
+    section.appendChild(el("hr", { class: "sep" }));
+    section.appendChild(el("p", { class: "small", text: "Resume a recent conversation into a project -- Claude opens with a summary of where it left off (not a literal replay; see README)." }));
+    const list = el("div", { class: "priority-list" });
+    for (const conv of conversations) {
+      const when = new Date(conv.lastActiveAt).toLocaleString();
+      const select = el("select", {}, projects.map((p) => el("option", { value: p.id, text: p.name })));
+      list.appendChild(el("div", { class: "priority-item" }, [
+        el("span", { class: "small", text: `${conv.preview || "(no preview)"} -- ${when} (${conv.exchangeCount} exchanges)` }),
+        select,
+        el("button", { class: "primary", text: "Resume into project", onclick: () => reloadAfter(
+          api(`/admin/api/projects/${select.value}/chats`, { method: "POST", body: { resumeConversationId: conv.id } }), "Chat started"
+        )}),
+      ]));
     }
+    section.appendChild(list);
   }
 
   return section;
+}
+
+function renderProject(project) {
+  const wrap = el("div", {});
+  wrap.appendChild(el("div", { class: "row" }, [
+    el("strong", { text: project.name }),
+    el("span", { class: "small", text: project.workspaceDir }),
+  ]));
+  wrap.appendChild(el("div", { class: "row" }, [
+    el("button", { text: "New chat", onclick: () => reloadAfter(
+      api(`/admin/api/projects/${project.id}/chats`, { method: "POST", body: {} }), "Chat started"
+    )}),
+    el("button", { text: "Rename", onclick: () => {
+      const name = prompt("Project name:", project.name);
+      if (!name || !name.trim() || name.trim() === project.name) return;
+      reloadAfter(api(`/admin/api/projects/${project.id}`, { method: "PATCH", body: { name: name.trim() } }), "Renamed");
+    }}),
+    el("button", { class: "danger", text: "Delete project", onclick: () => {
+      if (!confirm(`Delete "${project.name}"? This stops and removes all its chats -- the workspace folder and its files are left untouched.`)) return;
+      reloadAfter(api(`/admin/api/projects/${project.id}`, { method: "DELETE" }), "Project deleted");
+    }}),
+  ]));
+
+  const chats = project.chats || [];
+  if (chats.length === 0) {
+    wrap.appendChild(el("p", { class: "small", text: "No chats yet." }));
+  } else {
+    const list = el("div", { class: "priority-list" });
+    for (const chat of chats) {
+      list.appendChild(renderChat(chat));
+    }
+    wrap.appendChild(list);
+  }
+  return wrap;
+}
+
+function renderChat(chat) {
+  const row = el("div", { class: "priority-item" });
+  row.appendChild(el("span", { class: "small", text: chat.title }));
+  row.appendChild(el("span", { class: `badge ${chat.active ? "ok" : "off"}`, text: chat.active ? `Active -- ${chat.connectedClients} connected` : "Stopped" }));
+
+  if (chat.active) {
+    const urlInput = el("input", { type: "text", value: chat.connectUrl });
+    urlInput.readOnly = true;
+    row.appendChild(urlInput);
+    row.appendChild(el("button", { text: "Copy link", onclick: () => { navigator.clipboard.writeText(chat.connectUrl); showToast("Copied"); } }));
+    row.appendChild(el("button", { text: "Open", onclick: () => window.open(chat.connectUrl, "_blank") }));
+    row.appendChild(el("button", { class: "danger", text: "Stop", onclick: () => reloadAfter(
+      api(`/admin/api/chats/${chat.id}/stop`, { method: "POST" }), "Chat stopped"
+    )}));
+  } else {
+    row.appendChild(el("button", { class: "primary", text: "Reopen", onclick: () => reloadAfter(
+      api(`/admin/api/chats/${chat.id}/reopen`, { method: "POST" }), "Chat reopened"
+    )}));
+    row.appendChild(el("button", { class: "danger", text: "Delete", onclick: () => {
+      if (!confirm(`Delete chat "${chat.title}"?`)) return;
+      reloadAfter(api(`/admin/api/chats/${chat.id}`, { method: "DELETE" }), "Chat deleted");
+    }}));
+  }
+  return row;
 }
 
 // -- Security --------------------------------------------------

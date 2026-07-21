@@ -5,10 +5,12 @@ import { Runtime } from "./runtime.js";
 import { registerRoutes } from "./server/routes.js";
 import { registerAdminRoutes } from "./server/admin-routes.js";
 import { registerRemoteRoutes } from "./server/remote-routes.js";
+import { registerProjectRoutes } from "./server/project-routes.js";
 import { registerAuthRoutes } from "./server/auth-routes.js";
 import { registerAuthGuard } from "./server/auth-guard.js";
 import { registerClientAuthGuard } from "./server/client-auth-guard.js";
 import { ensureAdminPassword } from "./auth/admin-session.js";
+import { RemoteSessionManager } from "./remote/session-manager.js";
 import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
 
@@ -35,7 +37,9 @@ async function main() {
   registerAuthRoutes(app);
   registerRoutes(app, { runtime, memoryStore });
   registerAdminRoutes(app, runtime);
-  registerRemoteRoutes(app, runtime);
+  const remoteSessionManager = new RemoteSessionManager();
+  registerRemoteRoutes(app, remoteSessionManager);
+  registerProjectRoutes(app, runtime, remoteSessionManager);
 
   await app.listen({ port: PORT, host: "0.0.0.0" });
 }
