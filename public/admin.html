@@ -536,6 +536,34 @@ function renderSecurityPanel() {
     reloadAfter(api("/admin/api/change-password", { method: "POST", body: { currentPassword: current.value, newPassword: next.value } }), "Password changed");
   }})]));
 
+  section.appendChild(el("hr", { class: "sep" }));
+  section.appendChild(el("p", { class: "small", text: "Client API key -- required on every /v1/messages, /hooks/*, and /memory/search request, sent as the x-api-key header (the same header Claude Code already sends for real Anthropic API keys -- Custos checks this instead of forwarding it anywhere). Fails closed: until you generate one, those endpoints reject everything. Set the same value as ANTHROPIC_API_KEY on any Claude Code install pointed at this proxy." }));
+
+  if (state.clientApiKey) {
+    const keyRow = el("div", { class: "row" });
+    const keyInput = el("input", { type: "text", value: state.clientApiKey });
+    keyInput.readOnly = true;
+    keyRow.appendChild(keyInput);
+    keyRow.appendChild(el("button", { text: "Copy", onclick: () => { navigator.clipboard.writeText(state.clientApiKey); showToast("Copied"); } }));
+    section.appendChild(keyRow);
+    section.appendChild(el("div", { class: "row" }, [
+      el("span", { class: "badge ok", text: "Enforced" }),
+      el("button", { text: "Regenerate", onclick: () => {
+        if (!confirm("This invalidates the current key immediately -- any Claude Code install still using the old one will start getting 401s until you update it. Continue?")) return;
+        reloadAfter(api("/admin/api/client-key/generate", { method: "POST" }), "New key generated");
+      }}),
+      el("button", { class: "danger", text: "Clear key (blocks all proxy traffic)", onclick: () => {
+        if (!confirm("This immediately blocks /v1/messages, /hooks/*, and /memory/search for everyone, including your own Claude Code installs, until you generate a new key. Continue?")) return;
+        reloadAfter(api("/admin/api/client-key/clear", { method: "POST" }), "Key cleared -- proxy traffic now blocked");
+      }}),
+    ]));
+  } else {
+    section.appendChild(el("div", { class: "row" }, [
+      el("span", { class: "badge off", text: "Not set -- all proxy traffic is blocked" }),
+      el("button", { class: "primary", text: "Generate key", onclick: () => reloadAfter(api("/admin/api/client-key/generate", { method: "POST" }), "Key generated") }),
+    ]));
+  }
+
   return section;
 }
 

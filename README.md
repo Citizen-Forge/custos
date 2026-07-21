@@ -13,7 +13,8 @@ An Anthropic-Messages-format proxy that Claude Code talks to instead of `api.ant
   **Important:** this spawns a *new* session on whatever machine Custos itself runs on -- it does not attach to, view, or control a Claude Code session you already have running elsewhere (a terminal, VS Code, wherever). There's no general mechanism to do that: a PTY is host-local, and VS Code extension sessions in particular maintain completely separate history from CLI sessions by design (confirmed against Claude Code's own docs), so nothing running outside VS Code can reach them at all. If you want remote control to reach the same machine and files you actually develop on, run Custos there.
 
   Instead of literal session-attach, Custos offers **resume-by-summary**: since every `/v1/messages` exchange gets logged regardless of which surface it came from (CLI, VS Code, anywhere pointed at this proxy), the Remote control panel lists recent conversations and can start a new session primed with an LLM-generated summary of one, passed as the initial prompt. This is *not* a literal replay of the original conversation -- doing that properly would mean reverse-engineering Claude Code's own internal transcript format, an undocumented implementation detail Anthropic can change at will. It's "Claude opens already knowing roughly what you were working on," not "picks up mid-keystroke."
-- **Password-protected admin/remote access** — `/admin` and `/remote` (including the WebSocket itself, not just the page) require a session cookie from `/login`; nothing else does (Claude Code has no way to authenticate as "the admin browsing a UI", so `/v1/messages` and `/hooks/*` stay open). A random password is generated on first boot and printed to the container logs once if you don't set `ADMIN_PASSWORD` yourself; change it later from the admin UI's Security panel.
+- **Password-protected admin/remote access** — `/admin` and `/remote` (including the WebSocket itself, not just the page) require a session cookie from `/login`. A random password is generated on first boot and printed to the container logs once if you don't set `ADMIN_PASSWORD` yourself; change it later from the admin UI's Security panel.
+- **Client API key, fails closed** — `/v1/messages`, `/hooks/*`, and `/memory/search` (everything a Claude Code instance calls directly) require a matching `x-api-key` header -- the same header Claude Code already sends for real Anthropic API-key auth, repurposed here since Custos ignores whatever the client sends for upstream purposes anyway (it does its own provider auth server-side). There's no open mode: until you generate a key from the admin UI's Security panel, every request on that surface is rejected. Without this, anyone who can reach the endpoint could point their own Claude Code at your instance and burn your configured providers' budget/compute for free.
 - **Budget-based fallback** — give a provider instance a $/million-token price and a spend cap, and once that cap is hit for the current period, the router treats it as unavailable and falls through to the next entry in the priority list -- same mechanism as the existing rate-limit cooldown, just triggered by cumulative cost instead of a 429. Useful for a chain like "OpenAI (budget-capped) -> Claude (session-limit fallback) -> local models."
 
 ## Why a proxy, not just hooks
@@ -32,7 +33,8 @@ Check the container logs for a generated admin password (`docker compose logs ga
 1. **Connect Anthropic** — click "Connect via OAuth" (authenticates as your own Claude subscription the same way Claude Code's CLI login does: same client_id, same `claude.ai/oauth/authorize` flow -- this proxy is meant to sit in front of your own Claude Code traffic, not to resell/multiplex that session elsewhere) or paste in an API key as a fallback. If you never connect either, the gateway falls back to importing the OAuth token Claude Code itself is already logged in with from `~/.claude/.credentials.json`.
 2. **Add/edit model provider instances** — defaults point at a local Ollama; add OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter, or a custom endpoint via the preset dropdown, with an API key if that provider needs one.
 3. **Review task routing and complexity-tier priorities** — defaults are sane, but this is where you'd point the permission classifier at a specific fast model, add a third provider once one's configured, etc.
-4. **Copy the setup snippet** at the bottom of the page into your shell and `~/.claude/settings.json`.
+4. **Generate a client API key** in the Security panel -- required, not optional: `/v1/messages`/`/hooks/*`/`/memory/search` reject everything until a key exists.
+5. **Copy the setup snippet** at the bottom of the page into your shell and `~/.claude/settings.json` -- it already includes the client key in both the `ANTHROPIC_API_KEY` export and each hook's `headers` once you've generated one.
 
 All of the above can also be done by hand: copy `config.example.json` to `data/config.json`, or run `docker compose run --rm gateway npm run login` for a terminal-based OAuth login instead of the admin UI's browser flow.
 
@@ -52,28 +54,31 @@ Click **Start session** in the admin UI's Remote control panel and open the link
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8787
+export ANTHROPIC_API_KEY=<the client key generated in the admin UI's Security panel>
 ```
+
+`ANTHROPIC_API_KEY` here is not a real Anthropic key -- it's Custos's own client key, sent as `x-api-key` and checked by Custos itself before anything reaches a provider. The real upstream credentials (OAuth or a real API key) are configured separately, server-side, in the admin UI.
 
 ## Wire up the hooks
 
-Add to `~/.claude/settings.json` (the admin UI's setup panel has this pre-filled with your actual host/port):
+Add to `~/.claude/settings.json` (the admin UI's setup panel has this pre-filled with your actual host/port and client key):
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "hooks": [{ "type": "http", "url": "http://localhost:8787/hooks/pretooluse", "timeout": 30 }]
+        "hooks": [{ "type": "http", "url": "http://localhost:8787/hooks/pretooluse", "timeout": 30, "headers": { "x-api-key": "<client key>" } }]
       }
     ],
     "UserPromptSubmit": [
       {
-        "hooks": [{ "type": "http", "url": "http://localhost:8787/hooks/user-prompt-submit", "timeout": 15 }]
+        "hooks": [{ "type": "http", "url": "http://localhost:8787/hooks/user-prompt-submit", "timeout": 15, "headers": { "x-api-key": "<client key>" } }]
       }
     ],
     "PostToolUse": [
       {
-        "hooks": [{ "type": "http", "url": "http://localhost:8787/hooks/posttooluse", "timeout": 10 }]
+        "hooks": [{ "type": "http", "url": "http://localhost:8787/hooks/posttooluse", "timeout": 10, "headers": { "x-api-key": "<client key>" } }]
       }
     ]
   }
@@ -90,7 +95,7 @@ Note that you already have `claude-permission-hook.exe` registered on `PreToolUs
 - Session boundaries for memory ingestion are approximate — the Messages API carries no stable conversation id, so the curator works off rolling daily logs rather than exact per-session grouping.
 - The OAuth client_id/endpoints are reverse-engineered (matching Claude Code's own login flow); Anthropic can change or restrict them without notice.
 - The session-limit-aware cooldown reads Anthropic's documented rate-limit reset headers (`anthropic-ratelimit-unified-5h-reset`, etc.) but hasn't been exercised against a real 429 yet -- only verified by code review of the header names, not a live triggered limit.
-- Sessions are in-memory only -- restarting the container logs everyone out. `docker-compose.yml` still publishes port 8787 on `0.0.0.0`; the login now protects `/admin`/`/remote` from anyone who reaches that port, but `/v1/messages` and `/hooks/*` are still open by design (Claude Code can't authenticate as a human), so don't expose this port to the open internet regardless -- use a VPN/Tailscale rather than port-forwarding if you want real remote access.
+- Sessions are in-memory only -- restarting the container logs everyone out. Prefer a VPN/Tailscale over raw port-forwarding if you want remote access beyond your LAN, even with the admin login and client API key both in place -- defense in depth is still worth it for something that can spend your API budget or run tool calls.
 - Remote control supports one session at a time, and any client holding the connect link can both view and type -- there's no separate read-only/view-only mode, and no per-device revocation short of stopping the whole session. The admin login is a real improvement here (you now need both the admin password *and* the link), but the link itself still doesn't rotate/expire independently.
 - Budget tracking uses a fixed-window reset, not a true rolling window: once `periodDays` elapses since the window started, the next request resets the counter rather than old spend decaying continuously. Anthropic isn't covered by budget tracking yet, only `openaiCompatibleInstances` -- the user's own motivating example (OpenAI budget-capped, then Claude via its existing session-limit fallback) doesn't need it there anyway.
 - Complexity routing's classifier prompt hasn't been tuned/evaluated beyond a handful of manual test cases (a trivial question, a deliberately complex architecture question, a tool-continuation turn) -- tier boundaries are a first guess, not calibrated.

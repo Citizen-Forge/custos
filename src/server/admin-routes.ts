@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import type { Runtime } from "../runtime.js";
 import { saveConfig, getApiKeySource, type GatewayConfig, type ProviderEntry } from "../config.js";
 import type { TaskKind, ComplexityTier } from "../types.js";
@@ -35,17 +36,23 @@ function maskApiKey(key: string): string {
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
 }
 
-function buildSetupInstructions() {
+function buildSetupInstructions(clientApiKey?: string) {
   // `||` not `??`: docker-compose's `${GATEWAY_PUBLIC_URL:-}` passes an
   // empty string, not an absent var, when unset (same footgun as
   // ADMIN_PASSWORD -- see admin-session.ts).
   const baseUrl = process.env.GATEWAY_PUBLIC_URL || `http://localhost:${process.env.PORT ?? 8787}`;
-  const envExport = `export ANTHROPIC_BASE_URL=${baseUrl}`;
+  const envLines = [`export ANTHROPIC_BASE_URL=${baseUrl}`];
+  if (clientApiKey) envLines.push(`export ANTHROPIC_API_KEY=${clientApiKey}`);
+  const envExport = envLines.join("\n");
+
+  const hookEntry = (path: string, timeout: number) => ({
+    hooks: [{ type: "http", url: `${baseUrl}${path}`, timeout, ...(clientApiKey ? { headers: { "x-api-key": clientApiKey } } : {}) }],
+  });
   const settingsSnippet = {
     hooks: {
-      PreToolUse: [{ hooks: [{ type: "http", url: `${baseUrl}/hooks/pretooluse`, timeout: 30 }] }],
-      UserPromptSubmit: [{ hooks: [{ type: "http", url: `${baseUrl}/hooks/user-prompt-submit`, timeout: 15 }] }],
-      PostToolUse: [{ hooks: [{ type: "http", url: `${baseUrl}/hooks/posttooluse`, timeout: 10 }] }],
+      PreToolUse: [hookEntry("/hooks/pretooluse", 30)],
+      UserPromptSubmit: [hookEntry("/hooks/user-prompt-submit", 15)],
+      PostToolUse: [hookEntry("/hooks/posttooluse", 10)],
     },
   };
   return { baseUrl, envExport, hooksJson: JSON.stringify(settingsSnippet, null, 2) };
@@ -116,8 +123,22 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
       providerPresets: PROVIDER_PRESETS,
       tasks: config.tasks,
       complexityRouting: config.complexityRouting,
-      setup: buildSetupInstructions(),
+      clientApiKey: config.clientApiKey ?? null,
+      setup: buildSetupInstructions(config.clientApiKey),
     };
+  });
+
+  // -- Client API key (gates /v1/messages, /hooks/*, /memory/search) ------
+
+  app.post("/admin/api/client-key/generate", async () => {
+    const key = `custos-${randomBytes(24).toString("base64url")}`;
+    await updateConfig(runtime, (cfg) => ({ ...cfg, clientApiKey: key }));
+    return { clientApiKey: key };
+  });
+
+  app.post("/admin/api/client-key/clear", async () => {
+    await updateConfig(runtime, (cfg) => ({ ...cfg, clientApiKey: undefined }));
+    return { ok: true };
   });
 
   // -- Anthropic auth --------------------------------------------------

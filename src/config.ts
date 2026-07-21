@@ -37,6 +37,16 @@ export interface GatewayConfig {
   embeddingProvider: EmbeddingProviderConfig;
   tasks: Record<TaskKind, ProviderEntry[]>;
   complexityRouting: ComplexityRoutingConfig;
+  /** Shared secret Claude Code sends back as `x-api-key` (the same header
+   * it already sends for real Anthropic API-key auth -- Custos ignores the
+   * value for upstream purposes since it does its own provider auth
+   * server-side, so this repurposes it as Custos's own access control).
+   * Gates /v1/messages, /hooks/*, and /memory/search -- the client-facing
+   * proxy surface, as opposed to the /admin and /remote paths, which use
+   * the session login instead. Fails closed: unset means every request on
+   * that surface is rejected, not allowed through -- there's no supported
+   * "open" mode. Generate one from the admin UI's Security panel. */
+  clientApiKey?: string;
 }
 
 const OLLAMA_HOST = "http://localhost:11434";
