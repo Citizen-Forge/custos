@@ -27,7 +27,7 @@ async function main() {
 
   startCurator(() => ({ router: runtime.router, store: memoryStore, embedding: runtime.embedding }), CURATOR_INTERVAL_MS);
 
-  const app = Fastify({ logger: true, bodyLimit: 20 * 1024 * 1024 });
+  const app = Fastify({ logger: true, bodyLimit: 20 * 1024 * 1024, trustProxy: true });
   await app.register(cookie);
   await app.register(websocket);
   registerAuthGuard(app);

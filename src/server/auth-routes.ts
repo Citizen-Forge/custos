@@ -3,8 +3,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { checkPassword, changePassword, sessions, SESSION_COOKIE } from "../auth/admin-session.js";
 
-const isProduction = process.env.NODE_ENV === "production" && process.env.GATEWAY_PUBLIC_URL?.startsWith("https://");
-
 export function registerAuthRoutes(app: FastifyInstance): void {
   app.get("/login", async (_req, reply) => {
     const html = await readFile(join(process.cwd(), "public", "login.html"), "utf8");
@@ -19,10 +17,16 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       return { error: "wrong password" };
     }
     const sessionId = sessions.create();
+    // `req.protocol` reflects X-Forwarded-Proto (trustProxy is on), so this
+    // is per-request: Secure on when reached via the Cloudflare tunnel
+    // (TLS terminated at the edge), off for direct LAN http access -- a
+    // static NODE_ENV-based flag would force Secure everywhere the tunnel
+    // is configured, which breaks plain-http LAN login entirely (a browser
+    // never sends a Secure cookie back over http).
     reply.setCookie(SESSION_COOKIE, sessionId, {
       httpOnly: true,
       sameSite: "lax",
-      secure: isProduction,
+      secure: req.protocol === "https",
       path: "/",
       maxAge: 30 * 24 * 60 * 60,
     });
