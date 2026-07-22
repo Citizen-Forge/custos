@@ -53,8 +53,17 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
     reply.code(providerResponse.status);
     reply.header("x-custos-provider", providerResponse.providerName);
+    // content-length no longer matches once the body's been re-streamed
+    // through us, and content-encoding/transfer-encoding describe the
+    // *upstream* wire format -- fetch() already transparently decompresses
+    // the body per the Fetch spec (decompression happens before `res.body`
+    // is even exposed), so by the time we forward it it's plain bytes.
+    // Copying "content-encoding: gzip" through anyway told downstream
+    // clients (the Claude Code CLI's own fetch) to gunzip data that wasn't
+    // compressed anymore, which surfaced as a ZlibError there.
+    const HOP_BY_HOP_HEADERS = new Set(["content-length", "content-encoding", "transfer-encoding"]);
     providerResponse.headers.forEach((value, key) => {
-      if (key.toLowerCase() !== "content-length") reply.header(key, value);
+      if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) reply.header(key, value);
     });
 
     if (!providerResponse.body) {
