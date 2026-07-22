@@ -114,6 +114,34 @@ export async function getValidAccessToken(): Promise<string | null> {
 export async function syncSpawnedSessionCredentials(): Promise<void> {
   const tokens = await getValidOwnTokenSet();
   if (!tokens) return;
+
+  // The real file needs more than {accessToken, refreshToken, expiresAt} --
+  // the CLI does its own local "am I logged in" check before ever making a
+  // network request, and a file missing `scopes` fails that check silently
+  // (surfaces as a synthetic "Not logged in" reply with zero API time, not
+  // an error). The extra fields live in Anthropic's token-response JSON
+  // (captured verbatim as `raw` in oauth.ts) under names that don't match
+  // the credentials file's camelCase, so map defensively -- extraction
+  // omits a field rather than guessing wrong if the shape doesn't match.
+  const raw = tokens.raw ?? {};
+  const claudeAiOauth: Record<string, unknown> = {
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
+    expiresAt: tokens.expiresAt,
+  };
+  if (typeof raw.refresh_token_expires_in === "number") {
+    claudeAiOauth.refreshTokenExpiresAt = Date.now() + raw.refresh_token_expires_in * 1000;
+  }
+  if (typeof raw.scope === "string") {
+    claudeAiOauth.scopes = raw.scope.split(" ").filter(Boolean);
+  }
+  const account = raw.account as Record<string, unknown> | undefined;
+  const organization = raw.organization as Record<string, unknown> | undefined;
+  const subscriptionType = account?.subscription_type ?? organization?.subscription_type;
+  if (typeof subscriptionType === "string") claudeAiOauth.subscriptionType = subscriptionType;
+  const rateLimitTier = account?.rate_limit_tier ?? organization?.rate_limit_tier;
+  if (typeof rateLimitTier === "string") claudeAiOauth.rateLimitTier = rateLimitTier;
+
   await mkdir(dirname(CLAUDE_CODE_CREDENTIALS_PATH), { recursive: true });
-  await writeFile(CLAUDE_CODE_CREDENTIALS_PATH, JSON.stringify({ claudeAiOauth: tokens }, null, 2), "utf8");
+  await writeFile(CLAUDE_CODE_CREDENTIALS_PATH, JSON.stringify({ claudeAiOauth }, null, 2), "utf8");
 }

@@ -23,6 +23,15 @@ export interface TokenSet {
   accessToken: string;
   refreshToken: string;
   expiresAt: number; // unix ms
+  /** Full original token-response JSON (scope, refresh_token_expires_in,
+   * account, organization, etc.) kept verbatim -- the real Claude Code CLI
+   * credentials file (~/.claude/.credentials.json) needs several of these
+   * fields (scopes, subscriptionType, ...) beyond the three above, and
+   * capturing the whole response means the exact shape can be inspected
+   * from data/credentials.json later without another token round-trip
+   * (refresh tokens rotate on use, so a throwaway request to inspect the
+   * shape burns the stored one). */
+  raw?: Record<string, unknown>;
 }
 
 function base64url(input: Buffer): string {
@@ -66,11 +75,12 @@ async function postToken(body: Record<string, string>): Promise<TokenSet> {
     throw new Error(`OAuth token request failed: HTTP ${res.status} - ${text}`);
   }
 
-  const json = (await res.json()) as TokenResponse;
+  const json = (await res.json()) as TokenResponse & Record<string, unknown>;
   return {
     accessToken: json.access_token,
     refreshToken: json.refresh_token,
     expiresAt: Date.now() + json.expires_in * 1000,
+    raw: json,
   };
 }
 
