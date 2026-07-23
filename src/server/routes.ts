@@ -102,6 +102,27 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return preToolUseHandler(req.body as PreToolUseHookInput);
   });
 
+  // Used by one-shot `claude -p` turns spawned for chat-mode chats (see
+  // remote/turn-runner.ts). Claude Code's own interactive permission
+  // prompt is what actually resolves an "ask" decision -- there's no TTY
+  // for that in `-p` mode, so left as "ask" it would either hang forever
+  // or fail unpredictably. Coerced to "deny" here instead: fail closed,
+  // consistent with the rest of Custos's permission model, rather than
+  // silently widen to "allow".
+  app.post("/hooks/pretooluse-headless", async (req) => {
+    const result = await preToolUseHandler(req.body as PreToolUseHookInput);
+    if (result.hookSpecificOutput.permissionDecision === "ask") {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse" as const,
+          permissionDecision: "deny" as const,
+          permissionDecisionReason: `${result.hookSpecificOutput.permissionDecisionReason} (auto-denied: no interactive session to ask in chat mode)`,
+        },
+      };
+    }
+    return result;
+  });
+
   app.post("/hooks/posttooluse", async (req) => {
     return postToolUseHandler(req.body as PostToolUseHookInput);
   });

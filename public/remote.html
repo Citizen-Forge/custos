@@ -3,80 +3,204 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Custos Remote</title>
-<link rel="stylesheet" href="/vendor/xterm.css" />
+<title>Custos Chat</title>
 <style>
-  :root { color-scheme: dark; --bg: #14161a; --border: #2b2f38; --text: #e4e6eb; --muted: #8b93a1; --danger: #d9705b; }
+  :root { color-scheme: dark; --bg: #14161a; --panel: #1c1f26; --border: #2b2f38; --text: #e4e6eb; --muted: #8b93a1; --accent: #5b9dd9; --danger: #d9705b; --ok: #5bd98f; }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; }
-  header { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; font-size: 14px; }
+  header { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; font-size: 13px; flex: none; }
   header .title { font-weight: 600; }
   .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  .dot.connected { background: #5bd98f; }
+  .dot.connected { background: var(--ok); }
   .dot.error { background: var(--danger); }
-  #term-wrap { flex: 1; min-height: 0; padding: 8px; }
-  #terminal { height: 100%; }
+  #messages { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .bubble { max-width: 80%; padding: 9px 13px; border-radius: 10px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.45; }
+  .bubble.user { align-self: flex-end; background: var(--accent); color: #0d1117; }
+  .bubble.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .bubble.system { align-self: center; background: none; color: var(--muted); font-size: 12.5px; max-width: 90%; }
+  .bubble.error { align-self: center; background: rgba(217,112,91,0.12); color: var(--danger); border: 1px solid rgba(217,112,91,0.3); }
+  .tool-block { align-self: flex-start; max-width: 80%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 12.5px; }
+  .tool-block summary { cursor: pointer; color: var(--muted); font-family: ui-monospace, monospace; }
+  .tool-block pre { margin: 6px 0 0; white-space: pre-wrap; word-wrap: break-word; font-size: 12px; color: var(--text); }
+  .tool-block.error summary { color: var(--danger); }
+  #composer { flex: none; display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--panel); }
+  #input { flex: 1; resize: none; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 9px 11px; font-family: inherit; font-size: 14px; max-height: 140px; }
+  #composer button { background: var(--accent); border: none; color: #0d1117; font-weight: 600; border-radius: 8px; padding: 0 18px; cursor: pointer; }
+  #composer button:disabled { opacity: 0.5; cursor: not-allowed; }
   .message { padding: 24px; color: var(--muted); font-size: 14px; }
 </style>
 </head>
 <body>
 <header>
-  <span class="title">Custos Remote</span>
+  <span class="title">Custos Chat</span>
   <span class="status"><span class="dot" id="dot"></span><span id="status-text">Connecting…</span></span>
 </header>
-<div id="term-wrap"><div id="terminal"></div></div>
+<div id="messages"></div>
+<form id="composer">
+  <textarea id="input" placeholder="Message Claude…" rows="1"></textarea>
+  <button type="submit" id="send-btn">Send</button>
+</form>
 
-<script src="/vendor/xterm.js"></script>
-<script src="/vendor/addon-fit.js"></script>
 <script>
+const token = new URLSearchParams(location.search).get("token");
+const messagesEl = document.getElementById("messages");
 const statusText = document.getElementById("status-text");
 const dot = document.getElementById("dot");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send-btn");
+
 function setStatus(text, cls) {
   statusText.textContent = text;
   dot.className = "dot" + (cls ? " " + cls : "");
 }
 
-const token = new URLSearchParams(location.search).get("token");
+function el(tag, attrs = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "text") node.textContent = v;
+    else node.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) if (c) node.appendChild(c);
+  return node;
+}
+
+function scrollToBottom() {
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function addBubble(role, text) {
+  const bubble = el("div", { class: `bubble ${role}` });
+  bubble.textContent = text;
+  messagesEl.appendChild(bubble);
+  scrollToBottom();
+  return bubble;
+}
+
+function addToolBlock(label, inputObj) {
+  const details = el("details", { class: "tool-block" });
+  details.appendChild(el("summary", { text: label }));
+  const pre = el("pre");
+  pre.textContent = JSON.stringify(inputObj, null, 2);
+  details.appendChild(pre);
+  messagesEl.appendChild(details);
+  scrollToBottom();
+  return details;
+}
+
 if (!token) {
-  document.getElementById("term-wrap").innerHTML = '<p class="message">No session token in the URL. Start a session from the admin UI and use the link it gives you.</p>';
+  messagesEl.innerHTML = '<p class="message">No chat token in the URL. Start or open a chat from the Custos admin panel.</p>';
 } else {
-  const term = new Terminal({
-    cursorBlink: true,
-    fontSize: 14,
-    theme: { background: "#14161a", foreground: "#e4e6eb" },
-  });
-  const fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(document.getElementById("terminal"));
-  fitAddon.fit();
+  let pendingBubble = null; // in-progress assistant text bubble, built up via text_delta
+  const toolBlocksById = {}; // tool_use id -> the <details> element, so tool_result can attach to it
+
+  const initialMessage = new URLSearchParams(location.search).get("initialMessage");
 
   const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${wsProtocol}//${location.host}/remote/ws?token=${encodeURIComponent(token)}`);
 
   ws.addEventListener("open", () => {
     setStatus("Connected", "connected");
-    ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+    if (initialMessage) {
+      addBubble("user", initialMessage);
+      ws.send(JSON.stringify({ type: "user_message", text: initialMessage }));
+      sendBtn.disabled = true;
+      setStatus("Thinking…", "connected");
+      // Strip it from the URL so an accidental refresh doesn't resend it.
+      const url = new URL(location.href);
+      url.searchParams.delete("initialMessage");
+      history.replaceState(null, "", url);
+    }
   });
   ws.addEventListener("close", (ev) => {
     setStatus(ev.reason ? `Disconnected: ${ev.reason}` : "Disconnected", "error");
+    sendBtn.disabled = true;
   });
   ws.addEventListener("error", () => setStatus("Connection error", "error"));
+
   ws.addEventListener("message", (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === "output") term.write(msg.data);
+
+    if (msg.type === "connected") {
+      sendBtn.disabled = !!msg.running;
+      if (msg.running) setStatus("Turn in progress…", "connected");
+      return;
+    }
+
+    if (msg.type === "text_delta") {
+      if (!pendingBubble) pendingBubble = addBubble("assistant", "");
+      pendingBubble.textContent += msg.text;
+      scrollToBottom();
+      return;
+    }
+
+    if (msg.type === "message_final") {
+      // Replaces whatever was streamed for this message -- authoritative
+      // final content, including tool_use blocks (with fully-parsed input).
+      if (pendingBubble) {
+        pendingBubble.remove();
+        pendingBubble = null;
+      }
+      for (const block of msg.content) {
+        if (block.type === "text" && block.text) {
+          addBubble("assistant", block.text);
+        } else if (block.type === "tool_use") {
+          toolBlocksById[block.id] = addToolBlock(`\u{1F527} ${block.name}`, block.input);
+        }
+      }
+      return;
+    }
+
+    if (msg.type === "tool_result") {
+      const details = toolBlocksById[msg.toolUseId];
+      if (details) {
+        if (msg.isError) details.classList.add("error");
+        const pre = el("pre");
+        pre.textContent = "→ " + msg.content;
+        details.appendChild(pre);
+        scrollToBottom();
+      }
+      return;
+    }
+
+    if (msg.type === "turn_complete") {
+      sendBtn.disabled = false;
+      setStatus("Connected", "connected");
+      if (msg.isError && msg.resultText) addBubble("error", msg.resultText);
+      return;
+    }
+
+    if (msg.type === "error") {
+      addBubble("error", msg.message);
+      sendBtn.disabled = false;
+      return;
+    }
   });
 
-  term.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+  document.getElementById("composer").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || ws.readyState !== WebSocket.OPEN) return;
+    addBubble("user", text);
+    ws.send(JSON.stringify({ type: "user_message", text }));
+    input.value = "";
+    input.style.height = "auto";
+    sendBtn.disabled = true;
+    setStatus("Thinking…", "connected");
   });
 
-  const resizeObserver = new ResizeObserver(() => {
-    fitAddon.fit();
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      document.getElementById("composer").requestSubmit();
+    }
   });
-  resizeObserver.observe(document.getElementById("term-wrap"));
+
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 140) + "px";
+  });
 }
 </script>
 </body>

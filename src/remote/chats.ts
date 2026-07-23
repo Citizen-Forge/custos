@@ -15,6 +15,11 @@ export interface ChatRecord {
    * this field, so a stale null here just means "not known to have been
    * cleanly stopped," not "still running." */
   endedAt: number | null;
+  /** Claude Code's own session id, captured from the first turn's stream
+   * and passed as `--resume` on every subsequent turn -- each turn is a
+   * fresh one-shot `claude -p` process, so this is what stitches them
+   * into one continuous conversation. Null until the first turn completes. */
+  claudeSessionId: string | null;
 }
 
 async function readAll(): Promise<ChatRecord[]> {
@@ -43,10 +48,19 @@ export async function getChat(id: string): Promise<ChatRecord | null> {
 
 export async function createChat(projectId: string, title: string): Promise<ChatRecord> {
   const chats = await readAll();
-  const chat: ChatRecord = { id: randomBytes(12).toString("base64url"), projectId, title, createdAt: Date.now(), endedAt: null };
+  const chat: ChatRecord = { id: randomBytes(12).toString("base64url"), projectId, title, createdAt: Date.now(), endedAt: null, claudeSessionId: null };
   chats.push(chat);
   await writeAll(chats);
   return chat;
+}
+
+export async function setClaudeSessionId(id: string, claudeSessionId: string): Promise<void> {
+  const chats = await readAll();
+  const chat = chats.find((c) => c.id === id);
+  if (chat) {
+    chat.claudeSessionId = claudeSessionId;
+    await writeAll(chats);
+  }
 }
 
 export async function renameChat(id: string, title: string): Promise<ChatRecord | null> {

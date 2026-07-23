@@ -14,8 +14,9 @@ function resumePrompt(summary: string): string {
   return `Resuming a previous conversation. Here's a summary of where it left off:\n\n${summary}\n\nPlease continue from here.`;
 }
 
-function connectUrl(token: string): string {
-  return `${publicUrl()}/remote?token=${token}`;
+function connectUrl(token: string, initialMessage?: string): string {
+  const url = `${publicUrl()}/remote?token=${token}`;
+  return initialMessage ? `${url}&initialMessage=${encodeURIComponent(initialMessage)}` : url;
 }
 
 export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, manager: RemoteSessionManager): void {
@@ -93,20 +94,24 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       return { error: "project not found" };
     }
 
-    let initialPrompt: string | undefined;
+    // No process to prime with this as an initial CLI argument anymore --
+    // a chat isn't backed by a persistent process at all now, just a
+    // connectable slot. Returned to the client instead, to send as the
+    // first user_message once it connects.
+    let initialMessage: string | undefined;
     if (resumeConversationId) {
       const summary = await buildResumeSummary(runtime.router, resumeConversationId);
       if (!summary) {
         reply.code(404);
         return { error: "that conversation wasn't found (it may be too old -- only the last ~2 weeks are scanned)" };
       }
-      initialPrompt = resumePrompt(summary);
+      initialMessage = resumePrompt(summary);
     }
 
     const chat = await chats.createChat(id, title?.trim() || "New chat");
     try {
-      const session = await manager.start(chat.id, project.workspaceDir, initialPrompt);
-      return { chat, token: session.token, connectUrl: connectUrl(session.token) };
+      const session = manager.start(chat.id, project.workspaceDir);
+      return { chat, token: session.token, connectUrl: connectUrl(session.token, initialMessage), initialMessage };
     } catch (err) {
       await chats.deleteChat(chat.id);
       reply.code(409);
@@ -140,12 +145,11 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
     return { ok: true };
   });
 
-  // Starts a fresh `claude` process in the same project directory under an
-  // existing chat's id -- NOT a real resume of that process's own history
-  // (there's no mechanism to persist/restore Claude Code's in-process
-  // conversation state across a PTY exit). For actual continuity, start a
-  // new chat with resumeConversationId pointing at Custos's own logged
-  // conversation instead (see the POST /chats handler above).
+  // Re-opens an existing chat's connectable slot. If Claude Code captured
+  // a session id from an earlier turn (chat.claudeSessionId), it's passed
+  // through so the next message genuinely resumes that conversation via
+  // `--resume` -- unlike the old PTY model, this is a real continuation,
+  // not just "same folder, fresh context."
   app.post("/admin/api/chats/:chatId/reopen", async (req, reply) => {
     const { chatId } = req.params as { chatId: string };
     const chat = await chats.getChat(chatId);
@@ -159,7 +163,7 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       return { error: "project not found" };
     }
     try {
-      const session = await manager.start(chat.id, project.workspaceDir);
+      const session = manager.start(chat.id, project.workspaceDir, chat.claudeSessionId);
       await chats.markChatStarted(chat.id);
       return { token: session.token, connectUrl: connectUrl(session.token) };
     } catch (err) {
