@@ -30,6 +30,26 @@ async function main() {
   startCurator(() => ({ router: runtime.router, store: memoryStore, embedding: runtime.embedding }), CURATOR_INTERVAL_MS);
 
   const app = Fastify({ logger: true, bodyLimit: 20 * 1024 * 1024, trustProxy: true });
+
+  // Several admin actions are POSTs with no body (disconnect OAuth, clear
+  // key, stop chat, ...). Fastify's default JSON parser rejects an empty
+  // body outright (FST_ERR_CTP_EMPTY_JSON_BODY) when the request still
+  // carries `content-type: application/json` -- which browsers/fetch send
+  // by default. Treat an empty json body as `{}` so those no-arg endpoints
+  // work regardless of whether the caller bothered to omit the header.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    if (body === "" || body == null) {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      (err as { statusCode?: number }).statusCode = 400;
+      done(err as Error, undefined);
+    }
+  });
+
   await app.register(cookie);
   await app.register(websocket);
   registerAuthGuard(app);
