@@ -35,7 +35,10 @@ export async function ensureHeadlessSettingsFile(clientApiKey?: string): Promise
     ...existing,
     hooks: {
       ...existingHooks,
-      PreToolUse: [hookEntry("/hooks/pretooluse-headless", 30)],
+      // 300s: this hook can block while a human approves/denies a flagged
+      // action in the chat UI (routes.ts holds the response open, with its
+      // own 270s internal cap so it always answers before this fires).
+      PreToolUse: [hookEntry("/hooks/pretooluse-headless", 300)],
       UserPromptSubmit: [hookEntry("/hooks/user-prompt-submit", 15)],
     },
   };

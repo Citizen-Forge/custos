@@ -23,7 +23,7 @@ export function registerRemoteRoutes(app: FastifyInstance, manager: RemoteSessio
     socket.send(JSON.stringify({ type: "connected", running: manager.isRunning(session.chatId) }));
 
     socket.on("message", (raw: RawData) => {
-      let msg: { type?: string; text?: string };
+      let msg: { type?: string; text?: string; id?: string; decision?: string };
       try {
         msg = JSON.parse(raw.toString());
       } catch {
@@ -33,6 +33,11 @@ export function registerRemoteRoutes(app: FastifyInstance, manager: RemoteSessio
         manager.sendUserMessage(session, msg.text).catch((err) => {
           socket.send(JSON.stringify({ type: "error", message: (err as Error).message }));
         });
+      } else if (msg.type === "approval_response" && typeof msg.id === "string" && (msg.decision === "allow" || msg.decision === "deny")) {
+        manager.resolveApproval(msg.id, msg.decision);
+        // Echo the resolution to every client so a second viewer's UI can
+        // clear the same pending request (any client can answer it).
+        manager.broadcast(session, { type: "approval_resolved", id: msg.id, decision: msg.decision });
       }
     });
 

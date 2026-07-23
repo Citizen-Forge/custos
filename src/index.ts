@@ -55,9 +55,9 @@ async function main() {
   registerAuthGuard(app);
   registerClientAuthGuard(app, runtime);
   registerAuthRoutes(app);
-  registerRoutes(app, { runtime, memoryStore });
-  registerAdminRoutes(app, runtime);
   const remoteSessionManager = new RemoteSessionManager(runtime);
+  registerRoutes(app, { runtime, memoryStore, remoteSessionManager });
+  registerAdminRoutes(app, runtime);
   registerRemoteRoutes(app, remoteSessionManager);
   registerProjectRoutes(app, runtime, remoteSessionManager);
 

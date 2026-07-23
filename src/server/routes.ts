@@ -12,11 +12,19 @@ import type { MemoryStore } from "../memory/store.js";
 import { createUserPromptSubmitHandler, type UserPromptSubmitInput } from "../memory/hook-handlers.js";
 import { reconstructFromAnthropicSSE } from "../memory/stream-reconstruct.js";
 import { classifyComplexity, isFreshUserTurn } from "../routing/complexity.js";
+import type { RemoteSessionManager } from "../remote/session-manager.js";
 
 export interface RouteDeps {
   runtime: Runtime;
   memoryStore: MemoryStore;
+  remoteSessionManager: RemoteSessionManager;
 }
+
+// How long a chat-mode "ask" waits for a human to click approve/deny before
+// failing closed. Kept below the PreToolUse hook's own timeout (see
+// headless-settings.ts) so we always return an explicit deny rather than
+// letting Claude Code's hook timeout decide.
+const APPROVAL_TIMEOUT_MS = 270_000;
 
 function recordSpend(runtime: Runtime, providerName: string, usage: { input_tokens: number; output_tokens: number }): void {
   const instance = runtime.config.openaiCompatibleInstances[providerName];
@@ -111,24 +119,34 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   });
 
   // Used by one-shot `claude -p` turns spawned for chat-mode chats (see
-  // remote/turn-runner.ts). Claude Code's own interactive permission
-  // prompt is what actually resolves an "ask" decision -- there's no TTY
-  // for that in `-p` mode, so left as "ask" it would either hang forever
-  // or fail unpredictably. Coerced to "deny" here instead: fail closed,
-  // consistent with the rest of Custos's permission model, rather than
-  // silently widen to "allow".
+  // remote/turn-runner.ts). There's no TTY in `-p` mode for Claude Code's
+  // own interactive permission prompt, so an "ask" is surfaced to the
+  // chat's connected clients (the desktop app / browser transcript) as an
+  // approval request instead, and this hook blocks until the human answers.
+  // Falls back to deny if the chat can't be located or no one is watching
+  // -- fail closed, but only after actually offering the choice.
   app.post("/hooks/pretooluse-headless", async (req) => {
-    const result = await preToolUseHandler(req.body as PreToolUseHookInput);
-    if (result.hookSpecificOutput.permissionDecision === "ask") {
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse" as const,
-          permissionDecision: "deny" as const,
-          permissionDecisionReason: `${result.hookSpecificOutput.permissionDecisionReason} (auto-denied: no interactive session to ask in chat mode)`,
-        },
-      };
+    const input = req.body as PreToolUseHookInput;
+    const result = await preToolUseHandler(input);
+    if (result.hookSpecificOutput.permissionDecision !== "ask") return result;
+
+    const session = deps.remoteSessionManager.findByClaudeSessionId(input.session_id);
+    const respond = (decision: "allow" | "deny", reason: string) => ({
+      hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: decision, permissionDecisionReason: reason },
+    });
+
+    if (!session) {
+      return respond("deny", `${result.hookSpecificOutput.permissionDecisionReason} (auto-denied: chat session not found to ask in)`);
     }
-    return result;
+
+    const decision = await deps.remoteSessionManager.requestApproval(
+      session,
+      { toolName: input.tool_name, toolInput: input.tool_input, reason: result.hookSpecificOutput.permissionDecisionReason },
+      APPROVAL_TIMEOUT_MS,
+    );
+    return decision === "allow"
+      ? respond("allow", `approved in chat: ${result.hookSpecificOutput.permissionDecisionReason}`)
+      : respond("deny", `denied in chat: ${result.hookSpecificOutput.permissionDecisionReason}`);
   });
 
   app.post("/hooks/posttooluse", async (req) => {

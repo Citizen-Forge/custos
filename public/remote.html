@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Custos Chat</title>
 <style>
-  :root { color-scheme: dark; --bg: #14161a; --panel: #1c1f26; --border: #2b2f38; --text: #e4e6eb; --muted: #8b93a1; --accent: #5b9dd9; --danger: #d9705b; --ok: #5bd98f; }
+  :root { color-scheme: dark; --bg: #14161a; --panel: #1c1f26; --border: #2b2f38; --text: #e4e6eb; --muted: #8b93a1; --accent: #5b9dd9; --danger: #d9705b; --ok: #5bd98f; --warn: #d9c15b; }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; font-size: 14px; }
@@ -23,6 +23,17 @@
   .entry-body { white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; line-height: 1.5; }
   .entry.error .entry-label { color: var(--danger); }
   .entry.error .entry-body { color: var(--danger); font-size: 12.5px; }
+  .entry.approval { margin: 6px 16px; padding: 10px 12px; background: rgba(217,193,91,0.08); border: 1px solid rgba(217,193,91,0.35); border-radius: 8px; gap: 6px; }
+  .entry.approval .entry-label { color: var(--warn); }
+  .approval-head { display: flex; align-items: baseline; gap: 8px; font-family: ui-monospace, monospace; font-size: 12px; }
+  .approval-reason { color: var(--muted); font-size: 12.5px; }
+  .approval-actions { display: flex; gap: 8px; margin-top: 2px; }
+  .approval-actions button { border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); }
+  .approval-actions .approve { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+  .approval-actions .deny { background: none; color: var(--danger); }
+  .approval-verdict { font-size: 12px; font-weight: 600; }
+  .approval-verdict.allow { color: var(--ok); }
+  .approval-verdict.deny { color: var(--danger); }
   .entry.tool { padding: 4px 16px; }
   .tool-head { display: flex; align-items: baseline; gap: 8px; font-family: ui-monospace, monospace; font-size: 12px; }
   .tool-name { color: var(--accent); font-weight: 600; flex: none; }
@@ -64,6 +75,7 @@ function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === "text") node.textContent = v;
+    else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v);
     else node.setAttribute(k, v);
   }
   for (const c of [].concat(children)) if (c) node.appendChild(c);
@@ -107,6 +119,40 @@ function addToolBlock(name, inputObj) {
   messagesEl.appendChild(entry);
   scrollToBottom();
   return entry;
+}
+
+const approvalEntriesById = {};
+
+function addApprovalEntry(msg) {
+  const entry = el("div", { class: "entry approval" });
+  entry.appendChild(el("div", { class: "entry-label", text: "Approval needed" }));
+  const head = el("div", { class: "approval-head" });
+  head.appendChild(el("span", { class: "tool-name", text: msg.toolName }));
+  head.appendChild(el("span", { class: "tool-arg", text: summarizeToolInput(msg.toolInput) }));
+  entry.appendChild(head);
+  entry.appendChild(el("div", { class: "approval-reason", text: msg.reason }));
+
+  const actions = el("div", { class: "approval-actions" });
+  const answer = (decision) => {
+    ws.send(JSON.stringify({ type: "approval_response", id: msg.id, decision }));
+    resolveApprovalEntry(msg.id, decision);
+  };
+  actions.appendChild(el("button", { class: "approve", text: "Approve", onclick: () => answer("allow") }));
+  actions.appendChild(el("button", { class: "deny", text: "Deny", onclick: () => answer("deny") }));
+  entry.appendChild(actions);
+
+  messagesEl.appendChild(entry);
+  approvalEntriesById[msg.id] = entry;
+  scrollToBottom();
+}
+
+function resolveApprovalEntry(id, decision) {
+  const entry = approvalEntriesById[id];
+  if (!entry || entry.dataset.resolved) return;
+  entry.dataset.resolved = "1";
+  const actions = entry.querySelector(".approval-actions");
+  if (actions) actions.remove();
+  entry.appendChild(el("div", { class: `approval-verdict ${decision}`, text: decision === "allow" ? "Approved" : "Denied" }));
 }
 
 if (!token) {
@@ -186,6 +232,16 @@ if (!token) {
         entry.appendChild(pre);
         scrollToBottom();
       }
+      return;
+    }
+
+    if (msg.type === "approval_request") {
+      addApprovalEntry(msg);
+      return;
+    }
+
+    if (msg.type === "approval_resolved") {
+      resolveApprovalEntry(msg.id, msg.decision);
       return;
     }
 

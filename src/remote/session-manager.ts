@@ -4,6 +4,31 @@ import type { Runtime } from "../runtime.js";
 import { runTurn, type TurnEvent } from "./turn-runner.js";
 import { setClaudeSessionId } from "./chats.js";
 
+export type ApprovalDecision = "allow" | "deny";
+
+export interface ApprovalRequestEvent {
+  type: "approval_request";
+  id: string;
+  toolName: string;
+  toolInput: unknown;
+  reason: string;
+}
+
+export interface ApprovalResolvedEvent {
+  type: "approval_resolved";
+  id: string;
+  decision: ApprovalDecision;
+}
+
+/** Anything the server pushes to a chat's WS clients: streamed turn events
+ * plus out-of-band approval request/resolution frames. */
+export type ServerEvent = TurnEvent | ApprovalRequestEvent | ApprovalResolvedEvent;
+
+interface PendingApproval {
+  resolve: (decision: ApprovalDecision) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export interface RemoteSession {
   chatId: string;
   token: string;
@@ -27,6 +52,7 @@ export interface RemoteSession {
 export class RemoteSessionManager {
   private sessions = new Map<string, RemoteSession>();
   private byToken = new Map<string, RemoteSession>();
+  private pendingApprovals = new Map<string, PendingApproval>();
 
   constructor(private runtime: Runtime) {}
 
@@ -40,6 +66,58 @@ export class RemoteSessionManager {
 
   isRunning(chatId: string): boolean {
     return !!this.sessions.get(chatId)?.abortController;
+  }
+
+  /** Finds the live session for a chat by Claude Code's own session id --
+   * used to route a PreToolUse hook call (which only carries session_id and
+   * cwd) back to the chat whose turn triggered it. The id is captured from
+   * the turn's init event, which always precedes any tool call, so it's set
+   * by the time an approval is needed. */
+  findByClaudeSessionId(claudeSessionId: string): RemoteSession | null {
+    for (const session of this.sessions.values()) {
+      if (session.claudeSessionId === claudeSessionId) return session;
+    }
+    return null;
+  }
+
+  /**
+   * Surfaces a permission decision to the chat's connected clients and waits
+   * for a human to answer. Returns "deny" if no one is watching the chat or
+   * if no answer arrives before timeoutMs -- fail closed, same posture as
+   * the old auto-deny, but only after actually giving the user a chance.
+   */
+  requestApproval(
+    session: RemoteSession,
+    request: { toolName: string; toolInput: unknown; reason: string },
+    timeoutMs: number,
+  ): Promise<ApprovalDecision> {
+    if (session.clients.size === 0) return Promise.resolve("deny");
+
+    const id = randomBytes(9).toString("base64url");
+    return new Promise<ApprovalDecision>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingApprovals.delete(id);
+        resolve("deny");
+      }, timeoutMs);
+      this.pendingApprovals.set(id, { resolve, timer });
+      this.broadcast(session, {
+        type: "approval_request",
+        id,
+        toolName: request.toolName,
+        toolInput: request.toolInput,
+        reason: request.reason,
+      });
+    });
+  }
+
+  /** Resolves a pending approval from a client's answer. No-op if the id is
+   * unknown (already answered, timed out, or from a different instance). */
+  resolveApproval(id: string, decision: ApprovalDecision): void {
+    const pending = this.pendingApprovals.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingApprovals.delete(id);
+    pending.resolve(decision);
   }
 
   /** claudeSessionId, if known (from a persisted ChatRecord), lets a
@@ -71,7 +149,7 @@ export class RemoteSessionManager {
     return this.byToken.get(token) ?? null;
   }
 
-  broadcast(session: RemoteSession, event: TurnEvent): void {
+  broadcast(session: RemoteSession, event: ServerEvent): void {
     const payload = JSON.stringify(event);
     for (const client of session.clients) {
       if (client.readyState === client.OPEN) client.send(payload);
