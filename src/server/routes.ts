@@ -35,15 +35,23 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   app.post("/v1/messages", async (req, reply) => {
     const body = req.body as AnthropicMessagesRequest;
 
+    // Forward the client's own anthropic-beta header so beta-gated body
+    // fields it sends (e.g. context_management from a recent Claude Code)
+    // stay permitted -- Custos otherwise substitutes only its own OAuth
+    // beta flags and Anthropic 400s on the now-"extra" input.
+    const rawBeta = req.headers["anthropic-beta"];
+    const clientBetaHeader = Array.isArray(rawBeta) ? rawBeta.join(",") : rawBeta;
+    const options = { clientBetaHeader };
+
     let providerResponse;
     try {
       const routing = deps.runtime.config.complexityRouting;
       if (routing.enabled && isFreshUserTurn(body)) {
         const tier = await classifyComplexity(deps.runtime.router, body);
         reply.header("x-custos-complexity-tier", tier);
-        providerResponse = await deps.runtime.router.completeWithEntries(routing.tiers[tier], body, undefined, `complexity tier "${tier}"`);
+        providerResponse = await deps.runtime.router.completeWithEntries(routing.tiers[tier], body, options, `complexity tier "${tier}"`);
       } else {
-        providerResponse = await deps.runtime.router.complete("general", body);
+        providerResponse = await deps.runtime.router.complete("general", body, options);
       }
     } catch (err) {
       const message = err instanceof ProviderUnavailableError ? err.message : "internal gateway error";

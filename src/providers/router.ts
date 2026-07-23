@@ -1,5 +1,5 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type TaskKind } from "../types.js";
-import type { Provider, ProviderResponse } from "./types.js";
+import type { CompleteOptions, Provider, ProviderResponse } from "./types.js";
 import type { GatewayConfig, ProviderEntry } from "../config.js";
 import type { SpendTracker } from "./spend-tracker.js";
 
@@ -39,8 +39,8 @@ export class ProviderRouter {
   ) {}
 
   /** Looks up a fixed task's configured priority list. */
-  async complete(task: TaskKind, request: AnthropicMessagesRequest, signal?: AbortSignal): Promise<RoutedResponse> {
-    return this.completeWithEntries(this.config.tasks[task], request, signal, `task "${task}"`);
+  async complete(task: TaskKind, request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<RoutedResponse> {
+    return this.completeWithEntries(this.config.tasks[task], request, options, `task "${task}"`);
   }
 
   /** Runs the same priority/failover logic against an explicit entry list
@@ -50,7 +50,7 @@ export class ProviderRouter {
   async completeWithEntries(
     entries: ProviderEntry[],
     request: AnthropicMessagesRequest,
-    signal?: AbortSignal,
+    options?: CompleteOptions,
     label = "entries",
   ): Promise<RoutedResponse> {
     const sorted = [...entries].sort((a, b) => a.priority - b.priority);
@@ -65,7 +65,7 @@ export class ProviderRouter {
       if (!(await this.spendTracker.isWithinBudget(entry.provider, budget))) continue;
 
       try {
-        const response = await provider.complete(request, signal);
+        const response = await provider.complete(request, options);
         return { ...response, providerName: provider.name };
       } catch (err) {
         if (err instanceof ProviderUnavailableError) {

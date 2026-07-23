@@ -112,7 +112,12 @@ export async function runTurn(
   const args = ["-p", userText, "--output-format", "stream-json", "--include-partial-messages", "--verbose"];
   if (resumeSessionId) args.push("--resume", resumeSessionId);
 
-  const proc = spawn("claude", args, { cwd, env, signal });
+  // stdin = 'ignore' (i.e. /dev/null) so the CLI gets an immediate EOF
+  // instead of waiting on a pipe that never receives data -- with a plain
+  // piped stdin it warns "no stdin data received in 3s" and stalls, since
+  // it can't tell an empty pipe from slow piped input. The prompt is passed
+  // as the `-p` argument, so no stdin is needed at all.
+  const proc = spawn("claude", args, { cwd, env, signal, stdio: ["ignore", "pipe", "pipe"] });
 
   const rl = createInterface({ input: proc.stdout });
   rl.on("line", (line) => {

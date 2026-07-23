@@ -1,6 +1,6 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
 import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason } from "./openai-translate.js";
-import type { Provider, ProviderResponse } from "./types.js";
+import type { CompleteOptions, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
 
 export interface OpenAICompatibleInstanceConfig {
@@ -35,7 +35,9 @@ export class OpenAICompatibleProvider implements Provider {
     private readonly config: OpenAICompatibleInstanceConfig,
   ) {}
 
-  async complete(request: AnthropicMessagesRequest, signal?: AbortSignal): Promise<ProviderResponse> {
+  async complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
+    // clientBetaHeader is Anthropic-specific and intentionally ignored here.
+    const { signal } = options ?? {};
     const openaiRequest = toOpenAIRequest(request, this.config.model);
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) headers.authorization = `Bearer ${this.config.apiKey}`;
