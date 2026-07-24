@@ -25,6 +25,8 @@
   .entry.error .entry-body { color: var(--danger); font-size: 12.5px; }
   .entry.approval { margin: 6px 16px; padding: 10px 12px; background: rgba(217,193,91,0.08); border: 1px solid rgba(217,193,91,0.35); border-radius: 8px; gap: 6px; }
   .entry.approval .entry-label { color: var(--warn); }
+  .entry.approval.deny { background: rgba(217,112,91,0.08); border-color: rgba(217,112,91,0.4); }
+  .entry.approval.deny .entry-label { color: var(--danger); }
   .approval-head { display: flex; align-items: baseline; gap: 8px; font-family: ui-monospace, monospace; font-size: 12px; }
   .approval-reason { color: var(--muted); font-size: 12.5px; }
   .approval-actions { display: flex; gap: 8px; margin-top: 2px; }
@@ -124,8 +126,9 @@ function addToolBlock(name, inputObj) {
 const approvalEntriesById = {};
 
 function addApprovalEntry(msg) {
-  const entry = el("div", { class: "entry approval" });
-  entry.appendChild(el("div", { class: "entry-label", text: "Approval needed" }));
+  const isDeny = msg.severity === "deny";
+  const entry = el("div", { class: `entry approval ${msg.severity || "ask"}` });
+  entry.appendChild(el("div", { class: "entry-label", text: isDeny ? "Flagged unsafe — override?" : "Approval needed" }));
   const head = el("div", { class: "approval-head" });
   head.appendChild(el("span", { class: "tool-name", text: msg.toolName }));
   head.appendChild(el("span", { class: "tool-arg", text: summarizeToolInput(msg.toolInput) }));
@@ -137,7 +140,7 @@ function addApprovalEntry(msg) {
     ws.send(JSON.stringify({ type: "approval_response", id: msg.id, decision }));
     resolveApprovalEntry(msg.id, decision);
   };
-  actions.appendChild(el("button", { class: "approve", text: "Approve", onclick: () => answer("allow") }));
+  actions.appendChild(el("button", { class: "approve", text: isDeny ? "Override & run" : "Approve", onclick: () => answer("allow") }));
   actions.appendChild(el("button", { class: "deny", text: "Deny", onclick: () => answer("deny") }));
   entry.appendChild(actions);
 

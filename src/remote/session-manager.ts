@@ -12,6 +12,11 @@ export interface ApprovalRequestEvent {
   toolName: string;
   toolInput: unknown;
   reason: string;
+  /** The classifier's own verdict: "ask" (uncertain) or "deny" (flagged as
+   * unsafe). Both are surfaced for a human decision since the operator is
+   * present in remote control -- the UI uses this to show "deny" more
+   * prominently as an override-a-block rather than a routine approval. */
+  severity: "ask" | "deny";
 }
 
 export interface ApprovalResolvedEvent {
@@ -88,7 +93,7 @@ export class RemoteSessionManager {
    */
   requestApproval(
     session: RemoteSession,
-    request: { toolName: string; toolInput: unknown; reason: string },
+    request: { toolName: string; toolInput: unknown; reason: string; severity: "ask" | "deny" },
     timeoutMs: number,
   ): Promise<ApprovalDecision> {
     if (session.clients.size === 0) return Promise.resolve("deny");
@@ -106,6 +111,7 @@ export class RemoteSessionManager {
         toolName: request.toolName,
         toolInput: request.toolInput,
         reason: request.reason,
+        severity: request.severity,
       });
     });
   }

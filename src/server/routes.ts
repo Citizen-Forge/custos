@@ -128,25 +128,28 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   app.post("/hooks/pretooluse-headless", async (req) => {
     const input = req.body as PreToolUseHookInput;
     const result = await preToolUseHandler(input);
-    if (result.hookSpecificOutput.permissionDecision !== "ask") return result;
+    const verdict = result.hookSpecificOutput.permissionDecision;
+    const reason = result.hookSpecificOutput.permissionDecisionReason;
+    // "allow" runs automatically. Both "ask" and "deny" are surfaced to the
+    // operator, who is the final authority in remote control -- "deny" shown
+    // as an override-a-block, "ask" as a routine approval.
+    if (verdict === "allow") return result;
 
     const session = deps.remoteSessionManager.findByClaudeSessionId(input.session_id);
-    const respond = (decision: "allow" | "deny", reason: string) => ({
-      hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: decision, permissionDecisionReason: reason },
+    const respond = (decision: "allow" | "deny", r: string) => ({
+      hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: decision, permissionDecisionReason: r },
     });
 
     if (!session) {
-      return respond("deny", `${result.hookSpecificOutput.permissionDecisionReason} (auto-denied: chat session not found to ask in)`);
+      return respond("deny", `${reason} (auto-denied: chat session not found to ask in)`);
     }
 
     const decision = await deps.remoteSessionManager.requestApproval(
       session,
-      { toolName: input.tool_name, toolInput: input.tool_input, reason: result.hookSpecificOutput.permissionDecisionReason },
+      { toolName: input.tool_name, toolInput: input.tool_input, reason, severity: verdict },
       APPROVAL_TIMEOUT_MS,
     );
-    return decision === "allow"
-      ? respond("allow", `approved in chat: ${result.hookSpecificOutput.permissionDecisionReason}`)
-      : respond("deny", `denied in chat: ${result.hookSpecificOutput.permissionDecisionReason}`);
+    return decision === "allow" ? respond("allow", `approved in chat: ${reason}`) : respond("deny", `denied in chat: ${reason}`);
   });
 
   app.post("/hooks/posttooluse", async (req) => {
