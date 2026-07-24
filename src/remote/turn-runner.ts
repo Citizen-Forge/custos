@@ -16,6 +16,11 @@ export type TurnEvent =
   | { type: "turn_complete"; resultText: string; isError: boolean; costUsd?: number }
   | { type: "error"; message: string };
 
+/** Thrown when `--resume <id>` targets a session Claude Code no longer has
+ * on disk (e.g. the container restarted and wiped ~/.claude transcripts).
+ * The caller retries once with a fresh session instead of surfacing it. */
+export class ResumeSessionNotFoundError extends Error {}
+
 /**
  * Parses one line of `claude -p --output-format stream-json`'s stdout.
  * Text is rendered from two sources deliberately: `text_delta` events
@@ -119,14 +124,29 @@ export async function runTurn(
   // as the `-p` argument, so no stdin is needed at all.
   const proc = spawn("claude", args, { cwd, env, signal, stdio: ["ignore", "pipe", "pipe"] });
 
+  let resumeNotFound = false;
   const rl = createInterface({ input: proc.stdout });
   rl.on("line", (line) => {
     if (!line.trim()) return;
+    let json: Record<string, unknown>;
     try {
-      handleParsedLine(JSON.parse(line), onEvent);
+      json = JSON.parse(line);
     } catch {
-      // Non-JSON line on stdout -- ignore rather than crash the turn over it.
+      return; // Non-JSON line on stdout -- ignore rather than crash the turn.
     }
+    // A resume against a missing session id fails as an error result whose
+    // only content is this specific error -- swallow it (don't emit a
+    // spurious turn_complete) and flag for a fresh retry after exit.
+    if (
+      json.type === "result" &&
+      json.subtype === "error_during_execution" &&
+      Array.isArray(json.errors) &&
+      (json.errors as unknown[]).some((e) => typeof e === "string" && e.includes("No conversation found"))
+    ) {
+      resumeNotFound = true;
+      return;
+    }
+    handleParsedLine(json, onEvent);
   });
 
   let stderrBuf = "";
@@ -138,6 +158,10 @@ export async function runTurn(
     proc.on("error", (err) => reject(err));
     proc.on("exit", (code) => {
       rl.close();
+      if (resumeNotFound) {
+        reject(new ResumeSessionNotFoundError());
+        return;
+      }
       if (code !== 0 && code !== null && stderrBuf.trim()) {
         onEvent({ type: "error", message: stderrBuf.trim().slice(0, 2000) });
       }

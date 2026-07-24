@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { WebSocket } from "ws";
 import type { Runtime } from "../runtime.js";
-import { runTurn, type TurnEvent } from "./turn-runner.js";
+import { runTurn, ResumeSessionNotFoundError, type TurnEvent } from "./turn-runner.js";
 import { setClaudeSessionId } from "./chats.js";
 
 export type ApprovalDecision = "allow" | "deny";
@@ -168,21 +168,27 @@ export class RemoteSessionManager {
     }
     const controller = new AbortController();
     session.abortController = controller;
+
+    const onEvent = (event: TurnEvent): void => {
+      if (event.type === "session") {
+        session.claudeSessionId = event.sessionId;
+        void setClaudeSessionId(session.chatId, event.sessionId);
+      }
+      this.broadcast(session, event);
+    };
+
     try {
-      await runTurn(
-        this.runtime,
-        session.cwd,
-        text,
-        session.claudeSessionId ?? undefined,
-        (event) => {
-          if (event.type === "session") {
-            session.claudeSessionId = event.sessionId;
-            void setClaudeSessionId(session.chatId, event.sessionId);
-          }
-          this.broadcast(session, event);
-        },
-        controller.signal,
-      );
+      await runTurn(this.runtime, session.cwd, text, session.claudeSessionId ?? undefined, onEvent, controller.signal);
+    } catch (err) {
+      // The stored session id is stale (its transcript is gone, e.g. after a
+      // container restart) -- drop it and retry once as a fresh session so
+      // the user's message still lands instead of erroring out.
+      if (err instanceof ResumeSessionNotFoundError && session.claudeSessionId) {
+        session.claudeSessionId = null;
+        await runTurn(this.runtime, session.cwd, text, undefined, onEvent, controller.signal);
+      } else {
+        throw err;
+      }
     } finally {
       session.abortController = null;
     }
