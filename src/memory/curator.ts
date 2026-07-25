@@ -64,6 +64,84 @@ export function extractJsonArray(text: string): unknown[] | null {
   return null;
 }
 
+/**
+ * Batches are sized for a small local model's context window, not for
+ * efficiency. Ollama defaults to 2048 tokens, and the whole day's exchanges
+ * were previously sent as one prompt -- so the transcript overflowed the
+ * window, the *system prompt* at the front was the part that got truncated
+ * away, and the model was left reading a conversation with no instructions.
+ * It then did the natural thing and replied to it, which is why extraction
+ * produced prose instead of JSON and the memory store stayed empty.
+ */
+const MAX_EXCHANGE_CHARS = 1200;
+const MAX_BATCH_CHARS = 4000;
+
+function truncate(text: string): string {
+  return text.length > MAX_EXCHANGE_CHARS ? `${text.slice(0, MAX_EXCHANGE_CHARS)}… [truncated]` : text;
+}
+
+function chunk(exchanges: string[]): string[] {
+  const batches: string[] = [];
+  let current: string[] = [];
+  let size = 0;
+  for (const exchange of exchanges) {
+    if (current.length && size + exchange.length > MAX_BATCH_CHARS) {
+      batches.push(current.join("\n---\n"));
+      current = [];
+      size = 0;
+    }
+    current.push(exchange);
+    size += exchange.length;
+  }
+  if (current.length) batches.push(current.join("\n---\n"));
+  return batches;
+}
+
+/** Extracts and stores facts for one batch. Returns how many were stored. */
+async function curateBatch(deps: CuratorDeps, file: string, batchText: string): Promise<number> {
+  const res = await deps.router.complete("memoryCurator", {
+    model: "curator",
+    system: EXTRACTION_SYSTEM_PROMPT,
+    max_tokens: 1000,
+    messages: [{ role: "user", content: batchText }],
+  });
+  const responseText = await new Response(res.body).text();
+
+  let contentText = responseText;
+  try {
+    const json = JSON.parse(responseText);
+    contentText = json.content?.[0]?.text ?? responseText;
+  } catch {
+    // Not an Anthropic-shaped envelope; treat the whole body as the text.
+  }
+
+  const parsed = extractJsonArray(contentText);
+  if (!parsed) {
+    console.warn("curator: no JSON array in extraction output; first 200 chars:", contentText.slice(0, 200).replace(/\s+/g, " "));
+    return 0;
+  }
+
+  let stored = 0;
+  for (const fact of parsed) {
+    const text = (fact as { text?: unknown })?.text;
+    const topic = (fact as { topic?: unknown })?.topic;
+    if (typeof text !== "string" || !text.trim()) continue;
+    try {
+      const vector = await embed(deps.embedding, text);
+      await deps.store.upsert(
+        { text, topic: typeof topic === "string" ? topic : "", sourceSessionId: file, createdAt: new Date().toISOString() },
+        vector,
+      );
+      stored++;
+    } catch (err) {
+      // One unembeddable fact shouldn't abort the pass and strand every
+      // later file behind it -- but it must not pass unremarked either.
+      console.warn(`curator: failed to store a fact (${(err as Error).message})`);
+    }
+  }
+  return stored;
+}
+
 interface Cursor {
   [filename: string]: number; // lines already processed
 }
@@ -107,56 +185,16 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
     const newLines = lines.slice(alreadyProcessed);
     if (newLines.length === 0) continue;
 
-    const batchText = newLines
-      .map((l) => {
-        const { request, response } = JSON.parse(l);
-        const userText = request.messages?.at(-1)?.content ?? "";
-        const assistantText = response.content?.find((b: { type: string }) => b.type === "text")?.text ?? "";
-        return `USER: ${typeof userText === "string" ? userText : JSON.stringify(userText)}\nASSISTANT: ${assistantText}`;
-      })
-      .join("\n---\n");
-
-    const res = await deps.router.complete("memoryCurator", {
-      model: "curator",
-      system: EXTRACTION_SYSTEM_PROMPT,
-      max_tokens: 1000,
-      messages: [{ role: "user", content: batchText }],
+    const exchanges = newLines.map((l) => {
+      const { request, response } = JSON.parse(l);
+      const userText = request.messages?.at(-1)?.content ?? "";
+      const assistantText = response.content?.find((b: { type: string }) => b.type === "text")?.text ?? "";
+      const user = typeof userText === "string" ? userText : JSON.stringify(userText);
+      return `USER: ${truncate(user)}\nASSISTANT: ${truncate(assistantText)}`;
     });
-    const responseText = await new Response(res.body).text();
 
-    let facts: { topic: string; text: string }[] = [];
-    let contentText = responseText;
-    try {
-      const json = JSON.parse(responseText);
-      contentText = json.content?.[0]?.text ?? responseText;
-    } catch {
-      // Not an Anthropic-shaped envelope; treat the whole body as the text.
-    }
-    const parsed = extractJsonArray(contentText);
-    if (parsed) {
-      facts = parsed.filter((f): f is { topic: string; text: string } => !!f && typeof (f as { text?: unknown }).text === "string");
-    } else {
-      // Silence here is how the memory store stayed empty while the cursor
-      // marched on: a model that can't produce clean JSON looks exactly like
-      // a batch with nothing worth remembering, and the exchanges are then
-      // never revisited. Say so, loudly enough to notice.
-      console.warn("curator: no JSON array in extraction output; first 200 chars:", contentText.slice(0, 200).replace(/\s+/g, " "));
-    }
-
-    for (const fact of facts) {
-      if (!fact?.text) continue;
-      try {
-        const vector = await embed(deps.embedding, fact.text);
-        await deps.store.upsert(
-          { text: fact.text, topic: fact.topic, sourceSessionId: file, createdAt: new Date().toISOString() },
-          vector,
-        );
-        factsStored++;
-      } catch (err) {
-        // One unembeddable fact shouldn't abort the pass and strand every
-        // later file behind it -- but it must not pass unremarked either.
-        console.warn(`curator: failed to store a fact (${(err as Error).message})`);
-      }
+    for (const batchText of chunk(exchanges)) {
+      factsStored += await curateBatch(deps, file, batchText);
     }
 
     cursor[file] = lines.length;
