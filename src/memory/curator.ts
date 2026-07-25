@@ -78,17 +78,29 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
       const contentText: string = json.content?.[0]?.text ?? responseText;
       const parsed = JSON.parse(contentText.trim());
       if (Array.isArray(parsed)) facts = parsed;
-    } catch {
-      facts = [];
+      else console.warn(`curator: extraction returned ${typeof parsed}, not an array -- no facts stored for this batch`);
+    } catch (err) {
+      // Silence here is how the memory store stayed empty while the cursor
+      // marched on: a model that can't produce clean JSON looks exactly like
+      // a batch with nothing worth remembering, and the exchanges are then
+      // never revisited. Say so, loudly enough to notice.
+      console.warn(`curator: could not parse extraction output (${(err as Error).message}); first 200 chars:`, responseText.slice(0, 200));
     }
 
     for (const fact of facts) {
-      const vector = await embed(deps.embedding, fact.text);
-      await deps.store.upsert(
-        { text: fact.text, topic: fact.topic, sourceSessionId: file, createdAt: new Date().toISOString() },
-        vector,
-      );
-      factsStored++;
+      if (!fact?.text) continue;
+      try {
+        const vector = await embed(deps.embedding, fact.text);
+        await deps.store.upsert(
+          { text: fact.text, topic: fact.topic, sourceSessionId: file, createdAt: new Date().toISOString() },
+          vector,
+        );
+        factsStored++;
+      } catch (err) {
+        // One unembeddable fact shouldn't abort the pass and strand every
+        // later file behind it -- but it must not pass unremarked either.
+        console.warn(`curator: failed to store a fact (${(err as Error).message})`);
+      }
     }
 
     cursor[file] = lines.length;
