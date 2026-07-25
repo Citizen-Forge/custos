@@ -146,6 +146,15 @@ export interface AgentRun {
   startedAt: number;
   endedAt: number | null;
   claudeSessionId: string | null;
+  /** Where this run was pinned, so the activity feed can show it and the
+   * budget can tell metered spend from subscription usage. */
+  providerKey: string;
+  model: string;
+  /** Whether costUsd draws down the project's budget. Claude Code reports a
+   * total_cost_usd for every run, including ones served by the Anthropic
+   * subscription or a local model, where nothing is actually charged --
+   * counting those would pause a project against money it never spent. */
+  billed: boolean;
   costUsd: number | null;
   /** The agent's own final message, trimmed -- what shows in the activity
    * feed without having to replay the whole run. */

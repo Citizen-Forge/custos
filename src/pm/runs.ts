@@ -21,6 +21,9 @@ export async function startRun(input: {
   projectId: string;
   agentId: string;
   role: AgentRole;
+  providerKey: string;
+  model: string;
+  billed: boolean;
   workItemId?: string | null;
   ideaId?: string | null;
 }): Promise<AgentRun> {
@@ -35,6 +38,9 @@ export async function startRun(input: {
     startedAt: Date.now(),
     endedAt: null,
     claudeSessionId: null,
+    providerKey: input.providerKey,
+    model: input.model,
+    billed: input.billed,
     costUsd: null,
     summary: "",
     error: null,
@@ -59,14 +65,28 @@ export async function finishRun(id: string, outcome: { status: "succeeded" | "fa
   });
 }
 
-/** Agent spend for this project so far this calendar month, in USD.
- * Only Anthropic-billed turns report a cost (Claude Code's own
- * total_cost_usd), so this is a floor on true spend rather than an exact
- * ledger -- local/free models legitimately contribute nothing to it. */
-export async function monthlySpendUsd(projectId: string): Promise<number> {
+function monthStart(): number {
   const now = new Date();
-  const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
-  const rows = await runs.find((row) => row.projectId === projectId && row.startedAt >= monthStart);
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+}
+
+/**
+ * Metered agent spend for this project so far this calendar month, in USD --
+ * the figure the budget cap is enforced against. Runs served by the
+ * Anthropic subscription or a local model are excluded: Claude Code reports
+ * a total_cost_usd for those too, but no money changes hands, and counting
+ * it would pause a project against spend that never happened.
+ */
+export async function monthlySpendUsd(projectId: string): Promise<number> {
+  const rows = await runs.find((row) => row.projectId === projectId && row.startedAt >= monthStart() && row.billed);
+  return rows.reduce((total, row) => total + (row.costUsd ?? 0), 0);
+}
+
+/** What the same work would have cost at API rates, including the runs the
+ * subscription covered. Shown alongside the metered figure so the value the
+ * subscription is returning is visible rather than invisible. */
+export async function monthlyUnbilledUsd(projectId: string): Promise<number> {
+  const rows = await runs.find((row) => row.projectId === projectId && row.startedAt >= monthStart() && !row.billed);
   return rows.reduce((total, row) => total + (row.costUsd ?? 0), 0);
 }
 

@@ -209,7 +209,11 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
 
   app.get("/admin/api/projects/:id/settings", async (req) => {
     const { id } = req.params as { id: string };
-    return { settings: await getSettings(id), spentUsd: await runs.monthlySpendUsd(id) };
+    return {
+      settings: await getSettings(id),
+      spentUsd: await runs.monthlySpendUsd(id),
+      subscriptionUsd: await runs.monthlyUnbilledUsd(id),
+    };
   });
 
   app.patch("/admin/api/projects/:id/settings", async (req) => {

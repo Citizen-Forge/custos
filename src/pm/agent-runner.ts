@@ -95,7 +95,20 @@ export function buildSystemPrompt(agent: AgentDef, extra: string | undefined, co
  */
 export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): Promise<AgentRunResult<T>> {
   const { agent, projectId, cwd, prompt, tag } = options;
-  const run = await runs.startRun({ projectId, agentId: agent.id, role: agent.role, workItemId: options.workItemId, ideaId: options.ideaId });
+  // Whether this run's reported cost is real money is decided here, from
+  // the same config the engineering manager was shown when it picked the
+  // provider -- see agents.listProviderOptions.
+  const billed = !agents.listProviderOptions(runtime.config).find((o) => o.providerKey === agent.providerKey && o.model === agent.model)?.free;
+  const run = await runs.startRun({
+    projectId,
+    agentId: agent.id,
+    role: agent.role,
+    providerKey: agent.providerKey,
+    model: agent.model,
+    billed,
+    workItemId: options.workItemId,
+    ideaId: options.ideaId,
+  });
   const startedAt = Date.now();
 
   let text = "";
@@ -148,7 +161,11 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     error,
     costUsd,
   });
-  await agents.recordRunResult(agent.id, { costUsd: costUsd ?? undefined, runMs });
+  // Only metered spend accumulates against the agent -- the engineering
+  // manager is shown this alongside a menu that marks the subscription and
+  // local models free, so a "free" agent showing a running dollar total
+  // would contradict the very menu it decides from.
+  await agents.recordRunResult(agent.id, { costUsd: billed ? (costUsd ?? undefined) : undefined, runMs });
 
   return { runId: run.id, ok, parsed, text, error, costUsd, runMs };
 }
