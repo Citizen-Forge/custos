@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
@@ -32,7 +32,7 @@ const CONTENT_TYPES: Record<string, string> = {
  * immediately 401 on every call it made.
  */
 export function registerUiRoutes(app: FastifyInstance): void {
-  const sendAsset = async (relativePath: string, reply: Parameters<Parameters<FastifyInstance["get"]>[1]>[1]): Promise<unknown> => {
+  const sendAsset = async (relativePath: string, reply: FastifyReply): Promise<unknown> => {
     // Contain the path inside UI_DIR: everything after /app/ is attacker-
     // controlled, and `..` segments would otherwise read arbitrary files.
     const safe = normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
@@ -54,7 +54,7 @@ export function registerUiRoutes(app: FastifyInstance): void {
     }
   };
 
-  const sendIndex = async (reply: Parameters<Parameters<FastifyInstance["get"]>[1]>[1]): Promise<unknown> => {
+  const sendIndex = async (reply: FastifyReply): Promise<unknown> => {
     const sent = await sendAsset("index.html", reply);
     if (sent !== null) return sent;
     reply.code(503).header("content-type", "text/html; charset=utf-8");
