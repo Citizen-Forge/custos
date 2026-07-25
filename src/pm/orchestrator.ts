@@ -8,7 +8,8 @@ import * as runs from "./runs.js";
 import { getSettings } from "./project-settings.js";
 import { runAgent } from "./agent-runner.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace } from "./worktrees.js";
-import { renderAgentRoster, renderBoardSummary, renderIdea, renderProjectContext, renderProviderMenu, renderWorkItem } from "./context.js";
+import { renderAgentRoster, renderBoardSummary, renderIdea, renderProjectContext, renderProviderMenu, renderSecrets, renderWorkItem } from "./context.js";
+import { hasGitCredentials, listSecrets } from "./vault.js";
 import { ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, QA_SHAPE, outputContract } from "./prompts.js";
 import type { AssignContract, DevopsContract, EngineerContract, GroomContract, PlanContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, ProjectSettings, WorkItem } from "./types.js";
@@ -182,7 +183,15 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   }
 
   private async projectHeader(project: Project, settings: ProjectSettings): Promise<string> {
-    return renderProjectContext(project.name, settings, await runs.monthlySpendUsd(project.id));
+    const available = (await listSecrets(project.id)).filter((secret) => secret.exposeToAgents);
+    return [
+      renderProjectContext(project.name, settings, await runs.monthlySpendUsd(project.id)),
+      "",
+      renderSecrets(
+        available.map((secret) => secret.name),
+        await hasGitCredentials(project.id),
+      ),
+    ].join("\n");
   }
 
   // ---------------------------------------------------------------- product owner

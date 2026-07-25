@@ -103,6 +103,9 @@ export interface RunTurnOptions {
    * `custos:<provider>/<model>` alias (see providers/model-alias.ts), which
    * is how a PM agent gets exactly the provider it was assigned. */
   model?: string;
+  /** Extra environment for the spawned process -- how vault secrets reach
+   * an agent (see pm/vault.ts). Applied over the inherited environment. */
+  env?: Record<string, string>;
   /** Permission posture -- see headless-settings.ts. Defaults to "chat". */
   hookProfile?: HookProfile;
   onEvent: (event: TurnEvent) => void;
@@ -128,6 +131,9 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   env.ANTHROPIC_BASE_URL = `http://localhost:${PORT}`;
   if (runtime.config.clientApiKey) env.ANTHROPIC_API_KEY = runtime.config.clientApiKey;
   if (model) env.ANTHROPIC_MODEL = model;
+  // Vault secrets last: they're the caller's explicit choice for this run,
+  // and should win over anything the gateway process happens to inherit.
+  Object.assign(env, options.env ?? {});
 
   const args = ["-p", prompt, "--output-format", "stream-json", "--include-partial-messages", "--verbose"];
   if (resumeSessionId) args.push("--resume", resumeSessionId);

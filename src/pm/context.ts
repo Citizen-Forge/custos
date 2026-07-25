@@ -81,6 +81,26 @@ export function renderProviderMenu(options: ProviderOption[]): string {
     .join("\n");
 }
 
+/** Tells an agent what credentials it actually has, by name only. Agents
+ * otherwise either assume they can push and fail confusingly at the end of
+ * a ticket, or assume they can't and never try. Values are never rendered --
+ * they're in the environment, and that's where they should stay. */
+export function renderSecrets(names: string[], hasGit: boolean): string {
+  if (!names.length) {
+    return "## Credentials\n\nNone are configured for this project. You cannot authenticate to anything external — if the ticket needs that, report it as blocked rather than trying to work around it.";
+  }
+  return [
+    "## Credentials",
+    "",
+    "These are in your environment as variables. Use them by name — never print one, echo one, write one into a file, commit one, or include one in your report:",
+    ...names.map((name) => `- \`$${name}\``),
+    "",
+    hasGit
+      ? "Git and the GitHub CLI (`gh`) are already authenticated with these, so `git push` and `gh pr create` will work without you configuring anything. Do not put a token in a remote URL."
+      : "No git credentials are configured, so pushing and opening pull requests will fail. Commit locally and say so in your report.",
+  ].join("\n");
+}
+
 export function renderProjectContext(projectName: string, settings: ProjectSettings, spentUsd: number): string {
   const budget = settings.budget.monthlyUsd;
   const lines = [

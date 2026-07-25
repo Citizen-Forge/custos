@@ -10,6 +10,7 @@ import { deleteProjectWorkItems } from "../pm/board.js";
 import { deleteProjectIdeas } from "../pm/ideas.js";
 import { deleteProjectRuns } from "../pm/runs.js";
 import { releaseProjectWorkspaces } from "../pm/worktrees.js";
+import { deleteProjectSecrets } from "../pm/vault.js";
 import type { Runtime } from "../runtime.js";
 
 function publicUrl(): string {
@@ -91,7 +92,14 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
     // checkouts, and the branches they hold stay in the repository.
     const project = await projects.getProject(id);
     if (project) await releaseProjectWorkspaces(project.workspaceDir, id).catch(() => undefined);
-    await Promise.all([deleteProjectWorkItems(id), deleteProjectIdeas(id), deleteProjectAgents(id), deleteProjectRuns(id), deleteSettings(id)]);
+    await Promise.all([
+      deleteProjectWorkItems(id),
+      deleteProjectIdeas(id),
+      deleteProjectAgents(id),
+      deleteProjectRuns(id),
+      deleteSettings(id),
+      deleteProjectSecrets(id),
+    ]);
     const ok = await projects.deleteProject(id);
     if (!ok) {
       reply.code(404);

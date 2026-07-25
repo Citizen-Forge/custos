@@ -2,6 +2,7 @@ import type { Runtime } from "../runtime.js";
 import { runTurn, type TurnEvent } from "../remote/turn-runner.js";
 import { formatModelAlias } from "../providers/model-alias.js";
 import { ROLE_PROMPTS } from "./prompts.js";
+import { resolveAgentEnv, redactSecrets } from "./vault.js";
 import * as runs from "./runs.js";
 import * as agents from "./agents.js";
 import type { AgentDef } from "./types.js";
@@ -142,6 +143,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       prompt,
       appendSystemPrompt: buildSystemPrompt(agent, options.extraSystemPrompt, options.outputContract),
       model: formatModelAlias(agent.providerKey, agent.model),
+      env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
       onEvent,
       signal: controller.signal,
@@ -155,10 +157,13 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   const error = turnError ?? (parsed ? null : `the agent did not return a valid \`${tag}\` block`);
   const ok = !error;
 
+  // Everything derived from the agent's own output is persisted and shown in
+  // the UI, so it goes through redaction first -- an agent that echoed a
+  // token would otherwise write a live credential into the run log forever.
   await runs.finishRun(run.id, {
     status: ok ? "succeeded" : "failed",
-    summary: text.trim().slice(-4000),
-    error,
+    summary: await redactSecrets(text.trim().slice(-4000)),
+    error: error ? await redactSecrets(error) : null,
     costUsd,
   });
   // Only metered spend accumulates against the agent -- the engineering
@@ -167,5 +172,5 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   // would contradict the very menu it decides from.
   await agents.recordRunResult(agent.id, { costUsd: billed ? (costUsd ?? undefined) : undefined, runMs });
 
-  return { runId: run.id, ok, parsed, text, error, costUsd, runMs };
+  return { runId: run.id, ok, parsed, text: await redactSecrets(text), error, costUsd, runMs };
 }

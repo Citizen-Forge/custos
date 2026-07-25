@@ -34,7 +34,12 @@ RUN apt-get update \
 RUN git config --system user.name "Custos Agent" \
   && git config --system user.email "agents@custos.local" \
   && git config --system --add safe.directory '*' \
-  && git config --system init.defaultBranch main
+  && git config --system init.defaultBranch main \
+  # Reads the token from the environment Custos injects from its vault (see
+  # src/pm/vault.ts) rather than from a credentials file. Nothing is written
+  # to disk, and the token never has to appear in a remote URL -- which is
+  # what usually leaks it, since remotes end up in logs and in `git remote -v`.
+  && git config --system credential.helper '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f'
 
 COPY package.json ./
 RUN npm install --omit=dev

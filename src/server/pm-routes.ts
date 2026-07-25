@@ -8,6 +8,7 @@ import * as runs from "../pm/runs.js";
 import { getSettings, updateSettings } from "../pm/project-settings.js";
 import { getProject } from "../remote/projects.js";
 import { releaseWorkspace } from "../pm/worktrees.js";
+import * as vault from "../pm/vault.js";
 import { BOARD_STATUSES, type BoardStatus, type ProjectSettings, type WorkItemType } from "../pm/types.js";
 
 const isStatus = (value: unknown): value is BoardStatus => BOARD_STATUSES.includes(value as BoardStatus);
@@ -229,6 +230,45 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
     const { id } = req.params as { id: string };
     const patch = (req.body ?? {}) as Partial<Omit<ProjectSettings, "id">>;
     return { settings: await updateSettings(id, patch) };
+  });
+
+  // ---------------------------------------------------------------- vault
+  //
+  // Deliberately write-only: there is no endpoint that returns a stored
+  // value, for any caller, ever. A secret goes in once and after that only
+  // its name, description and last four characters are readable. If you've
+  // lost the value, replace it -- that's the intended path, not a gap.
+
+  app.get("/admin/api/projects/:id/secrets", async (req) => {
+    const { id } = req.params as { id: string };
+    return { secrets: await vault.listSecrets(id) };
+  });
+
+  app.get("/admin/api/secrets", async () => {
+    return { secrets: await vault.listSecrets() };
+  });
+
+  app.post("/admin/api/secrets", async (req, reply) => {
+    const body = (req.body ?? {}) as vault.CreateSecretInput;
+    try {
+      return { secret: await vault.createSecret(body) };
+    } catch (err) {
+      reply.code(400);
+      return { error: (err as Error).message };
+    }
+  });
+
+  app.patch("/admin/api/secrets/:secretId", async (req, reply) => {
+    const { secretId } = req.params as { secretId: string };
+    const secret = await vault.updateSecret(secretId, (req.body ?? {}) as vault.UpdateSecretInput);
+    if (!secret) return notFound(reply, "secret");
+    return { secret };
+  });
+
+  app.delete("/admin/api/secrets/:secretId", async (req, reply) => {
+    const { secretId } = req.params as { secretId: string };
+    if (!(await vault.deleteSecret(secretId))) return notFound(reply, "secret");
+    return { ok: true };
   });
 
   app.get("/admin/api/projects/:id/activity", async (req) => {

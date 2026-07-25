@@ -1,4 +1,5 @@
 import { JsonCollection, newId, pmPath } from "./store.js";
+import { redactSecrets } from "./vault.js";
 import type { BoardStatus, Comment, Complexity, Subtask, WorkItem, WorkItemType } from "./types.js";
 
 const items = new JsonCollection<WorkItem>(pmPath("work-items.json"));
@@ -163,9 +164,13 @@ export async function transitionWorkItem(id: string, to: BoardStatus, actor: str
 }
 
 export async function addComment(id: string, author: string, authorLabel: string, body: string): Promise<Comment | null> {
+  // Redact here rather than at each call site: most comments are written by
+  // agents out of their own output, the board is permanent, and one missed
+  // call site would mean a live credential sitting in a ticket forever.
+  const safeBody = await redactSecrets(body);
   let comment: Comment | null = null;
   await items.update(id, (item) => {
-    comment = { id: newId(), author, authorLabel, body, createdAt: Date.now() };
+    comment = { id: newId(), author, authorLabel, body: safeBody, createdAt: Date.now() };
     item.comments.push(comment);
     item.updatedAt = Date.now();
   });
