@@ -1,51 +1,26 @@
-import { useEffect, useRef, useState } from 'react'
-
-interface WebviewElement extends HTMLElement {
-  getURL(): string
-  executeJavaScript(code: string): Promise<unknown>
-}
+import { useEffect, useState } from 'react'
 
 /**
- * Embeds Custos's own web admin panel directly rather than reimplementing
- * provider config, routing priorities, and the security panel natively --
- * it's a real, isolated browser context (its own partition/cookie jar), so
- * it has its own independent /login. To avoid asking the user to type the
- * admin password twice, the first time this loads the login page we
- * autofill and submit it using the password captured during the app's own
- * setup screen (kept in the main process only, never written to disk).
+ * Embeds Custos's own admin panel rather than reimplementing provider
+ * config, routing priorities and the security panel natively.
+ *
+ * A plain iframe, not Electron's <webview>: that tag doesn't exist in a
+ * browser, so it rendered an empty pane in the web build. It also isn't
+ * needed any more — the app is served from the same origin as /admin in
+ * both the browser and the desktop client (which hands its window over to
+ * the hosted UI after setup), so the iframe shares the session cookie and
+ * is simply already logged in. The old build had to run in an isolated
+ * partition with its own login, which is why it used to autofill the
+ * password on the embedded page's behalf.
  */
 export default function SettingsView(): React.JSX.Element {
-  const webviewRef = useRef<WebviewElement | null>(null)
   const [url, setUrl] = useState<string | null>(null)
 
   useEffect(() => {
     window.custos.getEmbedUrl().then(setUrl)
   }, [])
 
-  useEffect(() => {
-    const webview = webviewRef.current
-    if (!webview || !url) return
-
-    const handleLoad = async (): Promise<void> => {
-      if (!webview.getURL().includes('/login')) return
-      const password = await window.custos.getAutofillPassword()
-      if (!password) return
-      await webview.executeJavaScript(`
-        (function() {
-          const input = document.getElementById('password');
-          if (!input) return;
-          input.value = ${JSON.stringify(password)};
-          const button = document.querySelector('#form button[type=submit]');
-          if (button) button.click();
-        })();
-      `)
-    }
-
-    webview.addEventListener('did-finish-load', handleLoad)
-    return () => webview.removeEventListener('did-finish-load', handleLoad)
-  }, [url])
-
   if (!url) return <div className="empty-state">Loading…</div>
 
-  return <webview ref={webviewRef} src={url} partition="persist:custos-admin" />
+  return <iframe className="settings-frame" src={url} title="Custos admin" />
 }
