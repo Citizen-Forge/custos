@@ -12,6 +12,8 @@ import type { MemoryStore } from "../memory/store.js";
 import { createUserPromptSubmitHandler, type UserPromptSubmitInput } from "../memory/hook-handlers.js";
 import { reconstructFromAnthropicSSE } from "../memory/stream-reconstruct.js";
 import { classifyComplexity, isFreshUserTurn } from "../routing/complexity.js";
+import { parseModelAlias } from "../providers/model-alias.js";
+import type { CompleteOptions } from "../providers/types.js";
 import type { RemoteSessionManager } from "../remote/session-manager.js";
 
 export interface RouteDeps {
@@ -49,12 +51,31 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     // beta flags and Anthropic 400s on the now-"extra" input.
     const rawBeta = req.headers["anthropic-beta"];
     const clientBetaHeader = Array.isArray(rawBeta) ? rawBeta.join(",") : rawBeta;
-    const options = { clientBetaHeader };
+
+    // A PM agent pins its own provider and model by asking for
+    // `custos:<provider>/<model>` (see providers/model-alias.ts). That
+    // choice is the engineering manager's cost decision, so it overrides
+    // task and complexity routing outright rather than being one input to
+    // them, and the alias is unwrapped before the request goes upstream.
+    const pinned = parseModelAlias(body.model);
+    const options: CompleteOptions = { clientBetaHeader };
+    if (pinned) {
+      body.model = pinned.model;
+      options.modelOverride = pinned.model;
+    }
 
     let providerResponse;
     try {
       const routing = deps.runtime.config.complexityRouting;
-      if (routing.enabled && isFreshUserTurn(body)) {
+      if (pinned) {
+        reply.header("x-custos-pinned", `${pinned.providerKey}/${pinned.model}`);
+        providerResponse = await deps.runtime.router.completeWithEntries(
+          [{ provider: pinned.providerKey, priority: 1 }],
+          body,
+          options,
+          `pinned provider "${pinned.providerKey}"`,
+        );
+      } else if (routing.enabled && isFreshUserTurn(body)) {
         const tier = await classifyComplexity(deps.runtime.router, body);
         reply.header("x-custos-complexity-tier", tier);
         providerResponse = await deps.runtime.router.completeWithEntries(routing.tiers[tier], body, options, `complexity tier "${tier}"`);
@@ -150,6 +171,24 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       APPROVAL_TIMEOUT_MS,
     );
     return decision === "allow" ? respond("allow", `approved in chat: ${reason}`) : respond("deny", `denied in chat: ${reason}`);
+  });
+
+  // Used by autonomous PM agent runs (product owner, engineer, QA, devops).
+  // Nobody is attached to those, so there is no one to ask: an "ask" verdict
+  // proceeds and only a hard "deny" blocks. That widening is the whole
+  // reason autonomy is opt-in per project and per role in project settings
+  // -- it is not the posture any human-attached chat runs under.
+  app.post("/hooks/pretooluse-agent", async (req) => {
+    const result = await preToolUseHandler(req.body as PreToolUseHookInput);
+    const { permissionDecision, permissionDecisionReason } = result.hookSpecificOutput;
+    if (permissionDecision !== "ask") return result;
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse" as const,
+        permissionDecision: "allow" as const,
+        permissionDecisionReason: `${permissionDecisionReason} (allowed: autonomous agent run, no operator attached to ask)`,
+      },
+    };
   });
 
   app.post("/hooks/posttooluse", async (req) => {

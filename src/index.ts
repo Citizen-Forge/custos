@@ -6,6 +6,10 @@ import { registerRoutes } from "./server/routes.js";
 import { registerAdminRoutes } from "./server/admin-routes.js";
 import { registerRemoteRoutes } from "./server/remote-routes.js";
 import { registerProjectRoutes } from "./server/project-routes.js";
+import { registerPmRoutes } from "./server/pm-routes.js";
+import { registerPmEventRoutes } from "./server/pm-events.js";
+import { Orchestrator } from "./pm/orchestrator.js";
+import { failOrphanedRuns } from "./pm/runs.js";
 import { registerAuthRoutes } from "./server/auth-routes.js";
 import { registerAuthGuard } from "./server/auth-guard.js";
 import { registerClientAuthGuard } from "./server/client-auth-guard.js";
@@ -56,10 +60,23 @@ async function main() {
   registerClientAuthGuard(app, runtime);
   registerAuthRoutes(app);
   const remoteSessionManager = new RemoteSessionManager(runtime);
+
+  // Anything still marked "running" in the run log belongs to a process
+  // this restart killed, so retire it before the orchestrator starts and
+  // the UI shows ghosts as live work.
+  await failOrphanedRuns();
+  const orchestrator = new Orchestrator(runtime);
+  // A handoff out of Steering Co is the one moment where waiting a full
+  // poll interval is visibly wrong -- the user just pressed the button.
+  remoteSessionManager.onIdeaHandoff = (projectId, ideaId) => void orchestrator.planIdea(projectId, ideaId);
+  orchestrator.start();
+
   registerRoutes(app, { runtime, memoryStore, remoteSessionManager });
   registerAdminRoutes(app, runtime);
   registerRemoteRoutes(app, remoteSessionManager);
   registerProjectRoutes(app, runtime, remoteSessionManager);
+  registerPmRoutes(app, runtime, orchestrator);
+  registerPmEventRoutes(app, orchestrator);
 
   await app.listen({ port: PORT, host: "0.0.0.0" });
 }

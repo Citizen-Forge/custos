@@ -37,8 +37,8 @@ export class OpenAICompatibleProvider implements Provider {
 
   async complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
     // clientBetaHeader is Anthropic-specific and intentionally ignored here.
-    const { signal } = options ?? {};
-    const openaiRequest = toOpenAIRequest(request, this.config.model);
+    const { signal, modelOverride } = options ?? {};
+    const openaiRequest = toOpenAIRequest(request, modelOverride ?? this.config.model);
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) headers.authorization = `Bearer ${this.config.apiKey}`;
 

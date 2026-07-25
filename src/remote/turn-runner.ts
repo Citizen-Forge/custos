@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Runtime } from "../runtime.js";
 import { syncSpawnedSessionCredentials } from "../auth/credentials.js";
-import { ensureHeadlessSettingsFile } from "./headless-settings.js";
+import { ensureHeadlessSettingsFile, type HookProfile } from "./headless-settings.js";
 
 const PORT = process.env.PORT ?? "8787";
 
@@ -89,6 +89,26 @@ function handleParsedLine(json: Record<string, unknown>, onEvent: (event: TurnEv
   }
 }
 
+export interface RunTurnOptions {
+  cwd: string;
+  prompt: string;
+  /** Continue an existing Claude Code conversation instead of starting a
+   * new one. */
+  resumeSessionId?: string;
+  /** Role persona, appended to Claude Code's own system prompt rather than
+   * replacing it -- the built-in prompt is what makes it competent with the
+   * tools, and a PM role only needs to add to that, never to override it. */
+  appendSystemPrompt?: string;
+  /** Passed through as ANTHROPIC_MODEL. Usually a pinned
+   * `custos:<provider>/<model>` alias (see providers/model-alias.ts), which
+   * is how a PM agent gets exactly the provider it was assigned. */
+  model?: string;
+  /** Permission posture -- see headless-settings.ts. Defaults to "chat". */
+  hookProfile?: HookProfile;
+  onEvent: (event: TurnEvent) => void;
+  signal: AbortSignal;
+}
+
 /**
  * Runs exactly one turn: spawns `claude -p <text>` (a fresh process --
  * the CLI has no persistent multi-turn mode), streams parsed events to
@@ -96,16 +116,10 @@ function handleParsedLine(json: Record<string, unknown>, onEvent: (event: TurnEv
  * chat's previously-captured Claude session id as resumeSessionId to
  * continue the same conversation; omit it to start a new one.
  */
-export async function runTurn(
-  runtime: Runtime,
-  cwd: string,
-  userText: string,
-  resumeSessionId: string | undefined,
-  onEvent: (event: TurnEvent) => void,
-  signal: AbortSignal,
-): Promise<void> {
+export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promise<void> {
+  const { cwd, prompt, resumeSessionId, appendSystemPrompt, model, onEvent, signal } = options;
   await syncSpawnedSessionCredentials();
-  await ensureHeadlessSettingsFile(runtime.config.clientApiKey);
+  const settingsPath = await ensureHeadlessSettingsFile(runtime.config.clientApiKey, options.hookProfile ?? "chat");
 
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -113,9 +127,12 @@ export async function runTurn(
   }
   env.ANTHROPIC_BASE_URL = `http://localhost:${PORT}`;
   if (runtime.config.clientApiKey) env.ANTHROPIC_API_KEY = runtime.config.clientApiKey;
+  if (model) env.ANTHROPIC_MODEL = model;
 
-  const args = ["-p", userText, "--output-format", "stream-json", "--include-partial-messages", "--verbose"];
+  const args = ["-p", prompt, "--output-format", "stream-json", "--include-partial-messages", "--verbose"];
   if (resumeSessionId) args.push("--resume", resumeSessionId);
+  if (appendSystemPrompt) args.push("--append-system-prompt", appendSystemPrompt);
+  if (settingsPath) args.push("--settings", settingsPath);
 
   // stdin = 'ignore' (i.e. /dev/null) so the CLI gets an immediate EOF
   // instead of waiting on a pipe that never receives data -- with a plain

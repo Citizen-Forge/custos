@@ -4,10 +4,17 @@ import { randomBytes } from "node:crypto";
 
 const CHATS_PATH = process.env.GATEWAY_CHATS_PATH ?? "data/chats.json";
 
+/** "chat" is an ordinary coding session. "steering" is a Steering Co
+ * conversation: same machinery, but pinned to the project's steering model
+ * and running the adversarial ideation persona, and it's the only kind that
+ * can hand an idea off to the roadmap. */
+export type ChatKind = "chat" | "steering";
+
 export interface ChatRecord {
   id: string;
   projectId: string;
   title: string;
+  kind: ChatKind;
   createdAt: number;
   /** Set when the user explicitly stops the session. A live PTY dying for
    * any other reason (crash, container restart) leaves this null -- the
@@ -36,9 +43,9 @@ async function writeAll(chats: ChatRecord[]): Promise<void> {
   await writeFile(CHATS_PATH, JSON.stringify(chats, null, 2), "utf8");
 }
 
-export async function listChats(projectId?: string): Promise<ChatRecord[]> {
+export async function listChats(projectId?: string, kind?: ChatKind): Promise<ChatRecord[]> {
   const chats = await readAll();
-  return projectId ? chats.filter((c) => c.projectId === projectId) : chats;
+  return chats.filter((c) => (!projectId || c.projectId === projectId) && (!kind || (c.kind ?? "chat") === kind));
 }
 
 export async function getChat(id: string): Promise<ChatRecord | null> {
@@ -46,9 +53,9 @@ export async function getChat(id: string): Promise<ChatRecord | null> {
   return chats.find((c) => c.id === id) ?? null;
 }
 
-export async function createChat(projectId: string, title: string): Promise<ChatRecord> {
+export async function createChat(projectId: string, title: string, kind: ChatKind = "chat"): Promise<ChatRecord> {
   const chats = await readAll();
-  const chat: ChatRecord = { id: randomBytes(12).toString("base64url"), projectId, title, createdAt: Date.now(), endedAt: null, claudeSessionId: null };
+  const chat: ChatRecord = { id: randomBytes(12).toString("base64url"), projectId, title, kind, createdAt: Date.now(), endedAt: null, claudeSessionId: null };
   chats.push(chat);
   await writeAll(chats);
   return chat;

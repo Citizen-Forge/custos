@@ -3,6 +3,12 @@ import * as projects from "../remote/projects.js";
 import * as chats from "../remote/chats.js";
 import { RemoteSessionManager } from "../remote/session-manager.js";
 import { listConversations, buildResumeSummary } from "../memory/conversations.js";
+import { getSettings, deleteSettings } from "../pm/project-settings.js";
+import { STEERING_PROMPT } from "../pm/prompts.js";
+import { ensureProjectAgents, deleteProjectAgents } from "../pm/agents.js";
+import { deleteProjectWorkItems } from "../pm/board.js";
+import { deleteProjectIdeas } from "../pm/ideas.js";
+import { deleteProjectRuns } from "../pm/runs.js";
 import type { Runtime } from "../runtime.js";
 
 function publicUrl(): string {
@@ -19,6 +25,17 @@ function connectUrl(token: string, initialMessage?: string): string {
   return initialMessage ? `${url}&initialMessage=${encodeURIComponent(initialMessage)}` : url;
 }
 
+/** Steering chats are the same machinery as an ordinary chat, pointed at a
+ * different persona and (usually) a stronger model. Resolved here rather
+ * than stored on the chat so that changing a project's steering model in
+ * settings takes effect on the next reopen instead of only on new chats. */
+async function sessionOptionsFor(chat: chats.ChatRecord): Promise<{ appendSystemPrompt?: string; model?: string; kind: chats.ChatKind }> {
+  const kind = chat.kind ?? "chat";
+  if (kind !== "steering") return { kind };
+  const settings = await getSettings(chat.projectId);
+  return { kind, appendSystemPrompt: STEERING_PROMPT, model: settings.steeringModel };
+}
+
 export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, manager: RemoteSessionManager): void {
   app.get("/admin/api/projects", async () => {
     return { projects: await projects.listProjects() };
@@ -31,7 +48,12 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       return { error: "name is required" };
     }
     try {
-      return { project: await projects.createProject(name.trim(), dirName) };
+      const project = await projects.createProject(name.trim(), dirName);
+      // Seed the built-in role agents up front so the project's four tabs
+      // are all functional the moment it exists, rather than the first
+      // orchestrator tick being the thing that makes them appear.
+      await ensureProjectAgents(project.id);
+      return { project };
     } catch (err) {
       reply.code(400);
       return { error: (err as Error).message };
@@ -61,6 +83,10 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       manager.stop(chat.id);
       await chats.deleteChat(chat.id);
     }
+    // The workspace directory survives (see projects.deleteProject), but the
+    // PM records are Custos's own bookkeeping about a project that no longer
+    // exists, so they go with it rather than accumulating as orphans.
+    await Promise.all([deleteProjectWorkItems(id), deleteProjectIdeas(id), deleteProjectAgents(id), deleteProjectRuns(id), deleteSettings(id)]);
     const ok = await projects.deleteProject(id);
     if (!ok) {
       reply.code(404);
@@ -71,12 +97,15 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
 
   app.get("/admin/api/projects/:id/chats", async (req) => {
     const { id } = req.params as { id: string };
-    const records = await chats.listChats(id);
+    const { kind } = req.query as { kind?: chats.ChatKind };
+    const records = await chats.listChats(id, kind);
     return {
       chats: records.map((chat) => {
         const live = manager.get(chat.id);
         return {
           ...chat,
+          // Chats created before steering existed have no `kind` on disk.
+          kind: chat.kind ?? "chat",
           active: !!live,
           connectedClients: live?.clients.size ?? 0,
           connectUrl: live ? connectUrl(live.token) : null,
@@ -87,7 +116,7 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
 
   app.post("/admin/api/projects/:id/chats", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { title, resumeConversationId } = (req.body ?? {}) as { title?: string; resumeConversationId?: string };
+    const { title, resumeConversationId, kind } = (req.body ?? {}) as { title?: string; resumeConversationId?: string; kind?: chats.ChatKind };
     const project = await projects.getProject(id);
     if (!project) {
       reply.code(404);
@@ -108,9 +137,9 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       initialMessage = resumePrompt(summary);
     }
 
-    const chat = await chats.createChat(id, title?.trim() || "New chat");
+    const chat = await chats.createChat(id, title?.trim() || (kind === "steering" ? "New discussion" : "New chat"), kind ?? "chat");
     try {
-      const session = manager.start(chat.id, project.workspaceDir);
+      const session = manager.start(chat.id, id, project.workspaceDir, await sessionOptionsFor(chat));
       return { chat, token: session.token, connectUrl: connectUrl(session.token, initialMessage), initialMessage };
     } catch (err) {
       await chats.deleteChat(chat.id);
@@ -163,7 +192,10 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       return { error: "project not found" };
     }
     try {
-      const session = manager.start(chat.id, project.workspaceDir, chat.claudeSessionId);
+      const session = manager.start(chat.id, chat.projectId, project.workspaceDir, {
+        ...(await sessionOptionsFor(chat)),
+        claudeSessionId: chat.claudeSessionId,
+      });
       await chats.markChatStarted(chat.id);
       return { token: session.token, connectUrl: connectUrl(session.token) };
     } catch (err) {
