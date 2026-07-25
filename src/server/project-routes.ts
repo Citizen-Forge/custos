@@ -11,6 +11,7 @@ import { deleteProjectIdeas } from "../pm/ideas.js";
 import { deleteProjectRuns } from "../pm/runs.js";
 import { releaseProjectWorkspaces } from "../pm/worktrees.js";
 import { deleteProjectSecrets } from "../pm/vault.js";
+import { deleteProjectFacts } from "../pm/facts.js";
 import type { Runtime } from "../runtime.js";
 
 function publicUrl(): string {
@@ -99,6 +100,7 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       deleteProjectRuns(id),
       deleteSettings(id),
       deleteProjectSecrets(id),
+      deleteProjectFacts(id),
     ]);
     const ok = await projects.deleteProject(id);
     if (!ok) {

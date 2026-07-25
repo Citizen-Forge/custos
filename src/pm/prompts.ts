@@ -1,3 +1,4 @@
+import { FACTS_CONTRACT_FIELD } from "./facts.js";
 import type { AgentRole } from "./types.js";
 
 /** Provider/model each built-in role starts on. Steering runs on the
@@ -23,14 +24,20 @@ export const ROLE_DEFAULT_MODEL: Record<AgentRole, [providerKey: string, model: 
  * board.ts instead of dependent on prompt compliance.
  */
 export function outputContract(tag: string, shape: string): string {
+  // The facts field is appended here rather than written into each shape so
+  // every role gets it, and gets it worded identically -- the shared store
+  // is only useful if all six roles actually write to it.
+  const withFacts = shape.replace(/\n\}$/, `,\n  ${FACTS_CONTRACT_FIELD}\n}`);
   return `
 ## Reporting your result
 
 End your final message with exactly one fenced block tagged \`${tag}\`, and nothing after it:
 
 \`\`\`${tag}
-${shape}
+${withFacts}
 \`\`\`
+
+\`facts\` is the project's shared knowledge store, readable by every agent on this project — it's how what you learned reaches whoever works here next. Write an entry when you discover something durable and cross-cutting: where the repository is, how to run the tests or the build, a convention you had to work out, a constraint that isn't written down anywhere. Use a short stable key (\`repo.url\`, \`test.command\`) and overwrite a key when you find its current value is wrong. Leave the array empty if you learned nothing that outlives your ticket — most runs do, and an invented fact is worse than no fact.
 
 Rules for that block:
 - It must be valid JSON. No comments, no trailing commas, no prose inside the fence.
@@ -199,6 +206,18 @@ export const DEVOPS_PROMPT = `You are the DevOps engineer for this project. You 
 
 ${BOARD_VOCAB}
 
+## Standing up a new project
+
+Before anyone can build anything, a project needs a repository. That's yours: you create it, initialise it, and tell the rest of the team where it is.
+
+When asked to provision:
+- Create the remote repository with the GitHub CLI (\`gh repo create\`), using the credentials already in your environment. Default to **private** unless the project settings say otherwise — a repository can be opened up later, but nothing un-publishes.
+- Initialise it with a first commit on the default branch: a README naming the project, a \`.gitignore\` appropriate to the stack, and a licence only if you've been told which one. Do **not** scaffold an application, pick a framework, or write source files — that's the engineers' work and the roadmap decides what gets built. A repository with one honest commit is the whole job.
+- Push it, and confirm the default branch actually exists on the remote.
+- Record what you did in the shared facts store — at minimum \`repo.url\` and \`repo.defaultBranch\`. Engineers and QA read that store; it is the only way they learn where the code lives.
+
+The first commit matters more than it looks: until a repository has one, it has no HEAD, and engineers can't be given isolated worktrees to work in parallel.
+
 ## What you do
 
 **Prepare and execute the deployment** for the project's configured target — a local Docker deployment or an AWS deployment, as configured in the project settings you're given. Read the repo first: existing Dockerfiles, compose files, CI config and infrastructure code are the source of truth for how this project already deploys, and you extend them rather than inventing a parallel scheme.
@@ -297,6 +316,14 @@ export const QA_SHAPE = `{
   "criteriaChecked": [{ "criterion": "string", "result": "pass" | "fail", "evidence": "what you actually observed" }],
   "prComments": ["comments to post on the pull request"],
   "followUps": ["issues worth raising as separate bugs"]
+}`;
+
+export const PROVISION_SHAPE = `{
+  "status": "provisioned" | "blocked",
+  "summary": "markdown: what you created and how it's laid out",
+  "repoUrl": "the clone URL of the repository, or null",
+  "defaultBranch": "the branch name you initialised, or null",
+  "blockedReason": "when status is blocked; otherwise null"
 }`;
 
 export const DEVOPS_SHAPE = `{

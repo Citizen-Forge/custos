@@ -9,6 +9,7 @@ import { getSettings, updateSettings } from "../pm/project-settings.js";
 import { getProject } from "../remote/projects.js";
 import { releaseWorkspace } from "../pm/worktrees.js";
 import * as vault from "../pm/vault.js";
+import * as facts from "../pm/facts.js";
 import { BOARD_STATUSES, type BoardStatus, type ProjectSettings, type WorkItemType } from "../pm/types.js";
 
 const isStatus = (value: unknown): value is BoardStatus => BOARD_STATUSES.includes(value as BoardStatus);
@@ -171,6 +172,9 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
     if (!(await getProject(id))) return notFound(reply, "project");
 
     switch (stage) {
+      case "provision":
+        void orchestrator.provisionRepo(id);
+        return { ok: true };
       case "groom":
         void orchestrator.groomBacklog(id);
         return { ok: true };
@@ -274,10 +278,35 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
   app.get("/admin/api/projects/:id/activity", async (req) => {
     const { id } = req.params as { id: string };
     const { limit } = req.query as { limit?: string };
+    const stalled = await runs.listStalledRuns(id);
     return {
       runs: await runs.listRuns(id, Number(limit) || 50),
       active: await runs.listActiveRuns(id),
+      stalledRunIds: stalled.map((run) => run.id),
       busy: orchestrator.activeKeys(),
     };
+  });
+
+  // ------------------------------------------------------- project knowledge
+
+  app.get("/admin/api/projects/:id/facts", async (req) => {
+    const { id } = req.params as { id: string };
+    return { facts: await facts.listFacts(id) };
+  });
+
+  app.post("/admin/api/projects/:id/facts", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { key, value, category } = (req.body ?? {}) as { key?: string; value?: string; category?: facts.FactCategory };
+    if (!key?.trim() || !value?.trim()) {
+      reply.code(400);
+      return { error: "key and value are required" };
+    }
+    return { fact: await facts.writeFact({ projectId: id, key: key.trim(), value: value.trim(), category }) };
+  });
+
+  app.delete("/admin/api/facts/:factId", async (req, reply) => {
+    const { factId } = req.params as { factId: string };
+    if (!(await facts.deleteFact(factId))) return notFound(reply, "fact");
+    return { ok: true };
   });
 }

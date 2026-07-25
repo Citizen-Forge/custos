@@ -5,7 +5,7 @@ import { ROLE_PROMPTS } from "./prompts.js";
 import { resolveAgentEnv, redactSecrets } from "./vault.js";
 import * as runs from "./runs.js";
 import * as agents from "./agents.js";
-import type { AgentDef } from "./types.js";
+import { RUN_TIMEOUT_MS, type AgentDef } from "./types.js";
 
 export interface AgentRunResult<T> {
   runId: string;
@@ -36,7 +36,28 @@ export interface RunAgentOptions {
   workItemId?: string | null;
   ideaId?: string | null;
   onEvent?: (event: TurnEvent) => void;
+  /** One-line "what it's doing now", for the live activity view. */
+  onProgress?: (action: string) => void;
   signal?: AbortSignal;
+}
+
+/** A short human-readable line for what just happened, used both as the
+ * run's `currentAction` and as the live feed's event text. Returns null for
+ * events not worth showing (token deltas). */
+function describeEvent(event: TurnEvent): string | null {
+  if (event.type === "message_final") {
+    const tool = event.content.find((block) => block.type === "tool_use");
+    if (tool && tool.type === "tool_use") {
+      const input = tool.input as Record<string, unknown> | undefined;
+      const primary = input?.command ?? input?.file_path ?? input?.path ?? input?.pattern ?? input?.url;
+      return typeof primary === "string" ? `${tool.name}: ${primary}` : tool.name;
+    }
+    const text = event.content.find((block) => block.type === "text");
+    return text && text.type === "text" && text.text.trim() ? text.text.trim().split("\n")[0].slice(0, 160) : null;
+  }
+  if (event.type === "tool_result" && event.isError) return "a tool call failed";
+  if (event.type === "error") return `error: ${event.message.slice(0, 160)}`;
+  return null;
 }
 
 /**
@@ -118,6 +139,14 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
 
   const onEvent = (event: TurnEvent): void => {
     if (event.type === "session") void runs.setRunSession(run.id, event.sessionId);
+
+    // Heartbeat. Every event counts, so "has this done anything lately" is
+    // measured from what the agent actually did rather than from asking it
+    // -- the agent least able to notice it's stuck is a stuck one.
+    const action = describeEvent(event);
+    void runs.recordActivity(run.id, action, event.type === "message_final" && event.content.some((b) => b.type === "tool_use"));
+    if (action) options.onProgress?.(action);
+
     // message_final replaces rather than appends within a message, but an
     // agent run is many messages; concatenating each message's final text
     // gives the whole transcript of what it said, which is where the
@@ -136,6 +165,15 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
 
   const controller = new AbortController();
   options.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+  // Whatever an agent past this point is doing, it isn't converging, and
+  // it's still spending. Failing it returns the ticket to the orchestrator,
+  // which backs off and retries rather than leaving a dead run holding a
+  // concurrency slot forever.
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, RUN_TIMEOUT_MS);
 
   try {
     await runTurn(runtime, {
@@ -150,10 +188,13 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     });
   } catch (err) {
     turnError = (err as Error).message;
+  } finally {
+    clearTimeout(deadline);
   }
 
   const runMs = Date.now() - startedAt;
   const parsed = extractContract<T>(text, tag);
+  if (timedOut) turnError = `the run was aborted after ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes without finishing`;
   const error = turnError ?? (parsed ? null : `the agent did not return a valid \`${tag}\` block`);
   const ok = !error;
 

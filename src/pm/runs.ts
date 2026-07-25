@@ -1,5 +1,5 @@
 import { JsonCollection, newId, pmPath } from "./store.js";
-import type { AgentRole, AgentRun } from "./types.js";
+import { STALL_THRESHOLD_MS, type AgentRole, type AgentRun } from "./types.js";
 
 const runs = new JsonCollection<AgentRun>(pmPath("agent-runs.json"));
 
@@ -44,9 +44,30 @@ export async function startRun(input: {
     costUsd: null,
     summary: "",
     error: null,
+    lastEventAt: Date.now(),
+    currentAction: null,
+    toolCalls: 0,
   });
   await prune(input.projectId);
   return run;
+}
+
+/** Heartbeat from a live run. Called on every event the agent produces, so
+ * "when did this last do anything" is measured rather than asserted. */
+export async function recordActivity(id: string, action: string | null, isToolCall: boolean): Promise<void> {
+  await runs.update(id, (run) => {
+    run.lastEventAt = Date.now();
+    if (action) run.currentAction = action.slice(0, 200);
+    if (isToolCall) run.toolCalls += 1;
+  });
+}
+
+/** Runs that haven't produced an event recently. The orchestrator surfaces
+ * these; it doesn't kill them, because a long build legitimately looks like
+ * this and only the operator knows which is which. */
+export async function listStalledRuns(projectId?: string, thresholdMs = STALL_THRESHOLD_MS): Promise<AgentRun[]> {
+  const cutoff = Date.now() - thresholdMs;
+  return runs.find((row) => row.status === "running" && row.lastEventAt < cutoff && (!projectId || row.projectId === projectId));
 }
 
 export async function setRunSession(id: string, claudeSessionId: string): Promise<void> {

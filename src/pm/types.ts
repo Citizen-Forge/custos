@@ -170,7 +170,25 @@ export interface AgentRun {
    * feed without having to replay the whole run. */
   summary: string;
   error: string | null;
+  /** When this run last produced any event at all. A stuck agent is
+   * detected from this rather than from anything it says about itself:
+   * the agent least able to report that it's stuck is a stuck one. */
+  lastEventAt: number;
+  /** One line describing what it is doing right now, derived from its most
+   * recent tool call ("Bash: npm test", "Edit: src/index.ts"). */
+  currentAction: string | null;
+  /** Rolling count of tool calls, as a cheap progress signal. */
+  toolCalls: number;
 }
+
+/** How long a run may produce no events before it's considered stalled.
+ * Long enough to cover a slow model thinking or a long test suite, short
+ * enough that a genuinely hung run is visible within a coffee break. */
+export const STALL_THRESHOLD_MS = 6 * 60_000;
+
+/** Hard wall-clock ceiling on a single agent run. Past this it's aborted:
+ * whatever it's doing, it isn't converging, and it's spending money. */
+export const RUN_TIMEOUT_MS = Number(process.env.CUSTOS_RUN_TIMEOUT_MS ?? 45 * 60_000);
 
 export type DeployTarget = "none" | "docker-local" | "aws";
 

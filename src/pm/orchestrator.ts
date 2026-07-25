@@ -5,13 +5,14 @@ import * as board from "./board.js";
 import * as ideas from "./ideas.js";
 import * as agentStore from "./agents.js";
 import * as runs from "./runs.js";
-import { getSettings } from "./project-settings.js";
+import { getSettings, updateSettings } from "./project-settings.js";
+import { listFacts, renderFacts, writeFact } from "./facts.js";
 import { runAgent } from "./agent-runner.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderProjectContext, renderProviderMenu, renderSecrets, renderWorkItem } from "./context.js";
 import { hasGitCredentials, listSecrets } from "./vault.js";
-import { ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, QA_SHAPE, outputContract } from "./prompts.js";
-import type { AssignContract, DevopsContract, EngineerContract, GroomContract, PlanContract, QaContract } from "./contracts.js";
+import { ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, outputContract } from "./prompts.js";
+import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, ProjectSettings, WorkItem } from "./types.js";
 
 const TICK_MS = Number(process.env.CUSTOS_ORCHESTRATOR_TICK_MS ?? 20_000);
@@ -93,6 +94,25 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   private async tickProject(project: Project): Promise<void> {
     const settings = await getSettings(project.id);
+
+    // Live runs move without the board changing, so nudge watchers each tick
+    // while anything is running -- that's what keeps "what is it doing right
+    // now" current in the UI without a second push channel.
+    const active = await runs.listActiveRuns(project.id);
+    if (active.length) this.emit("change", project.id);
+
+    // Surface, don't kill. A long build legitimately looks like a stall, and
+    // only the operator knows which is which -- the hard timeout in
+    // agent-runner is what eventually stops a genuinely hung run.
+    for (const stalled of await runs.listStalledRuns(project.id)) {
+      const minutes = Math.round((Date.now() - stalled.lastEventAt) / 60_000);
+      this.emit(
+        "activity",
+        project.id,
+        `${stalled.role} has done nothing for ${minutes}m — last action: ${stalled.currentAction ?? "none recorded"}`,
+      );
+    }
+
     if (await this.overBudget(project.id, settings)) return;
 
     if (settings.autonomy["product-owner"]) {
@@ -102,9 +122,19 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (backlog.length) void this.groomBacklog(project.id);
     }
 
-    if (settings.autonomy["engineering-manager"]) {
-      const ready = (await board.listWorkItems(project.id)).filter((item) => item.type !== "epic" && item.status === "ready");
-      if (ready.length) void this.assignReady(project.id);
+    const readyWork = (await board.listWorkItems(project.id)).filter((item) => item.type !== "epic" && item.status === "ready");
+
+    // Nothing can be built before there's somewhere to build it. Once there
+    // is ready work and no repository, standing one up is the only sensible
+    // next action -- so it runs ahead of assignment rather than letting the
+    // engineering manager assign tickets nobody can start.
+    if (settings.autonomy.devops && !settings.repoUrl && readyWork.length) {
+      void this.provisionRepo(project.id);
+      return;
+    }
+
+    if (settings.autonomy["engineering-manager"] && readyWork.length) {
+      void this.assignReady(project.id);
     }
 
     if (settings.autonomy.engineer) {
@@ -187,11 +217,30 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     return [
       renderProjectContext(project.name, settings, await runs.monthlySpendUsd(project.id)),
       "",
+      renderFacts(await listFacts(project.id)),
+      "",
       renderSecrets(
         available.map((secret) => secret.name),
         await hasGitCredentials(project.id),
       ),
     ].join("\n");
+  }
+
+  /** Folds any facts a run reported into the shared store. Called after
+   * every role's run, since any of them can learn something the next one
+   * needs. */
+  private async applyFacts(projectId: string, agent: AgentDef, contract: { facts?: FactWrite[] } | null): Promise<void> {
+    for (const fact of contract?.facts ?? []) {
+      if (!fact.key?.trim() || !fact.value?.trim()) continue;
+      await writeFact({
+        projectId,
+        key: fact.key.trim(),
+        value: fact.value.trim(),
+        category: fact.category,
+        writtenBy: agent.id,
+        writtenByLabel: agent.name,
+      });
+    }
   }
 
   // ---------------------------------------------------------------- product owner
@@ -236,6 +285,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         ideaId,
       });
 
+      await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed?.epics?.length) {
         await ideas.markIdeaFailed(ideaId, result.error ?? "the product owner returned no epics");
         return;
@@ -306,6 +356,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         tag: "custos-groom",
         outputContract: outputContract("custos-groom", GROOM_SHAPE),
       });
+      await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) return;
 
       const valid = new Set(backlog.map((item) => item.id));
@@ -378,6 +429,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         tag: "custos-assign",
         outputContract: outputContract("custos-assign", ASSIGN_SHAPE),
       });
+      await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) return;
 
       // Only provider keys that actually exist may be created against --
@@ -481,6 +533,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         workItemId,
       });
 
+      await this.applyFacts(projectId, agent, result.parsed);
       if (!result.ok || !result.parsed) {
         await board.addComment(workItemId, agent.id, agent.name, `Run failed: ${result.error ?? "unknown error"}`);
         // Back off rather than re-dispatching on the very next tick -- the
@@ -562,6 +615,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         workItemId,
       });
 
+      await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) {
         await board.addComment(workItemId, ctx.agent.id, ctx.agent.name, `QA run failed: ${result.error ?? "unknown error"}`);
         return;
@@ -603,6 +657,59 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     await board.updateWorkItem(workItemId, { worktreePath: null });
   }
 
+  // --------------------------------------------------------------- provision
+
+  /**
+   * Creates the project's repository. Nothing downstream works without one:
+   * engineers have nowhere to branch, QA has nothing to check out, and a
+   * repository with no commits can't be split into worktrees, so the whole
+   * board would run single-file in a shared directory.
+   */
+  async provisionRepo(projectId: string): Promise<void> {
+    await this.guard(`provision:${projectId}`, projectId, async () => {
+      const ctx = await this.resolve(projectId, "devops");
+      if (!ctx) return;
+      if (ctx.settings.repoUrl) return; // already stood up
+
+      if (!(await hasGitCredentials(projectId))) {
+        this.emit("activity", projectId, "Can't create a repository: no git credentials in the vault. Add a GitHub token in DevOps and mark it 'use for git'.");
+        return;
+      }
+
+      const prompt = [
+        await this.projectHeader(ctx.project, ctx.settings),
+        "",
+        "## Your task",
+        "",
+        `Stand up the repository for this project. Its working copy is \`${ctx.project.workspaceDir}\` — create the remote, initialise it there with a single honest first commit, push, and record where it lives in the shared facts store.`,
+        "",
+        "Do not scaffold an application. The roadmap decides what gets built; you are only making somewhere for it to go.",
+      ].join("\n");
+
+      const result = await runAgent<ProvisionContract>(this.runtime, {
+        agent: ctx.agent,
+        projectId,
+        cwd: ctx.project.workspaceDir,
+        prompt,
+        tag: "custos-provision",
+        outputContract: outputContract("custos-provision", PROVISION_SHAPE),
+      });
+
+      await this.applyFacts(projectId, ctx.agent, result.parsed);
+
+      if (!result.ok || result.parsed?.status !== "provisioned" || !result.parsed.repoUrl) {
+        this.emit("activity", projectId, `Repository provisioning failed: ${result.parsed?.blockedReason ?? result.error ?? "no repository URL returned"}`);
+        return;
+      }
+
+      await updateSettings(projectId, {
+        repoUrl: result.parsed.repoUrl,
+        ...(result.parsed.defaultBranch ? { defaultBranch: result.parsed.defaultBranch } : {}),
+      });
+      this.emit("activity", projectId, `DevOps created the repository: ${result.parsed.repoUrl}`);
+    });
+  }
+
   // -------------------------------------------------------------------- devops
 
   async runDevops(projectId: string, workItemId: string): Promise<void> {
@@ -639,6 +746,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         workItemId,
       });
 
+      await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) {
         await board.addComment(workItemId, ctx.agent.id, ctx.agent.name, `Deployment run failed: ${result.error ?? "unknown error"}`);
         return;
