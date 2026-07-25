@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -17,17 +17,38 @@ export class JsonCollection<T extends { id: string }> {
   constructor(private readonly path: string) {}
 
   private async read(): Promise<T[]> {
+    let raw: string;
     try {
-      return JSON.parse(await readFile(this.path, "utf8")) as T[];
+      raw = await readFile(this.path, "utf8");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;
     }
+    // A file that exists but is empty is a legitimately empty collection.
+    if (!raw.trim()) return [];
+    try {
+      return JSON.parse(raw) as T[];
+    } catch (err) {
+      // Deliberately fatal rather than falling back to []: an empty array
+      // here would be written straight back over the real contents by the
+      // next mutation, turning a transient read problem into permanent data
+      // loss. Failing the request keeps the file on disk to be recovered.
+      throw new Error(`${this.path} is not valid JSON and was not overwritten: ${(err as Error).message}`);
+    }
   }
 
+  /**
+   * Writes via a temporary file and an atomic rename, so a reader can only
+   * ever observe the old contents or the new ones -- never a half-written
+   * file. writeFile() truncates first and fills after, which leaves a window
+   * where a concurrent read sees zero bytes; with several agents mutating
+   * the board at once that window gets hit in practice.
+   */
   private async write(rows: T[]): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
-    await writeFile(this.path, JSON.stringify(rows, null, 2), "utf8");
+    const temp = `${this.path}.${process.pid}.tmp`;
+    await writeFile(temp, JSON.stringify(rows, null, 2), "utf8");
+    await rename(temp, this.path);
   }
 
   /** Runs `fn` with exclusive access to the file: no other mutate() on this

@@ -239,7 +239,9 @@ export async function resolveAgentEnv(projectId: string): Promise<Record<string,
     }
   }
 
-  for (const id of used) void secrets.update(id, (row) => void (row.lastUsedAt = Date.now()));
+  // Awaited rather than fired off: an unsequenced write racing the reads
+  // that follow is how the store got caught mid-write in the first place.
+  for (const id of used) await secrets.update(id, (row) => void (row.lastUsedAt = Date.now()));
   return env;
 }
 
