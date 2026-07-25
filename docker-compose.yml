@@ -18,10 +18,18 @@ services:
       # point CUSTOS_WORKSPACE at whatever project(s) you want reachable
       # remotely. Defaults to an empty local ./workspace so this works
       # out of the box without editing anything.
+      # Point CUSTOS_WORKSPACE at a directory that contains ONLY the projects
+      # Custos should be able to touch -- it is the entire filesystem as far
+      # as an autonomous agent is concerned. Pointing it at a broad share
+      # gives every engineer agent write access to all of it.
       - ${CUSTOS_WORKSPACE:-./workspace}:/workspace
-      # Optional: mount your own Claude Code login so a remote session
-      # doesn't need its own /login. Uncomment and set the host path.
-      # - ${HOME}/.claude:/root/.claude
+      # Claude Code's own state: session transcripts, the settings file
+      # Custos writes hooks into, and the credentials it syncs for spawned
+      # sessions. Without this it lives in the container's writable layer
+      # and is destroyed on every rebuild -- which silently breaks `--resume`,
+      # so reopening a chat starts a brand-new conversation instead of
+      # continuing the old one.
+      - ./data/claude-home:/root/.claude
     depends_on:
       - qdrant
     restart: unless-stopped
