@@ -2,7 +2,14 @@ import type { FastifyInstance } from "fastify";
 import { sessions, SESSION_COOKIE } from "../auth/admin-session.js";
 
 function isProtectedPath(path: string): boolean {
-  return path === "/admin" || path.startsWith("/admin/") || path === "/remote" || path.startsWith("/remote/");
+  return (
+    path === "/admin" ||
+    path.startsWith("/admin/") ||
+    path === "/remote" ||
+    path.startsWith("/remote/") ||
+    path === "/app" ||
+    path.startsWith("/app/")
+  );
 }
 
 /**
@@ -21,7 +28,11 @@ export function registerAuthGuard(app: FastifyInstance): void {
 
     if (sessions.isValid(req.cookies[SESSION_COOKIE])) return;
 
-    const isPageLoad = req.method === "GET" && !path.startsWith("/admin/api") && path !== "/remote/ws";
+    // Asset requests from an already-loaded page must 401 rather than
+    // redirect -- a 302 to an HTML login page in place of a stylesheet just
+    // renders a broken app instead of sending the user somewhere useful.
+    const isAsset = path.startsWith("/app/assets/");
+    const isPageLoad = req.method === "GET" && !isAsset && !path.startsWith("/admin/api") && path !== "/remote/ws";
     if (isPageLoad) {
       reply.redirect(`/login?next=${encodeURIComponent(path)}`);
       return;

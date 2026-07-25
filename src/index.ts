@@ -8,6 +8,7 @@ import { registerRemoteRoutes } from "./server/remote-routes.js";
 import { registerProjectRoutes } from "./server/project-routes.js";
 import { registerPmRoutes } from "./server/pm-routes.js";
 import { registerPmEventRoutes } from "./server/pm-events.js";
+import { registerUiRoutes } from "./server/ui-routes.js";
 import { Orchestrator } from "./pm/orchestrator.js";
 import { failOrphanedRuns } from "./pm/runs.js";
 import { registerAuthRoutes } from "./server/auth-routes.js";
@@ -77,6 +78,7 @@ async function main() {
   registerProjectRoutes(app, runtime, remoteSessionManager);
   registerPmRoutes(app, runtime, orchestrator);
   registerPmEventRoutes(app, orchestrator);
+  registerUiRoutes(app);
 
   await app.listen({ port: PORT, host: "0.0.0.0" });
 }

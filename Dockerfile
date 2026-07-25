@@ -10,6 +10,16 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
+# The project UI (the same React app the desktop client runs) is built
+# separately -- it has its own dependency tree and bundler, and nothing in
+# the server needs them at runtime.
+FROM base AS ui
+WORKDIR /ui
+COPY ui/package.json ./
+RUN npm install
+COPY ui/ ./
+RUN npm run build
+
 FROM base AS runtime
 ENV NODE_ENV=production
 
@@ -48,6 +58,7 @@ RUN npm install --omit=dev
 # own OAuth client that talks to Anthropic on behalf of /v1/messages traffic.
 RUN npm install -g @anthropic-ai/claude-code
 COPY --from=build /app/dist ./dist
+COPY --from=ui /ui/dist ./ui-dist
 COPY public ./public
 EXPOSE 8787
 CMD ["node", "dist/index.js"]

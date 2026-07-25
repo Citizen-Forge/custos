@@ -6,3 +6,5 @@ workspace/*
 !workspace/.gitkeep
 *.log
 .DS_Store
+ui/node_modules/
+ui/dist/

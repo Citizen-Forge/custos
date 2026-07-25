@@ -36,7 +36,9 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
   });
   if (res.ok) {
     const params = new URLSearchParams(location.search);
-    location.href = params.get("next") || "/admin";
+    // The project UI is the thing people log in to use; /admin is the
+    // configuration surface behind it, reachable from the app's Settings.
+    location.href = params.get("next") || "/app";
   } else {
     errorEl.textContent = "Wrong password";
   }
