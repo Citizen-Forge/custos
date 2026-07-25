@@ -10,7 +10,59 @@ const CURSOR_PATH = process.env.GATEWAY_CURATOR_CURSOR_PATH ?? "data/curator-cur
 
 const EXTRACTION_SYSTEM_PROMPT = `You curate long-term memory for a coding assistant from raw conversation exchanges. Extract only durable, semantically useful facts worth recalling in future unrelated sessions: user preferences, project decisions, recurring context, corrections the user gave. Ignore one-off task details, code diffs, and anything only useful within the current conversation.
 
-Respond with ONLY a JSON array, each item: {"topic": "short label", "text": "the fact, self-contained and understandable out of context"}. Return [] if nothing durable is worth keeping.`;
+Respond with ONLY a JSON array, each item: {"topic": "short label", "text": "the fact, self-contained and understandable out of context"}. Return [] if nothing durable is worth keeping.
+
+Output rules, which matter more than being helpful:
+- Your entire reply must be the JSON array and nothing else. No greeting, no explanation, no commentary on the conversation, no markdown fence.
+- Do not reply to the conversation you are shown. You are not a participant in it — you are reading a transcript and cataloguing facts from it.
+- If there is nothing worth keeping, the correct and complete reply is exactly: []`;
+
+/**
+ * Pulls the first balanced JSON array out of a model's reply.
+ *
+ * Small local models routinely ignore "respond with only JSON" and wrap the
+ * array in conversational prose, or answer the transcript instead of
+ * cataloguing it. Insisting on a clean parse means every one of those
+ * batches is silently dropped and its exchanges skipped forever, so scan
+ * for the array instead. String literals are tracked so a bracket inside a
+ * quoted fact can't unbalance the count.
+ */
+export function extractJsonArray(text: string): unknown[] | null {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "[") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (char === "]") {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        try {
+          const parsed = JSON.parse(text.slice(start, i + 1));
+          if (Array.isArray(parsed)) return parsed;
+        } catch {
+          // Keep scanning -- a later array may be the real one.
+        }
+        start = -1;
+      } else if (depth < 0) {
+        depth = 0;
+        start = -1;
+      }
+    }
+  }
+  return null;
+}
 
 interface Cursor {
   [filename: string]: number; // lines already processed
@@ -73,18 +125,22 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
     const responseText = await new Response(res.body).text();
 
     let facts: { topic: string; text: string }[] = [];
+    let contentText = responseText;
     try {
       const json = JSON.parse(responseText);
-      const contentText: string = json.content?.[0]?.text ?? responseText;
-      const parsed = JSON.parse(contentText.trim());
-      if (Array.isArray(parsed)) facts = parsed;
-      else console.warn(`curator: extraction returned ${typeof parsed}, not an array -- no facts stored for this batch`);
-    } catch (err) {
+      contentText = json.content?.[0]?.text ?? responseText;
+    } catch {
+      // Not an Anthropic-shaped envelope; treat the whole body as the text.
+    }
+    const parsed = extractJsonArray(contentText);
+    if (parsed) {
+      facts = parsed.filter((f): f is { topic: string; text: string } => !!f && typeof (f as { text?: unknown }).text === "string");
+    } else {
       // Silence here is how the memory store stayed empty while the cursor
       // marched on: a model that can't produce clean JSON looks exactly like
       // a batch with nothing worth remembering, and the exchanges are then
       // never revisited. Say so, loudly enough to notice.
-      console.warn(`curator: could not parse extraction output (${(err as Error).message}); first 200 chars:`, responseText.slice(0, 200));
+      console.warn("curator: no JSON array in extraction output; first 200 chars:", contentText.slice(0, 200).replace(/\s+/g, " "));
     }
 
     for (const fact of facts) {
