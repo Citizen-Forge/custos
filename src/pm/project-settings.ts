@@ -7,7 +7,20 @@ const settings = new JsonCollection<ProjectSettings>(pmPath("project-settings.js
  * back the defaults, so callers never have to special-case "not configured
  * yet" and the row only gets written once something is actually changed. */
 export async function getSettings(projectId: string): Promise<ProjectSettings> {
-  return (await settings.get(projectId)) ?? defaultProjectSettings(projectId);
+  const stored = await settings.get(projectId);
+  if (!stored) return defaultProjectSettings(projectId);
+  // Rows written before a field existed read back undefined, which silently
+  // becomes the most conservative possible value at the use site -- a
+  // project saved before maxConcurrentEngineers existed was being clamped to
+  // one engineer rather than picking up the new default. Merge over the
+  // defaults so a new setting reaches existing projects.
+  const defaults = defaultProjectSettings(projectId);
+  return {
+    ...defaults,
+    ...stored,
+    budget: { ...defaults.budget, ...stored.budget },
+    autonomy: { ...defaults.autonomy, ...stored.autonomy },
+  };
 }
 
 export async function updateSettings(projectId: string, patch: Partial<Omit<ProjectSettings, "id">>): Promise<ProjectSettings> {

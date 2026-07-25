@@ -133,8 +133,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       return;
     }
 
+    // Only run the manager when it has somewhere to put the work. Without
+    // this it re-ran on every tick while the engineers were busy, paying for
+    // a full sizing pass each time to discover it had no free slots -- a few
+    // cents every twenty seconds, indefinitely.
     if (settings.autonomy["engineering-manager"] && readyWork.length) {
-      void this.assignReady(project.id);
+      const limit = await this.engineerLimit(project, settings);
+      const inFlight = (await board.listWorkItems(project.id)).filter((item) => item.status === "in_progress").length;
+      if (inFlight < limit) void this.assignReady(project.id);
     }
 
     if (settings.autonomy.engineer) {
