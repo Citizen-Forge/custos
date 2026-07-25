@@ -55,6 +55,16 @@ export interface WorkItem {
   labels: string[];
   prUrl: string | null;
   branch: string | null;
+  /** The isolated git worktree this ticket is being worked in, so several
+   * engineers can run at once without sharing a working copy. Null before
+   * the first engineer run, and again once the ticket is released. */
+  worktreePath: string | null;
+  /** Consecutive failed agent runs against this ticket. Drives the retry
+   * backoff -- a ticket pinned to a rate-limited provider would otherwise
+   * be re-dispatched on every tick and never get anywhere. */
+  attempts: number;
+  /** Earliest time the orchestrator may dispatch this ticket again. */
+  nextAttemptAt: number | null;
   /** How many times QA has bounced this back to in_progress. The EM reads
    * it as the primary quality signal when tuning an engineer agent. */
   qaRounds: number;
@@ -186,6 +196,13 @@ export interface ProjectSettings {
    * except the product owner -- autonomous engineering that spends money
    * and pushes branches is opt-in per project, not on by default. */
   autonomy: Record<Exclude<AgentRole, "steering">, boolean>;
+  /** Ceiling on engineers working this project at once. Each one gets its
+   * own git worktree, so this is a spend-and-load limit rather than a
+   * correctness one -- the engineering manager decides the actual fan-out
+   * beneath it, and is told what the ceiling is. Projects that aren't git
+   * repositories are clamped to 1 regardless, since there's nothing to
+   * isolate the working copies with. */
+  maxConcurrentEngineers: number;
   /** Model alias the Steering Co tab runs on. Deliberately a high-end model
    * -- the whole point of that tab is a hard-to-fool sparring partner. */
   steeringModel: string;
@@ -204,6 +221,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     deployConfig: {},
     budget: { monthlyUsd: null, infraMonthlyUsd: null },
     autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false },
+    maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,
     updatedAt: Date.now(),
   };

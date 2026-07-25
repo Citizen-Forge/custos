@@ -7,6 +7,7 @@ import * as agentStore from "../pm/agents.js";
 import * as runs from "../pm/runs.js";
 import { getSettings, updateSettings } from "../pm/project-settings.js";
 import { getProject } from "../remote/projects.js";
+import { releaseWorkspace } from "../pm/worktrees.js";
 import { BOARD_STATUSES, type BoardStatus, type ProjectSettings, type WorkItemType } from "../pm/types.js";
 
 const isStatus = (value: unknown): value is BoardStatus => BOARD_STATUSES.includes(value as BoardStatus);
@@ -148,7 +149,15 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
 
   app.delete("/admin/api/work-items/:itemId", async (req, reply) => {
     const { itemId } = req.params as { itemId: string };
-    if (!(await board.deleteWorkItem(itemId))) return notFound(reply, "work item");
+    const item = await board.getWorkItem(itemId);
+    if (!item) return notFound(reply, "work item");
+    // Release the checkout before forgetting the ticket, or its worktree is
+    // orphaned on disk with nothing left pointing at it.
+    if (item.worktreePath) {
+      const project = await getProject(item.projectId);
+      if (project) await releaseWorkspace(project.workspaceDir, project.id, itemId).catch(() => undefined);
+    }
+    await board.deleteWorkItem(itemId);
     return { ok: true };
   });
 

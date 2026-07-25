@@ -9,6 +9,7 @@ import { ensureProjectAgents, deleteProjectAgents } from "../pm/agents.js";
 import { deleteProjectWorkItems } from "../pm/board.js";
 import { deleteProjectIdeas } from "../pm/ideas.js";
 import { deleteProjectRuns } from "../pm/runs.js";
+import { releaseProjectWorkspaces } from "../pm/worktrees.js";
 import type { Runtime } from "../runtime.js";
 
 function publicUrl(): string {
@@ -85,7 +86,11 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
     }
     // The workspace directory survives (see projects.deleteProject), but the
     // PM records are Custos's own bookkeeping about a project that no longer
-    // exists, so they go with it rather than accumulating as orphans.
+    // exists, so they go with it rather than accumulating as orphans. The
+    // per-ticket worktrees go too -- they're Custos-created scratch
+    // checkouts, and the branches they hold stay in the repository.
+    const project = await projects.getProject(id);
+    if (project) await releaseProjectWorkspaces(project.workspaceDir, id).catch(() => undefined);
     await Promise.all([deleteProjectWorkItems(id), deleteProjectIdeas(id), deleteProjectAgents(id), deleteProjectRuns(id), deleteSettings(id)]);
     const ok = await projects.deleteProject(id);
     if (!ok) {

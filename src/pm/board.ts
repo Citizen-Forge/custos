@@ -39,13 +39,24 @@ export interface CreateWorkItemInput {
   actor?: string;
 }
 
+/** Fills in fields added after a ticket was written, so reads never hand
+ * back an item whose `attempts` is undefined and turns into NaN the first
+ * time it's incremented. */
+function hydrate(item: WorkItem): WorkItem {
+  item.worktreePath ??= null;
+  item.attempts ??= 0;
+  item.nextAttemptAt ??= null;
+  return item;
+}
+
 export async function listWorkItems(projectId?: string): Promise<WorkItem[]> {
   const rows = projectId ? await items.find((row) => row.projectId === projectId) : await items.list();
-  return rows.sort((a, b) => a.priority - b.priority || a.createdAt - b.createdAt);
+  return rows.map(hydrate).sort((a, b) => a.priority - b.priority || a.createdAt - b.createdAt);
 }
 
 export async function getWorkItem(id: string): Promise<WorkItem | null> {
-  return items.get(id);
+  const item = await items.get(id);
+  return item ? hydrate(item) : null;
 }
 
 export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkItem> {
@@ -68,6 +79,9 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
     labels: input.labels ?? [],
     prUrl: null,
     branch: null,
+    worktreePath: null,
+    attempts: 0,
+    nextAttemptAt: null,
     qaRounds: 0,
     sourceIdeaId: input.sourceIdeaId ?? null,
     createdAt: now,
@@ -83,9 +97,46 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
 export type WorkItemPatch = Partial<
   Pick<
     WorkItem,
-    "title" | "description" | "acceptanceCriteria" | "priority" | "complexity" | "labels" | "parentId" | "prUrl" | "branch" | "assigneeAgentId" | "subtasks"
+    | "title"
+    | "description"
+    | "acceptanceCriteria"
+    | "priority"
+    | "complexity"
+    | "labels"
+    | "parentId"
+    | "prUrl"
+    | "branch"
+    | "worktreePath"
+    | "assigneeAgentId"
+    | "subtasks"
   >
 >;
+
+/** Exponential-ish backoff after a failed agent run, capped so a ticket
+ * that's failing for a transient reason (a rate-limited provider) is still
+ * retried within the hour rather than effectively abandoned. */
+const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 20 * 60_000, 60 * 60_000];
+
+export async function recordAttemptFailure(id: string): Promise<WorkItem | null> {
+  return items.update(id, (item) => {
+    item.attempts += 1;
+    item.nextAttemptAt = Date.now() + RETRY_DELAYS_MS[Math.min(item.attempts - 1, RETRY_DELAYS_MS.length - 1)];
+    item.updatedAt = Date.now();
+  });
+}
+
+export async function clearAttempts(id: string): Promise<WorkItem | null> {
+  return items.update(id, (item) => {
+    item.attempts = 0;
+    item.nextAttemptAt = null;
+    item.updatedAt = Date.now();
+  });
+}
+
+/** True when a ticket is inside its post-failure cool-off. */
+export function isBackingOff(item: WorkItem): boolean {
+  return item.nextAttemptAt !== null && Date.now() < item.nextAttemptAt;
+}
 
 export async function updateWorkItem(id: string, patch: WorkItemPatch): Promise<WorkItem | null> {
   return items.update(id, (item) => {
@@ -103,6 +154,10 @@ export async function transitionWorkItem(id: string, to: BoardStatus, actor: str
     if (item.status === "qa" && to === "in_progress") item.qaRounds += 1;
     item.history.push({ at: Date.now(), actor, from: item.status, to, note });
     item.status = to;
+    // Any column change is a fresh start for retry purposes -- a ticket
+    // that reached a new state isn't the stuck one the backoff was for.
+    item.attempts = 0;
+    item.nextAttemptAt = null;
     item.updatedAt = Date.now();
   });
 }

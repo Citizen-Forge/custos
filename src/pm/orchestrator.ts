@@ -7,6 +7,7 @@ import * as agentStore from "./agents.js";
 import * as runs from "./runs.js";
 import { getSettings } from "./project-settings.js";
 import { runAgent } from "./agent-runner.js";
+import { ensureWorkspace, isGitRepo, releaseWorkspace } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderProjectContext, renderProviderMenu, renderWorkItem } from "./context.js";
 import { ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, QA_SHAPE, outputContract } from "./prompts.js";
 import type { AssignContract, DevopsContract, EngineerContract, GroomContract, PlanContract, QaContract } from "./contracts.js";
@@ -14,10 +15,10 @@ import type { AgentDef, AgentRole, ProjectSettings, WorkItem } from "./types.js"
 
 const TICK_MS = Number(process.env.CUSTOS_ORCHESTRATOR_TICK_MS ?? 20_000);
 
-/** How many engineer agents may be mid-ticket on one project at once.
- * Concurrent agents editing the same working copy is the failure mode this
- * guards against as much as cost -- they share one workspace directory. */
-const MAX_CONCURRENT_ENGINEERS = 1;
+/** Hard ceiling on concurrent engineers regardless of project settings --
+ * every one is a live `claude` process with its own checkout, and a
+ * mistyped setting shouldn't be able to fork-bomb the container. */
+const ABSOLUTE_MAX_ENGINEERS = 12;
 
 /** Applied to work that reaches "complete" and hasn't been deployed yet.
  * A label rather than a status so the board's five columns stay the ones
@@ -106,15 +107,19 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     if (settings.autonomy.engineer) {
-      const inProgress = (await board.listWorkItems(project.id)).filter((item) => item.status === "in_progress" && item.assigneeAgentId);
-      const live = inProgress.filter((item) => this.busy.has(`engineer:${item.id}`)).length;
-      for (const item of inProgress.slice(0, Math.max(0, MAX_CONCURRENT_ENGINEERS - live))) {
+      const limit = await this.engineerLimit(project, settings);
+      const inProgress = (await board.listWorkItems(project.id)).filter(
+        (item) => item.status === "in_progress" && item.assigneeAgentId && !board.isBackingOff(item),
+      );
+      const live = this.countBusy("engineer:");
+      const dispatchable = inProgress.filter((item) => !this.busy.has(`engineer:${item.id}`));
+      for (const item of dispatchable.slice(0, Math.max(0, limit - live))) {
         void this.runEngineer(project.id, item.id);
       }
     }
 
     if (settings.autonomy.qa) {
-      for (const item of (await board.listWorkItems(project.id)).filter((i) => i.status === "qa")) {
+      for (const item of (await board.listWorkItems(project.id)).filter((i) => i.status === "qa" && !board.isBackingOff(i))) {
         void this.runQa(project.id, item.id);
       }
     }
@@ -125,6 +130,24 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       );
       for (const item of deployable) void this.runDevops(project.id, item.id);
     }
+  }
+
+  private countBusy(prefix: string): number {
+    let count = 0;
+    for (const key of this.busy) if (key.startsWith(prefix)) count += 1;
+    return count;
+  }
+
+  /**
+   * How many engineers may run at once. Normally the project's own setting,
+   * but a project that isn't a git repository has nothing to cut isolated
+   * worktrees from, so its engineers would share one working copy and
+   * overwrite each other -- those are clamped to one at a time.
+   */
+  private async engineerLimit(project: Project, settings: ProjectSettings): Promise<number> {
+    const configured = Math.max(1, Math.min(settings.maxConcurrentEngineers ?? 1, ABSOLUTE_MAX_ENGINEERS));
+    if (configured === 1) return 1;
+    return (await isGitRepo(project.workspaceDir)) ? configured : 1;
   }
 
   private async overBudget(projectId: string, settings: ProjectSettings): Promise<boolean> {
@@ -308,19 +331,22 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const ctx = await this.resolve(projectId, "engineering-manager");
       if (!ctx) return;
 
-      const ready = (await board.listWorkItems(projectId)).filter((item) => item.type !== "epic" && item.status === "ready");
+      const all = await board.listWorkItems(projectId);
+      const ready = all.filter((item) => item.type !== "epic" && item.status === "ready");
       if (!ready.length) return;
       const roster = await agentStore.listEngineers(projectId);
       const menu = agentStore.listProviderOptions(this.runtime.config);
+      const limit = await this.engineerLimit(ctx.project, ctx.settings);
+      const inFlight = all.filter((item) => item.status === "in_progress").length;
 
       const prompt = [
         await this.projectHeader(ctx.project, ctx.settings),
         "",
         "## Your task",
         "",
-        "Size and assign every ticket in the ready column below. For each one: set its complexity, then either assign an existing engineer or create a new one and assign that.",
+        "Size every ticket in the ready column below, then decide which of them to start now. For each one you start: set its complexity and either assign an existing engineer or create a new one and assign that.",
         "",
-        `At most ${MAX_CONCURRENT_ENGINEERS} engineer(s) work at a time on this project — they share one working copy — so assign in the order you want them worked, highest value first.`,
+        `**You decide the fan-out.** Every ticket you assign starts immediately, in its own isolated checkout. ${inFlight} engineer(s) are already working; the ceiling for this project is ${limit} at once.${limit === 1 ? " This project is limited to one engineer at a time (it isn't a git repository, so there are no isolated checkouts to give them)." : ""} Tickets you leave in \`ready\` simply wait until you come back — leaving one there is a real choice, not a failure to decide.`,
         "",
         "## Ready tickets",
         "",
@@ -379,10 +405,17 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       const readyIds = new Set(ready.map((item) => item.id));
+      // The ceiling is enforced here as well as described in the prompt: an
+      // over-eager manager assigning twelve tickets on a project capped at
+      // three would otherwise start twelve processes, and the cap exists
+      // precisely because the human doesn't want that.
+      let slots = Math.max(0, limit - inFlight);
       for (const assignment of result.parsed.assignments ?? []) {
+        if (slots <= 0) break;
         if (!assignment.workItemId || !readyIds.has(assignment.workItemId)) continue;
         const agentId = assignment.agentId ?? (assignment.tempId ? tempIds.get(assignment.tempId) : undefined);
         if (!agentId || !(await agentStore.getAgent(agentId))) continue;
+        slots -= 1;
         await board.updateWorkItem(assignment.workItemId, {
           assigneeAgentId: agentId,
           ...(assignment.complexity ? { complexity: assignment.complexity } : {}),
@@ -404,6 +437,15 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (!project || !agent) return;
       const settings = await getSettings(projectId);
 
+      // Its own checkout, on its own branch: this is what lets several
+      // engineers work the same project at once without stepping on each
+      // other's edits. Reused across QA bounces so the work survives.
+      const workspace = await ensureWorkspace(project.workspaceDir, projectId, item, settings.defaultBranch);
+      await board.updateWorkItem(workItemId, {
+        worktreePath: workspace.isolated ? workspace.cwd : null,
+        ...(workspace.branch ? { branch: workspace.branch } : {}),
+      });
+
       const parent = item.parentId ? await board.getWorkItem(item.parentId) : null;
       const prompt = [
         await this.projectHeader(project, settings),
@@ -413,13 +455,17 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         renderWorkItem(item, { includeComments: true, includeHistory: true }),
         parent ? `\n## The epic this belongs to\n\n${renderWorkItem(parent)}` : "",
         "",
-        `Work this ticket to completion on a branch off \`${settings.defaultBranch}\`, then report. You cannot mark it complete yourself — QA will review what you produce.`,
+        workspace.isolated
+          ? `You are in your own git worktree at \`${workspace.cwd}\`, with branch \`${workspace.branch}\` already checked out for you off \`${settings.defaultBranch}\`. Commit to that branch — do not create another one, and do not switch branches. Other engineers are working other tickets in their own checkouts of this same repository at the same time, so stay within the files this ticket is about.`
+          : `This project is not a git repository, so you are working directly in the shared project directory and are the only engineer running. Keep your changes tightly scoped.`,
+        "",
+        "Work this ticket to completion, then report. You cannot mark it complete yourself — QA will review what you produce.",
       ].join("\n");
 
       const result = await runAgent<EngineerContract>(this.runtime, {
         agent,
         projectId,
-        cwd: project.workspaceDir,
+        cwd: workspace.cwd,
         prompt,
         tag: "custos-engineer",
         outputContract: outputContract("custos-engineer", ENGINEER_SHAPE),
@@ -428,8 +474,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       if (!result.ok || !result.parsed) {
         await board.addComment(workItemId, agent.id, agent.name, `Run failed: ${result.error ?? "unknown error"}`);
+        // Back off rather than re-dispatching on the very next tick -- the
+        // usual cause is the agent's pinned provider being rate limited,
+        // and hammering it just burns the retry budget too.
+        const backedOff = await board.recordAttemptFailure(workItemId);
+        this.emit("activity", projectId, `${agent.name} failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}); will retry.`);
         return;
       }
+      await board.clearAttempts(workItemId);
 
       const contract = result.parsed;
       if (contract.subtasks?.length) {
@@ -445,7 +497,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (contract.status === "blocked") {
         // Blocked work goes back to the backlog rather than sitting in
         // in_progress: it needs a product decision, and the backlog is
-        // where the product owner looks.
+        // where the product owner looks. Its checkout is released -- the
+        // branch keeps whatever was done, and holding a worktree open for a
+        // ticket nobody is working just blocks a slot.
+        await this.release(project, workItemId);
         await board.transitionWorkItem(workItemId, "backlog", agent.id, contract.blockedReason ?? "blocked");
         this.emit("activity", projectId, `${agent.name} is blocked on "${item.title}": ${contract.blockedReason ?? "no reason given"}`);
         return;
@@ -466,6 +521,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const ctx = await this.resolve(projectId, "qa");
       if (!ctx) return;
 
+      // Review in the engineer's own checkout, with its branch already
+      // checked out -- QA is asked to actually run the code, and doing that
+      // in the shared project directory would mean checking the branch out
+      // there and colliding with whatever else is in flight.
+      const reviewCwd = item.worktreePath ?? ctx.project.workspaceDir;
       const prompt = [
         await this.projectHeader(ctx.project, ctx.settings),
         "",
@@ -473,7 +533,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         "",
         renderWorkItem(item, { includeComments: true, includeHistory: true }),
         "",
-        item.branch ? `The work is on branch \`${item.branch}\`.` : "The engineer did not report a branch — find the work yourself before judging it.",
+        item.worktreePath
+          ? `You are in the engineer's own worktree at \`${reviewCwd}\`, with branch \`${item.branch}\` checked out. Do not switch branches — other engineers are working in their own checkouts of this repository right now.`
+          : item.branch
+            ? `The work is on branch \`${item.branch}\`.`
+            : "The engineer did not report a branch — find the work yourself before judging it.",
         item.prUrl ? `Pull request: ${item.prUrl}` : "",
         "",
         "Verify each acceptance criterion by actually running the code, then decide: pass it, or bounce it back with specific, actionable reasons.",
@@ -482,7 +546,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const result = await runAgent<QaContract>(this.runtime, {
         agent: ctx.agent,
         projectId,
-        cwd: ctx.project.workspaceDir,
+        cwd: reviewCwd,
         prompt,
         tag: "custos-qa",
         outputContract: outputContract("custos-qa", QA_SHAPE),
@@ -501,6 +565,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       await board.addComment(workItemId, ctx.agent.id, ctx.agent.name, `${contract.summary ?? ""}${checks}`);
 
       if (contract.verdict === "pass") {
+        // Passing frees the checkout for the next ticket. The branch and
+        // its pull request survive -- that's where the work actually lives.
+        await this.release(ctx.project, workItemId);
         await board.transitionWorkItem(workItemId, "complete", ctx.agent.id, "QA passed");
         this.emit("activity", projectId, `QA passed "${item.title}".`);
         return;
@@ -513,6 +580,18 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (item.assigneeAgentId) await agentStore.recordRunResult(item.assigneeAgentId, { qaRejected: true });
       this.emit("activity", projectId, `QA bounced "${item.title}" back to the engineer.`);
     });
+  }
+
+  /** Drops a ticket's checkout and forgets the path. Failures are swallowed:
+   * a worktree that can't be removed is wasted disk, not a reason to fail
+   * the transition that prompted it. */
+  private async release(project: Project, workItemId: string): Promise<void> {
+    try {
+      await releaseWorkspace(project.workspaceDir, project.id, workItemId);
+    } catch {
+      // Best effort.
+    }
+    await board.updateWorkItem(workItemId, { worktreePath: null });
   }
 
   // -------------------------------------------------------------------- devops

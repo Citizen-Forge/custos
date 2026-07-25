@@ -12,6 +12,30 @@ RUN npm run build
 
 FROM base AS runtime
 ENV NODE_ENV=production
+
+# The engineering pipeline runs real development work in here, so the tools
+# that work needs have to exist: git (every ticket is worked in its own
+# worktree on its own branch), the GitHub CLI (engineers open pull requests,
+# QA comments on them), and ca-certificates/curl for anything they fetch.
+# node:*-slim ships none of these.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl git gnupg openssh-client \
+  && mkdir -p -m 755 /etc/apt/keyrings \
+  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends gh \
+  && rm -rf /var/lib/apt/lists/*
+
+# Agents commit as themselves rather than inheriting whatever identity the
+# host happens to have; without this git refuses to commit at all in a
+# fresh container.
+RUN git config --system user.name "Custos Agent" \
+  && git config --system user.email "agents@custos.local" \
+  && git config --system --add safe.directory '*' \
+  && git config --system init.defaultBranch main
+
 COPY package.json ./
 RUN npm install --omit=dev
 # The remote-control feature spawns this CLI, one-shot per chat turn --
