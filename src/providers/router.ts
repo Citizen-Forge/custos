@@ -69,14 +69,28 @@ export class ProviderRouter {
   ): Promise<RoutedResponse> {
     const sorted = [...entries].sort((a, b) => a.priority - b.priority);
     let lastError: Error | undefined;
+    // Why each candidate was passed over. Without this a skipped provider
+    // produced "no provider is configured", which reads as a configuration
+    // mistake when the real reason is usually a live cooldown or a spent
+    // budget -- and sends you to check the wrong thing.
+    const skipped: string[] = [];
 
     for (const entry of sorted) {
       const provider = this.providers[entry.provider];
-      if (!provider) continue;
-      if (!this.cooldowns.isAvailable(provider.name)) continue;
+      if (!provider) {
+        skipped.push(`"${entry.provider}" is not a configured provider`);
+        continue;
+      }
+      if (!this.cooldowns.isAvailable(provider.name)) {
+        skipped.push(`"${entry.provider}" is cooling down after a rate limit or outage`);
+        continue;
+      }
 
       const budget = this.config.openaiCompatibleInstances[entry.provider]?.budget;
-      if (!(await this.spendTracker.isWithinBudget(entry.provider, budget))) continue;
+      if (!(await this.spendTracker.isWithinBudget(entry.provider, budget))) {
+        skipped.push(`"${entry.provider}" has spent its configured budget for this period`);
+        continue;
+      }
 
       try {
         const response = await provider.complete(request, options);
@@ -103,6 +117,7 @@ export class ProviderRouter {
     // real cause is nearly always the last provider's own reason for
     // refusing -- an exhausted session window, a rate limit, a rejected key.
     if (lastError) throw lastError;
-    throw new ProviderUnavailableError(`${label}: no provider is configured to serve this request`);
+    if (skipped.length) throw new ProviderUnavailableError(`${label}: ${skipped.join("; ")}`);
+    throw new ProviderUnavailableError(`${label}: no providers were offered for this request`);
   }
 }

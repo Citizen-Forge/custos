@@ -221,7 +221,13 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   try {
     await runTurn(runtime, {
       cwd,
-      prompt,
+      // The contract lives in the system prompt, but a provider whose
+      // context window is smaller than the prompt silently truncates -- and
+      // what gets dropped is the front, which is exactly where the system
+      // prompt sits. The agent then answers in prose, the contract block
+      // never appears, and a whole run is wasted. Restating the requirement
+      // at the very end costs a line and survives that truncation.
+      prompt: `${prompt}\n\n---\n\nRemember: your final message must end with exactly one fenced \`${tag}\` block containing valid JSON, and nothing after it.`,
       appendSystemPrompt: buildSystemPrompt(agent, options.extraSystemPrompt, options.outputContract),
       model: formatModelAlias(agent.providerKey, agent.model),
       env: await resolveAgentEnv(projectId),
