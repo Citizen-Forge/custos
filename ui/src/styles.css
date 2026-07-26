@@ -1482,3 +1482,11 @@ input[type='password'] {
   height: 100%;
   background: var(--accent);
 }
+
+.modal-card.wide {
+  width: 480px;
+  max-width: 92vw;
+}
+.modal-card .field {
+  margin-bottom: 0;
+}

@@ -89,7 +89,7 @@ async function main() {
   registerRoutes(app, { runtime, memoryStore, remoteSessionManager });
   registerAdminRoutes(app, runtime);
   registerRemoteRoutes(app, remoteSessionManager);
-  registerProjectRoutes(app, runtime, remoteSessionManager);
+  registerProjectRoutes(app, runtime, remoteSessionManager, (projectId) => void orchestrator.surveyProject(projectId));
   registerPmRoutes(app, runtime, orchestrator);
   registerPmEventRoutes(app, orchestrator);
   registerUiRoutes(app);

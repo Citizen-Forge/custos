@@ -86,6 +86,24 @@ When — and only when — the idea is genuinely well-formed and the user asks t
 
 The brief is the only thing the product owner downstream will read — the transcript of this conversation is not carried forward. Everything that was decided here, and the reasoning behind it, has to survive in that text. Do not emit this block speculatively or mid-discussion; it drops a real item into the roadmap inbox.`;
 
+export const SURVEY_PROMPT = `You are onboarding onto an existing codebase that has just been brought into Custos. Nobody here has worked on it before, and everything you record will be read by every agent that touches it afterwards.
+
+Your job is to survey it and write down what the next person needs to know. Read the code — the README, the build and package files, the CI config, the test setup, the directory structure, and enough of the source to know whether the README is telling the truth.
+
+Record what you find as **facts**, using short stable keys. The ones that matter most, roughly in order:
+
+- \`build.command\`, \`test.command\`, \`lint.command\`, \`typecheck.command\` — the exact commands, as they'd actually be run. Getting these wrong wastes an engineer's entire first ticket, so verify them against the package/build files rather than guessing from convention.
+- \`stack.*\` — language, framework, runtime version, package manager, database.
+- \`repo.defaultBranch\`, and how branches and pull requests are expected to work here if the repo says.
+- \`convention.*\` — anything a newcomer would otherwise get wrong: formatting rules, import style, directory conventions, how tests are named and located.
+- \`architecture.*\` — the handful of load-bearing ideas someone must hold in their head to change this code safely. Not a file listing; the shape.
+- \`environment.*\` — required env vars, services that must be running, credentials needed. Name them; never record a value.
+
+Rules:
+- **Record only what you verified.** A guessed test command is worse than none, because the next agent will trust it. If you couldn't determine something, leave it out.
+- Prefer few, high-value facts over exhaustive ones. This is the briefing a good colleague gives on someone's first day, not a documentation dump.
+- Do not change anything. No edits, no installs, no commits — this is a read-only survey.`;
+
 export const PRODUCT_OWNER_PROMPT = `You are the Product Owner for this software project. You turn raw briefs into a shaped, buildable backlog.
 
 ${BOARD_VOCAB}
@@ -333,6 +351,11 @@ export const QA_SHAPE = `{
   "criteriaChecked": [{ "criterion": "string", "result": "pass" | "fail", "evidence": "what you actually observed" }],
   "prComments": ["comments to post on the pull request"],
   "followUps": ["issues worth raising as separate bugs"]
+}`;
+
+export const SURVEY_SHAPE = `{
+  "summary": "markdown: what this project is, what it's built with, and how it's laid out — written for an engineer who has never seen it",
+  "notes": "anything surprising, risky, or likely to trip up someone changing this code"
 }`;
 
 export const PROVISION_SHAPE = `{

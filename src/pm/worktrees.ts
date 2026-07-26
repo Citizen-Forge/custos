@@ -147,6 +147,39 @@ export async function releaseWorkspace(projectDir: string, projectId: string, it
   }
 }
 
+/**
+ * Clones an existing repository into a new project's workspace.
+ *
+ * Takes the environment rather than reading the vault itself so the caller
+ * decides which credentials apply -- a private repo needs the project's git
+ * token, and passing it explicitly keeps this function honest about the
+ * fact that it can reach the network with a credential.
+ */
+export async function cloneInto(dir: string, repoUrl: string, env: Record<string, string>): Promise<{ defaultBranch: string }> {
+  await mkdir(dir, { recursive: true });
+  // `git clone` into a non-empty directory fails outright, which is the
+  // right behaviour -- refuse rather than merge into whatever is there.
+  await run("git", ["clone", repoUrl, "."], { cwd: dir, env: { ...process.env, ...env }, maxBuffer: 16 * 1024 * 1024 });
+  return { defaultBranch: await detectDefaultBranch(dir) };
+}
+
+/** The branch the remote actually points HEAD at, rather than assuming
+ * "main" and having every later branch cut from the wrong place. */
+export async function detectDefaultBranch(dir: string): Promise<string> {
+  try {
+    const head = await git(dir, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+    const branch = head.split("/").pop();
+    if (branch) return branch;
+  } catch {
+    // No remote HEAD (a bare init, or a clone that didn't set it).
+  }
+  try {
+    return await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  } catch {
+    return "main";
+  }
+}
+
 /** Drops every checkout belonging to a project, for project deletion. */
 export async function releaseProjectWorkspaces(projectDir: string, projectId: string): Promise<void> {
   for (const dir of await listWorktrees(projectDir)) {

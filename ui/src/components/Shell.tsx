@@ -4,6 +4,7 @@ import { ApiContext, type Call } from '../api'
 import ProjectView from './ProjectView'
 import SettingsView from './SettingsView'
 import PromptModal, { PromptRequest } from './PromptModal'
+import NewProjectModal, { type NewProjectValues } from './NewProjectModal'
 
 const SETTINGS_VIEW = '__settings__'
 
@@ -17,6 +18,7 @@ export default function Shell({ onSessionExpired }: { onSessionExpired: () => vo
   const [projects, setProjects] = useState<CustosProject[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [creating, setCreating] = useState(false)
   // Persisted, because a collapsed sidebar is a working preference rather
   // than a per-session one -- reopening the app with it expanded again
   // would just mean collapsing it every time.
@@ -55,12 +57,20 @@ export default function Shell({ onSessionExpired }: { onSessionExpired: () => vo
     refresh()
   }, [refresh])
 
-  async function newProject(): Promise<void> {
-    const name = await askText('Project name')
-    if (!name?.trim()) return
-    const res = await call<{ project: CustosProject }>('POST', '/admin/api/projects', { name: name.trim() })
+  async function createProject(values: NewProjectValues): Promise<void> {
+    const res = await call<{ project: CustosProject; warnings?: string[]; surveying?: boolean }>(
+      'POST',
+      '/admin/api/projects',
+      values
+    )
+    setCreating(false)
+    if (!res) return
+    // A failed clone still leaves a usable project, so this is a warning to
+    // show rather than an error that discards what was created.
+    if (res.warnings?.length) alert(res.warnings.join('\n\n'))
+    else if (res.surveying) alert('Repository cloned. The product owner is surveying the codebase — watch the DevOps tab.')
     await refresh()
-    if (res) setSelected(res.project.id)
+    setSelected(res.project.id)
   }
 
   async function renameProject(p: CustosProject): Promise<void> {
@@ -109,7 +119,7 @@ export default function Shell({ onSessionExpired }: { onSessionExpired: () => vo
         <aside className="sidebar">
           <div className="sidebar-header">
             <h1>Custos</h1>
-            <button className="icon" onClick={newProject} title="New project">
+            <button className="icon" onClick={() => setCreating(true)} title="New project">
               +
             </button>
             <button className="icon" onClick={toggleCollapsed} title="Hide projects (Ctrl+B)">
@@ -161,6 +171,8 @@ export default function Shell({ onSessionExpired }: { onSessionExpired: () => vo
           {project && <ProjectView key={project.id} project={project} askText={askText} />}
           {!project && selected !== SETTINGS_VIEW && <div className="empty-state">Select a project.</div>}
         </div>
+
+        {creating && <NewProjectModal onSubmit={createProject} onCancel={() => setCreating(false)} />}
 
         {promptState && (
           <PromptModal

@@ -12,7 +12,7 @@ import { ensureWorkspace, isGitRepo, releaseWorkspace } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
 import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-registry.js";
 import { hasGitCredentials, listSecrets } from "./vault.js";
-import { ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, outputContract } from "./prompts.js";
+import { ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
 import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, ProjectSettings, WorkItem } from "./types.js";
 
@@ -739,6 +739,62 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // Best effort.
     }
     await board.updateWorkItem(workItemId, { worktreePath: null });
+  }
+
+  // ----------------------------------------------------------------- survey
+
+  /**
+   * Reads an existing codebase and writes down what the next agent needs to
+   * know — build and test commands, stack, conventions, architecture.
+   *
+   * This is what makes bringing an existing repo into Custos worth doing.
+   * Without it every agent starts blind and rediscovers how to run the tests
+   * on its own ticket, which is slow, expensive, and inconsistent between
+   * them. Run once when a project is created from an existing repository.
+   */
+  async surveyProject(projectId: string): Promise<void> {
+    await this.guard(`survey:${projectId}`, projectId, async (signal) => {
+      const ctx = await this.resolve(projectId, "product-owner");
+      if (!ctx) return;
+
+      const prompt = [
+        await this.projectHeader(ctx.project, ctx.settings),
+        "",
+        "## Your task",
+        "",
+        `Survey the existing codebase in \`${ctx.project.workspaceDir}\` and record what you learn as facts. This is a read-only pass — do not change, install or commit anything.`,
+      ].join("\n");
+
+      const result = await runAgent<{ summary?: string; notes?: string } & { facts?: FactWrite[] }>(this.runtime, {
+        signal,
+        agent: ctx.agent,
+        projectId,
+        cwd: ctx.project.workspaceDir,
+        prompt,
+        extraSystemPrompt: SURVEY_PROMPT,
+        tag: "custos-survey",
+        outputContract: outputContract("custos-survey", SURVEY_SHAPE),
+      });
+
+      await this.applyFacts(projectId, ctx.agent, result.parsed);
+
+      if (!result.ok) {
+        this.emit("activity", projectId, `Codebase survey failed: ${result.error ?? "unknown error"}`);
+        return;
+      }
+      if (result.parsed?.summary) {
+        await writeFact({
+          projectId,
+          key: "project.overview",
+          value: result.parsed.summary,
+          category: "docs",
+          writtenBy: ctx.agent.id,
+          writtenByLabel: agentStore.displayName(ctx.agent),
+        });
+      }
+      const recorded = (await listFacts(projectId)).length;
+      this.emit("activity", projectId, `Codebase survey complete — ${recorded} fact(s) now recorded for this project.`);
+    });
   }
 
   // --------------------------------------------------------------- provision

@@ -4,15 +4,15 @@ import * as chats from "../remote/chats.js";
 import { RemoteSessionManager } from "../remote/session-manager.js";
 import { readTranscript } from "../remote/transcript.js";
 import { listConversations, buildResumeSummary } from "../memory/conversations.js";
-import { getSettings, deleteSettings } from "../pm/project-settings.js";
+import { getSettings, deleteSettings, updateSettings } from "../pm/project-settings.js";
 import { STEERING_PROMPT } from "../pm/prompts.js";
 import { ensureProjectAgents, deleteProjectAgents } from "../pm/agents.js";
 import { deleteProjectWorkItems } from "../pm/board.js";
 import { deleteProjectIdeas } from "../pm/ideas.js";
 import { deleteProjectRuns } from "../pm/runs.js";
-import { releaseProjectWorkspaces } from "../pm/worktrees.js";
-import { deleteProjectSecrets } from "../pm/vault.js";
-import { deleteProjectFacts } from "../pm/facts.js";
+import { releaseProjectWorkspaces, cloneInto } from "../pm/worktrees.js";
+import { deleteProjectSecrets, resolveAgentEnv } from "../pm/vault.js";
+import { deleteProjectFacts, writeFact } from "../pm/facts.js";
 import type { Runtime } from "../runtime.js";
 
 function publicUrl(): string {
@@ -40,28 +40,79 @@ async function sessionOptionsFor(chat: chats.ChatRecord): Promise<{ appendSystem
   return { kind, appendSystemPrompt: STEERING_PROMPT, model: settings.steeringModel };
 }
 
-export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, manager: RemoteSessionManager): void {
+export function registerProjectRoutes(
+  app: FastifyInstance,
+  runtime: Runtime,
+  manager: RemoteSessionManager,
+  /** Kicks off the codebase survey for a newly-cloned project. Injected
+   * rather than importing the orchestrator, which already depends on this
+   * module's project store. */
+  onSurveyRequested?: (projectId: string) => void,
+): void {
   app.get("/admin/api/projects", async () => {
     return { projects: await projects.listProjects() };
   });
 
+  /**
+   * Creates a project, optionally around an existing repository.
+   *
+   * Bringing an existing codebase in is the common case and used to be the
+   * badly-served one: you got an empty folder and every agent started blind,
+   * rediscovering how to build and test the thing on its own first ticket.
+   * Cloning here, recording what we know, and kicking off a survey pass is
+   * what turns "a folder" into "a project the agents understand".
+   */
   app.post("/admin/api/projects", async (req, reply) => {
-    const { name, dirName } = (req.body ?? {}) as { name?: string; dirName?: string };
+    const { name, dirName, repoUrl, description } = (req.body ?? {}) as {
+      name?: string;
+      dirName?: string;
+      repoUrl?: string;
+      description?: string;
+    };
     if (!name || !name.trim()) {
       reply.code(400);
       return { error: "name is required" };
     }
+
+    let project;
     try {
-      const project = await projects.createProject(name.trim(), dirName);
-      // Seed the built-in role agents up front so the project's four tabs
-      // are all functional the moment it exists, rather than the first
-      // orchestrator tick being the thing that makes them appear.
-      await ensureProjectAgents(project.id);
-      return { project };
+      project = await projects.createProject(name.trim(), dirName);
     } catch (err) {
       reply.code(400);
       return { error: (err as Error).message };
     }
+
+    // Seed the built-in role agents up front so the project's four tabs are
+    // all functional the moment it exists.
+    await ensureProjectAgents(project.id);
+
+    const warnings: string[] = [];
+    if (repoUrl?.trim()) {
+      try {
+        // Clone with the project's own git credentials so a private repo
+        // works without the URL ever carrying a token.
+        const env = await resolveAgentEnv(project.id);
+        const { defaultBranch } = await cloneInto(project.workspaceDir, repoUrl.trim(), env);
+        await updateSettings(project.id, { repoUrl: repoUrl.trim(), defaultBranch });
+        await writeFact({ projectId: project.id, key: "repo.url", value: repoUrl.trim(), category: "repo" });
+        await writeFact({ projectId: project.id, key: "repo.defaultBranch", value: defaultBranch, category: "repo" });
+      } catch (err) {
+        // The project still exists and is usable -- a failed clone is worth
+        // reporting, not worth destroying everything else that succeeded.
+        warnings.push(`Could not clone ${repoUrl}: ${(err as Error).message.slice(0, 300)}`);
+      }
+    }
+
+    if (description?.trim()) {
+      await writeFact({ projectId: project.id, key: "project.description", value: description.trim(), category: "docs" });
+    }
+
+    // Survey an existing codebase so the first real ticket isn't also the
+    // first attempt at working out how to build and test it.
+    const surveying = !warnings.length && !!repoUrl?.trim();
+    if (surveying) void onSurveyRequested?.(project.id);
+
+    return { project, warnings, surveying };
   });
 
   app.patch("/admin/api/projects/:id", async (req, reply) => {
