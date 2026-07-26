@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { ActivityResponse, AgentDef, CustosProject, DeployTarget, ProjectSettings, ProviderOption } from '@shared/types'
+import type { ActivityResponse, AgentDef, CustosProject, DeployTarget, ModelRecord, ProjectSettings, ProviderOption } from '@shared/types'
 import { useCall, relativeTime } from '../api'
 import SecretsPanel from './SecretsPanel'
 import KnowledgePanel from './KnowledgePanel'
+import Avatar, { agentLabel } from './Avatar'
 
 const AUTONOMY_ROLES: Array<{ key: keyof ProjectSettings['autonomy']; label: string; blurb: string }> = [
   { key: 'product-owner', label: 'Product owner', blurb: 'Plans handed-off ideas into epics and grooms the backlog.' },
@@ -41,15 +42,17 @@ export default function DevOpsTab({
   const [activity, setActivity] = useState<ActivityResponse | null>(null)
   const [agents, setAgents] = useState<AgentDef[]>([])
   const [providerOptions, setProviderOptions] = useState<ProviderOption[]>([])
+  const [models, setModels] = useState<ModelRecord[]>([])
 
   const refresh = useCallback(async () => {
-    const [settingsRes, activityRes, agentsRes] = await Promise.all([
+    const [settingsRes, activityRes, agentsRes, modelsRes] = await Promise.all([
       call<{ settings: ProjectSettings; spentUsd: number; subscriptionUsd: number }>(
         'GET',
         `/admin/api/projects/${project.id}/settings`
       ),
       call<ActivityResponse>('GET', `/admin/api/projects/${project.id}/activity`),
-      call<{ agents: AgentDef[]; providerOptions: ProviderOption[] }>('GET', `/admin/api/projects/${project.id}/agents`)
+      call<{ agents: AgentDef[]; providerOptions: ProviderOption[] }>('GET', `/admin/api/projects/${project.id}/agents`),
+      call<{ models: ModelRecord[] }>('GET', '/admin/api/models')
     ])
     if (settingsRes) {
       setSettings(settingsRes.settings)
@@ -61,6 +64,7 @@ export default function DevOpsTab({
       setAgents(agentsRes.agents)
       setProviderOptions(agentsRes.providerOptions)
     }
+    if (modelsRes) setModels(modelsRes.models)
   }, [call, project.id])
 
   useEffect(() => {
@@ -214,12 +218,47 @@ export default function DevOpsTab({
       <SecretsPanel project={project} revision={revision} />
 
       <section className="panel">
+        <h2>Providers &amp; models</h2>
+        <p className="hint">
+          Capability is measured, not assumed: it starts from the model&rsquo;s tier and then moves with QA&rsquo;s verdicts on the work
+          that model produced. The engineering manager reads this when deciding who gets which ticket, and routes around anything
+          exhausted rather than stalling the board.
+        </p>
+        {models.map((record) => {
+          const exhausted = record.unavailableUntil !== null && record.unavailableUntil > Date.now()
+          return (
+            <div className={`model-row${exhausted ? ' exhausted' : ''}`} key={record.id}>
+              <span className="model-name">
+                {record.providerKey} / {record.model}
+              </span>
+              <span className="badge">{record.billing}</span>
+              <div className="capability-bar" title={`capability ${record.capability.toFixed(2)} of 5`}>
+                <div className="capability-fill" style={{ width: `${(record.capability / 5) * 100}%` }} />
+              </div>
+              <span className="muted">{record.capability.toFixed(1)}</span>
+              <span className="muted">
+                {record.completed}✓ / {record.qaFailures}✗
+              </span>
+              {exhausted ? (
+                <span className="badge warn" title={record.unavailableReason ?? ''}>
+                  exhausted · back {relativeTime(record.unavailableUntil!)}
+                </span>
+              ) : (
+                <span className="badge succeeded">available</span>
+              )}
+            </div>
+          )
+        })}
+      </section>
+
+      <section className="panel">
         <h2>Agents</h2>
         <div className="agent-grid">
           {agents.map((agent) => (
             <article className={`agent-card${agent.active ? '' : ' inactive'}`} key={agent.id}>
               <div className="agent-head">
-                <strong>{agent.name}</strong>
+                <Avatar name={agentLabel(agent)} size={24} />
+                <strong>{agentLabel(agent)}</strong>
                 <span className="badge">{agent.role}</span>
                 {agent.createdBy === 'engineering-manager' && <span className="badge">EM-created</span>}
               </div>

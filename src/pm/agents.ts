@@ -1,19 +1,38 @@
 import { JsonCollection, newId, pmPath } from "./store.js";
 import type { GatewayConfig } from "../config.js";
 import { ROLE_DEFAULT_MODEL } from "./prompts.js";
+import { pickPersonaName } from "./personas.js";
 import type { AgentDef, AgentRole, Complexity, CostProfile } from "./types.js";
 
 const agents = new JsonCollection<AgentDef>(pmPath("agents.json"));
 
 const emptyStats = (): AgentDef["stats"] => ({ assigned: 0, completed: 0, qaRejections: 0, totalCostUsd: 0, avgRunMs: 0 });
 
+/** Agents created before personas existed have no human name; give them one
+ * on read so the board doesn't show a mix of named and unnamed teammates. */
+async function backfillPersona(agent: AgentDef): Promise<AgentDef> {
+  if (agent.personaName) return agent;
+  const taken = (await agents.list()).map((row) => row.personaName).filter((name): name is string => !!name);
+  const personaName = pickPersonaName(taken);
+  return (await agents.update(agent.id, (row) => void (row.personaName = personaName))) ?? { ...agent, personaName };
+}
+
 export async function listAgents(projectId?: string): Promise<AgentDef[]> {
-  const rows = await agents.list();
-  return rows.filter((row) => !projectId || row.projectId === projectId || row.projectId === null);
+  const rows = (await agents.list()).filter((row) => !projectId || row.projectId === projectId || row.projectId === null);
+  const named: AgentDef[] = [];
+  for (const row of rows) named.push(await backfillPersona(row));
+  return named;
 }
 
 export async function getAgent(id: string): Promise<AgentDef | null> {
-  return agents.get(id);
+  const agent = await agents.get(id);
+  return agent ? backfillPersona(agent) : null;
+}
+
+/** How an agent is referred to in comments, the activity feed and on cards:
+ * the human name, with the role it plays. */
+export function displayName(agent: AgentDef): string {
+  return agent.personaName ? `${agent.personaName} (${agent.name})` : agent.name;
 }
 
 export async function findRoleAgent(projectId: string, role: AgentRole): Promise<AgentDef | null> {
@@ -35,16 +54,19 @@ export interface CreateAgentInput {
   specialty?: string | null;
   maxComplexity?: Complexity;
   createdBy?: AgentDef["createdBy"];
+  personaName?: string;
   costProfile?: CostProfile | null;
 }
 
 export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
   const now = Date.now();
+  const taken = (await agents.list()).map((agent) => agent.personaName).filter((name): name is string => !!name);
   return agents.insert({
     id: newId(),
     projectId: input.projectId,
     role: input.role,
     name: input.name,
+    personaName: input.personaName ?? pickPersonaName(taken),
     providerKey: input.providerKey,
     model: input.model,
     systemPrompt: input.systemPrompt ?? "",

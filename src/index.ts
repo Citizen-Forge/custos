@@ -11,6 +11,7 @@ import { registerPmEventRoutes } from "./server/pm-events.js";
 import { registerUiRoutes } from "./server/ui-routes.js";
 import { Orchestrator } from "./pm/orchestrator.js";
 import { failOrphanedRuns } from "./pm/runs.js";
+import { markProviderAvailable, markProviderUnavailable } from "./pm/model-registry.js";
 import { registerAuthRoutes } from "./server/auth-routes.js";
 import { registerAuthGuard } from "./server/auth-guard.js";
 import { registerClientAuthGuard } from "./server/client-auth-guard.js";
@@ -67,6 +68,19 @@ async function main() {
   // the UI shows ghosts as live work.
   await failOrphanedRuns();
   const orchestrator = new Orchestrator(runtime);
+
+  // Provider availability is learned from the providers themselves -- a 429
+  // carries its own reset time -- rather than inferred from failed agent
+  // runs. This is what lets the engineering manager know a subscription
+  // window is exhausted and route around it instead of stalling the board.
+  runtime.setAvailabilityListener({
+    onUnavailable(providerName, retryAfterMs, reason) {
+      void markProviderUnavailable(providerName, retryAfterMs, reason);
+    },
+    onAvailable(providerName) {
+      void markProviderAvailable(providerName);
+    },
+  });
   // A handoff out of Steering Co is the one moment where waiting a full
   // poll interval is visibly wrong -- the user just pressed the button.
   remoteSessionManager.onIdeaHandoff = (projectId, ideaId) => void orchestrator.planIdea(projectId, ideaId);

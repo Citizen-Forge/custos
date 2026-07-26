@@ -29,14 +29,28 @@ class CooldownTracker {
   }
 }
 
+/** Told about every provider-level availability change, so something
+ * outside the router (the model registry the engineering manager reads) can
+ * know a subscription window is exhausted instead of inferring it from
+ * failed runs. */
+export interface AvailabilityListener {
+  onUnavailable(providerName: string, retryAfterMs: number, reason: string): void;
+  onAvailable(providerName: string): void;
+}
+
 export class ProviderRouter {
   private readonly cooldowns = new CooldownTracker();
+  private listener: AvailabilityListener | null = null;
 
   constructor(
     private readonly providers: Record<string, Provider>,
     private readonly config: GatewayConfig,
     private readonly spendTracker: SpendTracker,
   ) {}
+
+  setAvailabilityListener(listener: AvailabilityListener): void {
+    this.listener = listener;
+  }
 
   /** Looks up a fixed task's configured priority list. */
   async complete(task: TaskKind, request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<RoutedResponse> {
@@ -66,10 +80,17 @@ export class ProviderRouter {
 
       try {
         const response = await provider.complete(request, options);
+        // A success is proof the window reopened, whatever we last recorded.
+        this.listener?.onAvailable(provider.name);
         return { ...response, providerName: provider.name };
       } catch (err) {
         if (err instanceof ProviderUnavailableError) {
+          const retryAfterMs = err.retryAfterMs ?? DEFAULT_COOLDOWN_MS;
           this.cooldowns.markUnavailable(provider.name, err.retryAfterMs);
+          // Anthropic's 429 carries its own 5-hour unified reset, so this is
+          // the exact moment and duration a subscription window is known to
+          // be exhausted -- the one signal worth telling the manager about.
+          this.listener?.onUnavailable(provider.name, retryAfterMs, err.message);
           lastError = err;
           continue;
         }
@@ -77,6 +98,11 @@ export class ProviderRouter {
       }
     }
 
-    throw lastError ?? new ProviderUnavailableError(`no provider configured/available for ${label}`);
+    // Surface why, not just that. "No provider available" reads like a
+    // misconfiguration and sends people to check their settings, when the
+    // real cause is nearly always the last provider's own reason for
+    // refusing -- an exhausted session window, a rate limit, a rejected key.
+    if (lastError) throw lastError;
+    throw new ProviderUnavailableError(`${label}: no provider is configured to serve this request`);
   }
 }

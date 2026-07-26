@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { AgentDef, WorkItem } from '@shared/types'
 import { useCall, relativeTime } from '../api'
+import Avatar, { agentLabel } from './Avatar'
 
 interface DetailResponse {
   item: WorkItem
@@ -80,7 +81,7 @@ export default function TicketDetail({
               <div className="drawer-meta">
                 <span>{data.item.complexity ? `complexity: ${data.item.complexity}` : 'not sized'}</span>
                 {data.item.assigneeAgentId && (
-                  <span>assigned to {data.agents.find((a) => a.id === data.item.assigneeAgentId)?.name ?? 'unknown agent'}</span>
+                  <span>assigned to {agentLabel(data.agents.find((a) => a.id === data.item.assigneeAgentId)) ?? 'unknown agent'}</span>
                 )}
                 {data.item.branch && <span>branch {data.item.branch}</span>}
                 {data.item.worktreePath && <span>own checkout</span>}
@@ -144,6 +145,7 @@ export default function TicketDetail({
                 {data.item.comments.map((c) => (
                   <div className="comment" key={c.id}>
                     <div className="comment-head">
+                      <Avatar name={c.authorLabel} size={18} />
                       <strong>{c.authorLabel}</strong>
                       <span className="muted">{relativeTime(c.createdAt)}</span>
                     </div>

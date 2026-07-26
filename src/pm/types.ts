@@ -122,7 +122,11 @@ export interface AgentDef {
   /** Null for the built-in roles that are shared across every project. */
   projectId: string | null;
   role: AgentRole;
+  /** The role-descriptive name, e.g. "Simulation Architect". */
   name: string;
+  /** A human name, so a board full of agents is legible at a glance. Null
+   * on records created before personas existed. */
+  personaName: string | null;
   /** Key into config.openaiCompatibleInstances, or "anthropic". */
   providerKey: string;
   model: string;
@@ -213,6 +217,11 @@ export interface ProjectSettings {
   /** Which loops the orchestrator runs unattended. Everything defaults off
    * except the product owner -- autonomous engineering that spends money
    * and pushes branches is opt-in per project, not on by default. */
+  /** The killswitch. When true nothing is dispatched and anything running
+   * is aborted -- a single flag that doesn't require touching five autonomy
+   * toggles to stop the project, and that survives a restart so it can't
+   * quietly resume while nobody is looking. */
+  paused: boolean;
   autonomy: Record<Exclude<AgentRole, "steering">, boolean>;
   /** Ceiling on engineers working this project at once. Each one gets its
    * own git worktree, so this is a spend-and-load limit rather than a
@@ -238,6 +247,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     deployTarget: "none",
     deployConfig: {},
     budget: { monthlyUsd: null, infraMonthlyUsd: null },
+    paused: false,
     autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,

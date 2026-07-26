@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { BOARD_STATUSES, type AgentDef, type BoardResponse, type BoardStatus, type CustosProject, type WorkItem } from '@shared/types'
 import { useCall } from '../api'
+import Avatar, { agentLabel } from './Avatar'
 import TicketDetail from './TicketDetail'
 import type { PromptRequest } from './PromptModal'
 
@@ -170,7 +171,14 @@ function TicketCard({
         </div>
       )}
       <div className="ticket-foot">
-        {agent ? <span className="assignee">{agent.name}</span> : <span className="muted">unassigned</span>}
+        {agent ? (
+          <span className="assignee">
+            <Avatar name={agentLabel(agent)} size={18} title={`${agentLabel(agent)} — ${agent.name}`} />
+            {agentLabel(agent)}
+          </span>
+        ) : (
+          <span className="muted">unassigned</span>
+        )}
         <span style={{ flex: 1 }} />
         {working ? (
           <span className="badge working">running…</span>

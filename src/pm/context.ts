@@ -1,4 +1,5 @@
 import type { ProviderOption } from "./agents.js";
+import { isAvailable, type ModelRecord } from "./model-registry.js";
 import type { AgentDef, Idea, ProjectSettings, WorkItem } from "./types.js";
 
 /** Renders board state as markdown for an agent prompt. Kept in one place
@@ -65,6 +66,45 @@ export function renderAgentRoster(roster: AgentDef[]): string {
       ].join("\n");
     })
     .join("\n\n");
+}
+
+const BILLING_BLURB: Record<string, string> = {
+  subscription: "covered by the Claude subscription — costs nothing per token, but the usage window runs out and then this is unusable for hours",
+  metered: "billed per token against the project budget",
+  free: "free tier or self-hosted — no cost, usually rate limited or slower",
+};
+
+/**
+ * The menu the engineering manager actually decides from: what each
+ * combination costs, how capable it has proved to be, and whether it can be
+ * used at all right now. Exhausted entries are listed rather than hidden --
+ * the manager needs to know a strong model exists and is temporarily gone,
+ * so it can route around it deliberately instead of behaving as though the
+ * model never existed.
+ */
+export function renderModelMenu(records: ModelRecord[]): string {
+  if (!records.length) return "_No providers are configured._";
+  const lines: string[] = [];
+  for (const record of records) {
+    const available = isAvailable(record);
+    const evidence = record.completed + record.qaFailures;
+    const track = evidence
+      ? `${record.completed} passed / ${record.qaFailures} bounced`
+      : "no track record yet";
+    const status = available
+      ? "**available**"
+      : `**EXHAUSTED** until ${new Date(record.unavailableUntil ?? 0).toISOString()} (${record.unavailableReason ?? "no reason given"})`;
+    lines.push(
+      `- \`${record.providerKey}\` / \`${record.model}\` — capability **${record.capability.toFixed(2)}/5** (${track}) · ${BILLING_BLURB[record.billing]} · ${status}`,
+    );
+  }
+  lines.push(
+    "",
+    "Capability is measured, not assumed: it starts from the model's tier and then moves with QA's verdicts on work that model produced. Trust it over your own prior about which model name sounds strongest.",
+    "",
+    "**Never assign work to an exhausted combination** — the run will fail immediately and the ticket will just bounce back to you. If everything capable enough is exhausted, assign what is available and say so in your notes; a simple ticket finished slowly on a free model beats a hard ticket that cannot start at all.",
+  );
+  return lines.join("\n");
 }
 
 export function renderProviderMenu(options: ProviderOption[]): string {

@@ -1,6 +1,6 @@
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
-import { ProviderRouter } from "./providers/router.js";
+import { ProviderRouter, type AvailabilityListener } from "./providers/router.js";
 import { SpendTracker } from "./providers/spend-tracker.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import type { Provider } from "./providers/types.js";
@@ -19,6 +19,13 @@ export class Runtime {
   router!: ProviderRouter;
   embedding!: EmbeddingConfig;
   readonly spendTracker = new SpendTracker();
+  private availabilityListener: AvailabilityListener | null = null;
+
+  /** Survives config reloads, unlike the router it's attached to. */
+  setAvailabilityListener(listener: AvailabilityListener): void {
+    this.availabilityListener = listener;
+    this.router?.setAvailabilityListener(listener);
+  }
 
   async reload(): Promise<void> {
     const config = await loadConfig();
@@ -32,6 +39,9 @@ export class Runtime {
 
     this.config = config;
     this.router = new ProviderRouter(providers, config, this.spendTracker);
+    // Re-attached on every reload: the router is rebuilt from config, but
+    // the model registry that learns from it is long-lived.
+    if (this.availabilityListener) this.router.setAvailabilityListener(this.availabilityListener);
     this.embedding = config.embeddingProvider;
   }
 }

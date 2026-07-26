@@ -4,6 +4,7 @@ import SteeringTab from './SteeringTab'
 import RoadmapTab from './RoadmapTab'
 import BoardTab from './BoardTab'
 import DevOpsTab from './DevOpsTab'
+import KillSwitch from './KillSwitch'
 import type { PromptRequest } from './PromptModal'
 
 const TABS = [
@@ -64,6 +65,7 @@ export default function ProjectView({ project, askText }: ProjectViewProps): Rea
     <div className="project-view">
       <div className="project-tabs">
         <div className="project-title">{project.name}</div>
+        <KillSwitch project={project} revision={revision} onChanged={bump} />
         {TABS.map((t) => (
           <button key={t.id} className={`project-tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}

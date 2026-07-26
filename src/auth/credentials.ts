@@ -78,13 +78,38 @@ export async function getOAuthStatus(): Promise<OAuthStatus> {
  * close to expiring. Null if Custos has never connected its own OAuth
  * session -- callers that also want to fall back to an import from Claude
  * Code's own credentials file should use getValidAccessToken instead. */
+/**
+ * In-flight refresh, shared by every concurrent caller.
+ *
+ * Anthropic's refresh tokens are single-use and rotate on redemption. With
+ * several agents running at once they all call getValidAccessToken() at the
+ * same moment, and once the access token is inside the refresh margin every
+ * one of them redeems the *same* refresh token: the first wins and the rest
+ * come back `invalid_grant` — which then looks exactly like "your OAuth
+ * session is broken" and requires reconnecting by hand. Collapsing them into
+ * one request is the whole fix.
+ */
+let refreshInFlight: Promise<TokenSet> | null = null;
+
+async function refreshOnce(refreshToken: string): Promise<TokenSet> {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshTokens(refreshToken)
+      .then(async (refreshed) => {
+        await saveTokens(refreshed);
+        return refreshed;
+      })
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  return refreshInFlight;
+}
+
 async function getValidOwnTokenSet(): Promise<TokenSet | null> {
   const stored = await loadStoredTokens();
   if (!stored) return null;
   if (stored.expiresAt - Date.now() < REFRESH_MARGIN_MS) {
-    const refreshed = await refreshTokens(stored.refreshToken);
-    await saveTokens(refreshed);
-    return refreshed;
+    return refreshOnce(stored.refreshToken);
   }
   return stored;
 }

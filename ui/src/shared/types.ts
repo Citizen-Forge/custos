@@ -152,6 +152,8 @@ export interface AgentDef {
   id: string;
   projectId: string | null;
   role: AgentRole;
+  /** Human name, so a board full of agents is legible at a glance. */
+  personaName: string | null;
   name: string;
   providerKey: string;
   model: string;
@@ -222,6 +224,7 @@ export interface ProjectSettings {
   deployTarget: DeployTarget;
   deployConfig: Record<string, string>;
   budget: { monthlyUsd: number | null; infraMonthlyUsd: number | null };
+  paused: boolean;
   autonomy: Record<Exclude<AgentRole, "steering">, boolean>;
   maxConcurrentEngineers: number;
   steeringModel: string;
@@ -271,3 +274,23 @@ export type PmEvent =
   | { type: "connected"; projectId: string }
   | { type: "pm_change"; projectId: string }
   | { type: "pm_activity"; projectId: string; message: string; at: number };
+
+/** How a provider/model combination is paid for — the axis that decides
+ * what "unavailable" means and what running out looks like. */
+export type Billing = "subscription" | "metered" | "free";
+
+/** What Custos has learned about a provider/model combination: how capable
+ * it has proved, and whether it can be used right now. */
+export interface ModelRecord {
+  id: string;
+  providerKey: string;
+  model: string;
+  billing: Billing;
+  capability: number;
+  completed: number;
+  qaFailures: number;
+  unavailableUntil: number | null;
+  unavailableReason: string | null;
+  requestsPerHour: number | null;
+  updatedAt: number;
+}

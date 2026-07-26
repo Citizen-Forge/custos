@@ -9,7 +9,8 @@ import { getSettings, updateSettings } from "./project-settings.js";
 import { listFacts, renderFacts, writeFact } from "./facts.js";
 import { runAgent } from "./agent-runner.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace } from "./worktrees.js";
-import { renderAgentRoster, renderBoardSummary, renderIdea, renderProjectContext, renderProviderMenu, renderSecrets, renderWorkItem } from "./context.js";
+import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
+import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-registry.js";
 import { hasGitCredentials, listSecrets } from "./vault.js";
 import { ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, outputContract } from "./prompts.js";
 import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProvisionContract, QaContract } from "./contracts.js";
@@ -47,8 +48,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
   /** Keys of the form "<stage>:<id>" for work currently in flight, so a
-   * long engineer run isn't dispatched again by the next tick. */
-  private readonly busy = new Set<string>();
+   * long engineer run isn't dispatched again by the next tick. Each maps to
+   * the controller that can abort it, which is what makes the killswitch
+   * immediate rather than "stops starting new things". */
+  private readonly busy = new Map<string, AbortController>();
 
   constructor(private readonly runtime: Runtime) {
     super();
@@ -70,7 +73,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   }
 
   activeKeys(): string[] {
-    return [...this.busy];
+    return [...this.busy.keys()];
   }
 
   /** One pass over every project. Stage failures are contained per project
@@ -94,6 +97,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   private async tickProject(project: Project): Promise<void> {
     const settings = await getSettings(project.id);
+    if (settings.paused) return;
 
     // Live runs move without the board changing, so nudge watchers each tick
     // while anything is running -- that's what keeps "what is it doing right
@@ -171,7 +175,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   private countBusy(prefix: string): number {
     let count = 0;
-    for (const key of this.busy) if (key.startsWith(prefix)) count += 1;
+    for (const key of this.busy.keys()) if (key.startsWith(prefix)) count += 1;
     return count;
   }
 
@@ -197,16 +201,54 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   /** Wraps a stage so it can't be double-dispatched and always emits a
    * change when it finishes, whatever the outcome. */
-  private async guard<T>(key: string, projectId: string, fn: () => Promise<T>): Promise<T | null> {
+  private async guard<T>(key: string, projectId: string, fn: (signal: AbortSignal) => Promise<T>): Promise<T | null> {
     if (this.busy.has(key)) return null;
-    this.busy.add(key);
+    const controller = new AbortController();
+    this.busy.set(key, controller);
     this.emit("change", projectId);
     try {
-      return await fn();
+      return await fn(controller.signal);
     } finally {
       this.busy.delete(key);
       this.emit("change", projectId);
     }
+  }
+
+  /**
+   * The killswitch. Aborts everything in flight for this project and, since
+   * `paused` is persisted, stops the next tick dispatching anything new.
+   * Aborting kills the underlying `claude` process rather than waiting for
+   * it to finish, which is the point: this exists for "stop spending my
+   * tokens right now", not "stop eventually".
+   */
+  async pauseProject(projectId: string): Promise<number> {
+    await updateSettings(projectId, { paused: true });
+    let aborted = 0;
+    for (const [key, controller] of this.busy) {
+      if (!key.endsWith(`:${projectId}`) && !(await this.keyBelongsTo(key, projectId))) continue;
+      controller.abort();
+      aborted++;
+    }
+    this.emit("activity", projectId, `Paused. ${aborted} running agent(s) stopped.`);
+    this.emit("change", projectId);
+    return aborted;
+  }
+
+  async resumeProject(projectId: string): Promise<void> {
+    await updateSettings(projectId, { paused: false });
+    this.emit("activity", projectId, "Resumed.");
+    this.emit("change", projectId);
+  }
+
+  /** Busy keys are "<stage>:<id>" where id is a project for some stages and
+   * a work item for others, so ownership has to be looked up for the latter. */
+  private async keyBelongsTo(key: string, projectId: string): Promise<boolean> {
+    const id = key.slice(key.indexOf(":") + 1);
+    if (id === projectId) return true;
+    const item = await board.getWorkItem(id);
+    if (item) return item.projectId === projectId;
+    const idea = await ideas.getIdea(id);
+    return idea?.projectId === projectId;
   }
 
   private async resolve(projectId: string, role: AgentRole): Promise<{ project: Project; settings: ProjectSettings; agent: AgentDef } | null> {
@@ -253,7 +295,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   /** Turns one inbox idea into epics and their stories. */
   async planIdea(projectId: string, ideaId: string): Promise<void> {
-    await this.guard(`plan:${ideaId}`, projectId, async () => {
+    await this.guard(`plan:${ideaId}`, projectId, async (signal) => {
       const claimed = await ideas.claimIdeaForPlanning(ideaId);
       if (!claimed) return;
       const ctx = await this.resolve(projectId, "product-owner");
@@ -282,6 +324,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       ].join("\n");
 
       const result = await runAgent<PlanContract>(this.runtime, {
+        signal,
         agent: ctx.agent,
         projectId,
         cwd: ctx.project.workspaceDir,
@@ -333,7 +376,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   /** Reviews the backlog and promotes what's genuinely ready to work. */
   async groomBacklog(projectId: string): Promise<void> {
-    await this.guard(`groom:${projectId}`, projectId, async () => {
+    await this.guard(`groom:${projectId}`, projectId, async (signal) => {
       const ctx = await this.resolve(projectId, "product-owner");
       if (!ctx) return;
 
@@ -355,6 +398,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       ].join("\n");
 
       const result = await runAgent<GroomContract>(this.runtime, {
+        signal,
         agent: ctx.agent,
         projectId,
         cwd: ctx.project.workspaceDir,
@@ -376,7 +420,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
       for (const comment of result.parsed.comments ?? []) {
         if (!comment.id || !valid.has(comment.id) || !comment.body) continue;
-        await board.addComment(comment.id, ctx.agent.id, ctx.agent.name, comment.body);
+        await board.addComment(comment.id, ctx.agent.id, agentStore.displayName(ctx.agent), comment.body);
       }
       let promoted = 0;
       for (const id of result.parsed.promote ?? []) {
@@ -393,7 +437,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   /** Sizes every ready ticket, picks or creates an agent for each, and
    * moves the ones it assigned into in_progress. */
   async assignReady(projectId: string): Promise<void> {
-    await this.guard(`assign:${projectId}`, projectId, async () => {
+    await this.guard(`assign:${projectId}`, projectId, async (signal) => {
       const ctx = await this.resolve(projectId, "engineering-manager");
       if (!ctx) return;
 
@@ -402,6 +446,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (!ready.length) return;
       const roster = await agentStore.listEngineers(projectId);
       const menu = agentStore.listProviderOptions(this.runtime.config);
+      const models = await syncFromConfig(
+        this.runtime.config,
+        menu.filter((option) => option.providerKey === "anthropic").map((option) => option.model),
+      );
       const limit = await this.engineerLimit(ctx.project, ctx.settings);
       const inFlight = all.filter((item) => item.status === "in_progress").length;
 
@@ -424,10 +472,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         "",
         "## Provider and model menu",
         "",
-        renderProviderMenu(menu),
+        renderModelMenu(models),
       ].join("\n");
 
       const result = await runAgent<AssignContract>(this.runtime, {
+        signal,
         agent: ctx.agent,
         projectId,
         cwd: ctx.project.workspaceDir,
@@ -442,9 +491,17 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // an agent pinned to a provider Custos doesn't have would fail every
       // request it ever made, silently, at assignment time.
       const knownProviders = new Set(menu.map((option) => option.providerKey));
+      // An assignment to an exhausted combination fails on its first request
+      // and puts the ticket straight back in the queue, so it's rejected
+      // here as well as discouraged in the prompt.
+      const unavailable = new Set(models.filter((record) => !isAvailable(record)).map((record) => record.id));
       const tempIds = new Map<string, string>();
       for (const spec of result.parsed.newAgents ?? []) {
         if (!spec.name || !spec.providerKey || !spec.model || !knownProviders.has(spec.providerKey)) continue;
+        if (unavailable.has(modelId(spec.providerKey, spec.model))) {
+          this.emit("activity", projectId, `Skipped new agent "${spec.name}": ${spec.providerKey}/${spec.model} is exhausted.`);
+          continue;
+        }
         const created = await agentStore.createAgent({
           projectId,
           role: "engineer",
@@ -481,7 +538,17 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         if (slots <= 0) break;
         if (!assignment.workItemId || !readyIds.has(assignment.workItemId)) continue;
         const agentId = assignment.agentId ?? (assignment.tempId ? tempIds.get(assignment.tempId) : undefined);
-        if (!agentId || !(await agentStore.getAgent(agentId))) continue;
+        if (!agentId) continue;
+        const assignee = await agentStore.getAgent(agentId);
+        if (!assignee) continue;
+        if (unavailable.has(modelId(assignee.providerKey, assignee.model))) {
+          this.emit(
+            "activity",
+            projectId,
+            `Held "${assignment.workItemId}": ${assignee.name} runs on ${assignee.providerKey}/${assignee.model}, which is exhausted.`,
+          );
+          continue;
+        }
         slots -= 1;
         await board.updateWorkItem(assignment.workItemId, {
           assigneeAgentId: agentId,
@@ -496,7 +563,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   // ------------------------------------------------------------------ engineer
 
   async runEngineer(projectId: string, workItemId: string): Promise<void> {
-    await this.guard(`engineer:${workItemId}`, projectId, async () => {
+    await this.guard(`engineer:${workItemId}`, projectId, async (signal) => {
       const item = await board.getWorkItem(workItemId);
       if (!item || item.status !== "in_progress" || !item.assigneeAgentId) return;
       const project = await getProject(projectId);
@@ -530,6 +597,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       ].join("\n");
 
       const result = await runAgent<EngineerContract>(this.runtime, {
+        signal,
         agent,
         projectId,
         cwd: workspace.cwd,
@@ -541,7 +609,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       await this.applyFacts(projectId, agent, result.parsed);
       if (!result.ok || !result.parsed) {
-        await board.addComment(workItemId, agent.id, agent.name, `Run failed: ${result.error ?? "unknown error"}`);
+        await board.addComment(workItemId, agent.id, agentStore.displayName(agent), `Run failed: ${result.error ?? "unknown error"}`);
         // Back off rather than re-dispatching on the very next tick -- the
         // usual cause is the agent's pinned provider being rate limited,
         // and hammering it just burns the retry budget too.
@@ -560,7 +628,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         ...(contract.prUrl ? { prUrl: contract.prUrl } : {}),
       });
       const followUps = contract.followUps?.length ? `\n\n**Noticed but not fixed (out of scope for this ticket):**\n${contract.followUps.map((f) => `- ${f}`).join("\n")}` : "";
-      await board.addComment(workItemId, agent.id, agent.name, `${contract.summary ?? ""}${followUps}`);
+      await board.addComment(workItemId, agent.id, agentStore.displayName(agent), `${contract.summary ?? ""}${followUps}`);
 
       if (contract.status === "blocked") {
         // Blocked work goes back to the backlog rather than sitting in
@@ -583,7 +651,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   // ------------------------------------------------------------------------ QA
 
   async runQa(projectId: string, workItemId: string): Promise<void> {
-    await this.guard(`qa:${workItemId}`, projectId, async () => {
+    await this.guard(`qa:${workItemId}`, projectId, async (signal) => {
       const item = await board.getWorkItem(workItemId);
       if (!item || item.status !== "qa") return;
       const ctx = await this.resolve(projectId, "qa");
@@ -612,6 +680,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       ].join("\n");
 
       const result = await runAgent<QaContract>(this.runtime, {
+        signal,
         agent: ctx.agent,
         projectId,
         cwd: reviewCwd,
@@ -623,7 +692,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) {
-        await board.addComment(workItemId, ctx.agent.id, ctx.agent.name, `QA run failed: ${result.error ?? "unknown error"}`);
+        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `QA run failed: ${result.error ?? "unknown error"}`);
         return;
       }
 
@@ -631,7 +700,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const checks = contract.criteriaChecked?.length
         ? `\n\n${contract.criteriaChecked.map((c) => `- **${c.result === "pass" ? "PASS" : "FAIL"}** ${c.criterion ?? ""} — ${c.evidence ?? ""}`).join("\n")}`
         : "";
-      await board.addComment(workItemId, ctx.agent.id, ctx.agent.name, `${contract.summary ?? ""}${checks}`);
+      await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `${contract.summary ?? ""}${checks}`);
+
+      // QA's verdict is the only honest measure of whether the model that
+      // did the work was up to it, so it feeds straight back into that
+      // model's capability rating -- which is what the manager reads next
+      // time it decides who gets the hard tickets.
+      const author = item.assigneeAgentId ? await agentStore.getAgent(item.assigneeAgentId) : null;
+      if (author) {
+        await recordOutcome(author.providerKey, author.model, contract.verdict === "pass" ? "passed" : "bounced");
+      }
 
       if (contract.verdict === "pass") {
         // Passing frees the checkout for the next ticket. The branch and
@@ -672,7 +750,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
    * board would run single-file in a shared directory.
    */
   async provisionRepo(projectId: string): Promise<void> {
-    await this.guard(`provision:${projectId}`, projectId, async () => {
+    await this.guard(`provision:${projectId}`, projectId, async (signal) => {
       const ctx = await this.resolve(projectId, "devops");
       if (!ctx) return;
       if (ctx.settings.repoUrl) return; // already stood up
@@ -693,6 +771,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       ].join("\n");
 
       const result = await runAgent<ProvisionContract>(this.runtime, {
+        signal,
         agent: ctx.agent,
         projectId,
         cwd: ctx.project.workspaceDir,
@@ -719,7 +798,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   // -------------------------------------------------------------------- devops
 
   async runDevops(projectId: string, workItemId: string): Promise<void> {
-    await this.guard(`devops:${workItemId}`, projectId, async () => {
+    await this.guard(`devops:${workItemId}`, projectId, async (signal) => {
       const item = await board.getWorkItem(workItemId);
       if (!item || item.labels.includes(DEPLOYED_LABEL)) return;
       const ctx = await this.resolve(projectId, "devops");
@@ -743,6 +822,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       ].join("\n");
 
       const result = await runAgent<DevopsContract>(this.runtime, {
+        signal,
         agent: ctx.agent,
         projectId,
         cwd: ctx.project.workspaceDir,
@@ -754,12 +834,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) {
-        await board.addComment(workItemId, ctx.agent.id, ctx.agent.name, `Deployment run failed: ${result.error ?? "unknown error"}`);
+        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `Deployment run failed: ${result.error ?? "unknown error"}`);
         return;
       }
 
       const contract = result.parsed;
-      await board.addComment(workItemId, ctx.agent.id, ctx.agent.name, contract.summary ?? "");
+      await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
       if (contract.status !== "deployed") {
         this.emit("activity", projectId, `DevOps is blocked on "${item.title}": ${contract.blockedReason ?? "no reason given"}`);
         return;
