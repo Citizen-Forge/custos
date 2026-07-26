@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import * as projects from "../remote/projects.js";
 import * as chats from "../remote/chats.js";
 import { RemoteSessionManager } from "../remote/session-manager.js";
+import { readTranscript } from "../remote/transcript.js";
 import { listConversations, buildResumeSummary } from "../memory/conversations.js";
 import { getSettings, deleteSettings } from "../pm/project-settings.js";
 import { STEERING_PROMPT } from "../pm/prompts.js";
@@ -161,6 +162,20 @@ export function registerProjectRoutes(app: FastifyInstance, runtime: Runtime, ma
       reply.code(409);
       return { error: (err as Error).message };
     }
+  });
+
+  /** A chat's past turns, replayed from Claude Code's own transcript so
+   * reopening one shows the conversation instead of an empty pane. Empty
+   * for a chat that never completed a turn. */
+  app.get("/admin/api/chats/:chatId/transcript", async (req, reply) => {
+    const { chatId } = req.params as { chatId: string };
+    const chat = await chats.getChat(chatId);
+    if (!chat) {
+      reply.code(404);
+      return { error: "chat not found" };
+    }
+    if (!chat.claudeSessionId) return { entries: [] };
+    return { entries: await readTranscript(chat.claudeSessionId) };
   });
 
   app.patch("/admin/api/chats/:chatId", async (req, reply) => {

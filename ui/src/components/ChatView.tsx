@@ -165,16 +165,31 @@ export default function ChatView({
       }
     })
 
-    window.custos.openChat(chat).then((res) => {
-      if (!res.ok) {
-        setStatus('closed')
-        setClosedReason(res.error || 'failed to open session')
-        return
-      }
-      if (initialMessage) submit(initialMessage)
-    })
+    // Replay history before connecting. Claude Code keeps the authoritative
+    // transcript and `--resume` genuinely continues the conversation, so a
+    // reopened chat really does carry its context -- without this the pane
+    // looked empty and the continuity was invisible.
+    let cancelled = false
+    window.custos
+      .api<{ entries: TranscriptEntry[] }>('GET', `/admin/api/chats/${chat.id}/transcript`)
+      .then((res) => {
+        if (cancelled || !res.ok || !res.data?.entries?.length) return
+        setBubbles((prev) => [...historyToBubbles(res.data.entries), ...prev])
+      })
+      .finally(() => {
+        if (cancelled) return
+        window.custos.openChat(chat).then((res) => {
+          if (!res.ok) {
+            setStatus('closed')
+            setClosedReason(res.error || 'failed to open session')
+            return
+          }
+          if (initialMessage) submit(initialMessage)
+        })
+      })
 
     return () => {
+      cancelled = true
       unsubEvent()
       unsubClosed()
       window.custos.closeChat(chat.id)
@@ -255,6 +270,33 @@ export default function ChatView({
       </form>
     </>
   )
+}
+
+/** One past turn, as the transcript endpoint returns it. */
+type TranscriptEntry =
+  | { kind: 'user'; text: string }
+  | { kind: 'assistant'; content: MessageContentBlock[] }
+  | { kind: 'tool_result'; toolUseId: string; content: string; isError: boolean }
+
+/** Replays history into the same bubbles the live stream produces, so past
+ * and present turns render identically. Tool results are folded back onto
+ * the tool call they belong to rather than appearing as separate entries. */
+function historyToBubbles(entries: TranscriptEntry[]): Bubble[] {
+  const bubbles: Bubble[] = []
+  for (const entry of entries) {
+    if (entry.kind === 'user') {
+      bubbles.push({ kind: 'user', id: nextId(), text: entry.text })
+    } else if (entry.kind === 'assistant') {
+      bubbles.push(...blocksToBubbles(entry.content))
+    } else {
+      const target = bubbles.find((b) => b.kind === 'tool' && b.toolUseId === entry.toolUseId)
+      if (target && target.kind === 'tool') {
+        target.result = entry.content
+        target.isError = entry.isError
+      }
+    }
+  }
+  return bubbles
 }
 
 function blocksToBubbles(content: MessageContentBlock[]): Bubble[] {
