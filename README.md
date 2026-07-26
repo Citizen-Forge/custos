@@ -152,3 +152,7 @@ Note that you already have `claude-permission-hook.exe` registered on `PreToolUs
 - Budget tracking uses a fixed-window reset, not a true rolling window: once `periodDays` elapses since the window started, the next request resets the counter rather than old spend decaying continuously. Anthropic isn't covered by budget tracking yet, only `openaiCompatibleInstances` -- the user's own motivating example (OpenAI budget-capped, then Claude via its existing session-limit fallback) doesn't need it there anyway.
 - Complexity routing's classifier prompt hasn't been tuned/evaluated beyond a handful of manual test cases (a trivial question, a deliberately complex architecture question, a tool-continuation turn) -- tier boundaries are a first guess, not calibrated.
 - The resume-conversation picker groups raw exchange logs heuristically (a change in the first message signals a new conversation, since there's no real conversation id anywhere in the Messages API traffic itself) -- good enough for a picker, not a guarantee. Only scans the last ~14 days of logs.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE) — free to use, modify and share for any noncommercial purpose.
