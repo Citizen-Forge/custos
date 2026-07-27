@@ -130,6 +130,24 @@
   }
   .toast.show { opacity: 1; transform: translateY(0); }
   .toast.error { border-color: var(--danger); color: var(--danger); }
+  .budget-bar {
+    background: var(--bg);
+    border-radius: 999px;
+    height: 8px;
+    overflow: hidden;
+    margin: 4px 0;
+    flex: 1;
+    min-width: 120px;
+  }
+  .budget-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.3s ease;
+  }
+  .budget-bar-fill.ok { background: var(--ok); }
+  .budget-bar-fill.warn { background: var(--warn); }
+  .budget-bar-fill.danger { background: var(--danger); }
+  .budget-label { font-variant-numeric: tabular-nums; font-size: 12.5px; white-space: nowrap; }
   hr.sep { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
   .small { font-size: 12px; color: var(--muted); }
 </style>
@@ -251,6 +269,11 @@ async function loadState() {
   state.projects = (await api("/admin/api/projects")).projects;
   for (const project of state.projects) {
     project.chats = (await api(`/admin/api/projects/${project.id}/chats`)).chats;
+    // Fetch per-project settings which include budget + spend data.
+    const settingsResp = await api(`/admin/api/projects/${project.id}/settings`);
+    project.budget = settingsResp.settings.budget;
+    project.spentUsd = settingsResp.spentUsd ?? 0;
+    project.subscriptionUsd = settingsResp.subscriptionUsd ?? 0;
   }
   state.recentConversations = (await api("/admin/api/remote/conversations")).conversations;
   render();
@@ -823,12 +846,49 @@ function renderProjectsPanel() {
   return section;
 }
 
+function renderBudgetBar(project) {
+  const budget = project.budget;
+  if (!budget || budget.monthlyUsd == null) return null; // Unlimited — no bar needed.
+
+  const limit = budget.monthlyUsd;
+  const spent = project.spentUsd ?? 0;
+  const pct = Math.min(100, Math.round((spent / limit) * 100));
+
+  // Determine the bar colour and label style.
+  let cls = "ok";
+  if (pct >= 90) cls = "danger";
+  else if (pct >= 70) cls = "warn";
+
+  // Compute the monthly reset date (1st of next month).
+  const now = new Date();
+  const resetDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const resetStr = resetDate.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+
+  const container = el("div", { style: "display: flex; align-items: center; gap: 10px; margin: 8px 0;" });
+  container.appendChild(el("span", { class: "budget-label", text: `$${spent.toFixed(2)}` }));
+
+  const barOuter = el("div", { class: "budget-bar" });
+  const barFill = el("div", { class: `budget-bar-fill ${cls}`, style: `width: ${Math.max(2, pct)}%;` });
+  barOuter.appendChild(barFill);
+  container.appendChild(barOuter);
+
+  container.appendChild(el("span", { class: "budget-label", text: `$${limit.toFixed(2)}` }));
+  container.appendChild(el("span", { class: "small", text: `resets ${resetStr}` }));
+
+  return container;
+}
+
 function renderProject(project) {
   const wrap = el("div", {});
   wrap.appendChild(el("div", { class: "row" }, [
     el("strong", { text: project.name }),
     el("span", { class: "small", text: project.workspaceDir }),
   ]));
+
+  // Budget bar (only when a monthly cap is configured).
+  const budgetBar = renderBudgetBar(project);
+  if (budgetBar) wrap.appendChild(budgetBar);
+
   wrap.appendChild(el("div", { class: "row" }, [
     el("button", { text: "New chat", onclick: () => reloadAfter(
       api(`/admin/api/projects/${project.id}/chats`, { method: "POST", body: {} }), "Chat started"
