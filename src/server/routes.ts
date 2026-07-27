@@ -34,7 +34,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const postToolUseHandler = createPostToolUseHandler(askTracker);
   const userPromptSubmitHandler = createUserPromptSubmitHandler(deps.memoryStore, deps.runtime);
 
-  app.get("/health", async () => ({ ok: true }));
+  app.get("/health", async () => {
+    let commit = process.env.COMMIT_SHA;
+    if (!commit) {
+      try {
+        const { execSync } = await import("node:child_process");
+        commit = execSync("git rev-parse --short HEAD", { encoding: "utf8", timeout: 3000 }).trim();
+      } catch { /* ignore -- commit is null when unavailable */ }
+    }
+    return { ok: true, commit: commit || null };
+  });
 
   app.post("/v1/messages", async (req, reply) => {
     const body = req.body as AnthropicMessagesRequest;
