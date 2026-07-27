@@ -240,8 +240,8 @@ describe("StatsMonitor", () => {
     );
     m.tick();
     assert.equal(logs.length, 2);
-    assert.match(logs[0], /bg-stuck/);
-    assert.match(logs[1], /int-backup/);
+    assert.match(logs[0], /bg=12/);
+    assert.match(logs[1], /int=8/);
   });
 
   it("extract returns null: rule is skipped for that provider", () => {
