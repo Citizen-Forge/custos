@@ -306,6 +306,18 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
     return { ok: true };
   });
 
+  /** Resets pmConfigured so the Project Manager re-evaluates model
+   * assignments on the next tick. Useful after editing providers or
+   * changing the budget cap. Returns immediately; the PM runs in the
+   * background. */
+  app.post("/admin/api/projects/:id/reassign-models", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await getProject(id))) return notFound(reply, "project");
+    await updateSettings(id, { pmConfigured: false });
+    void orchestrator.assignModels(id);
+    return { ok: true };
+  });
+
   // ----------------------------------------------------------- model registry
 
   app.get("/admin/api/models", async () => {
