@@ -128,12 +128,8 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
       },
       providers: await describeProviders(runtime),
       embeddingProvider: config.embeddingProvider,
-      providerNames: ["anthropic", ...Object.keys(config.providers ?? {})],
       providerPresets: PROVIDER_PRESETS,
-      tasks: config.tasks,
-      complexityRouting: config.complexityRouting,
       clientApiKey: config.clientApiKey ?? null,
-      setup: buildSetupInstructions(config.clientApiKey),
     };
   });  // -- Client API key (gates /v1/messages, /hooks/*, /memory/search) ------
 
