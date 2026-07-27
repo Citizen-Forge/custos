@@ -170,6 +170,34 @@ function showToast(message, isError = false) {
   showToast._timer = setTimeout(() => { t.className = "toast"; }, 3000);
 }
 
+// Renders a set of model checkboxes inside `container`. `models` is an
+// array of { id, owned_by?, created? } from the probe endpoint. `enabledSet`
+// is a Set of model names that should be pre-checked. Each model gets a
+// checkbox + label. New models (not in enabledSet) start unchecked.
+// The checkboxes are stored on `container.checkboxes` as a Map<name, input>.
+function renderModelCheckboxes(container, models, enabledSet) {
+  container.innerHTML = "";
+  container.checkboxes = new Map();
+  if (!models || !models.length) {
+    container.appendChild(el("div", { class: "small", text: "No models found. Enter model names manually or scan again." }));
+    return;
+  }
+  const grid = el("div", { style: "display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0;" });
+  for (const model of models) {
+    const id = model.id || model;
+    const checked = enabledSet.has(id);
+    const label = el("label", {
+      style: "display: inline-flex; align-items: center; gap: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer;",
+    });
+    const cb = el("input", { type: "checkbox", checked: checked ? "checked" : undefined });
+    label.appendChild(cb);
+    label.appendChild(el("span", { text: id }));
+    container.checkboxes.set(id, cb);
+    grid.appendChild(label);
+  }
+  container.appendChild(grid);
+}
+
 // Reads a throttle input element. Returns:
 //   - undefined when the value is invalid (toast already shown) -- caller should bail
 //   - null when the field is blank (== "unlimited", wire-serialized as null)
@@ -184,6 +212,23 @@ function parseThrottle(input) {
     return undefined;
   }
   return value;
+}
+
+// Reads model checkboxes from a container rendered by renderModelCheckboxes.
+// Returns an array of { name, enabled } objects for the provider PUT body.
+function readModelCheckboxes(container, pricing) {
+  if (!container.checkboxes || container.checkboxes.size === 0) return [];
+  const models = [];
+  let first = true;
+  for (const [name, cb] of container.checkboxes) {
+    models.push({
+      name,
+      enabled: cb.checked,
+      ...(first && pricing ? { pricing } : {}),
+    });
+    first = false;
+  }
+  return models;
 }
 
 async function api(path, opts = {}) {
@@ -321,11 +366,35 @@ function enterEditRow(row, name, prov) {
   ]);
   costTypeSelect.value = prov.costType || "free";
 
-  // --- Models list (simple: one input per model, first is primary) ---
-  const modelsInput = el("input", { type: "text", value: (prov.models || []).filter(m => m.enabled).map(m => m.name).join(", "), placeholder: "model1, model2, ..." });
-  const modelsHint = el("div", { class: "small", text: (prov.models || []).length > 0
-    ? `Currently ${prov.models.length} model(s). Comma-separate multiple model names.`
-    : "Enter model names, comma-separated. Enables all by default." });
+  // --- Model checkboxes ---
+  const modelCheckboxContainer = el("div", {});
+  const enabledSet = new Set((prov.models || []).filter(m => m.enabled).map(m => m.name));
+  const allModelNames = (prov.models || []).map(m => m.name);
+  renderModelCheckboxes(modelCheckboxContainer, allModelNames.map(name => ({ id: name })), enabledSet);
+  const modelsHint = el("div", { class: "small", text: `Currently ${(prov.models || []).length} model(s).` });
+
+  // --- Re-scan button for edit form ---
+  const rescanBtn = el("button", { text: "Re-scan models", onclick: async () => {
+    rescanBtn.disabled = true;
+    rescanBtn.textContent = "Scanning...";
+    try {
+      const result = await api("/admin/api/instances/probe-models", { method: "POST", body: { baseUrl: urlInput.value, apiKey: keyInput.value || undefined } });
+      const discovered = result.models || [];
+      const currentEnabled = new Set();
+      if (modelCheckboxContainer.checkboxes) {
+        for (const [name, cb] of modelCheckboxContainer.checkboxes) {
+          if (cb.checked) currentEnabled.add(name);
+        }
+      }
+      renderModelCheckboxes(modelCheckboxContainer, discovered, currentEnabled);
+      modelsHint.textContent = `Found ${discovered.length} model(s). Check the ones you want enabled.`;
+    } catch (err) {
+      showToast(err.message, true);
+    } finally {
+      rescanBtn.disabled = false;
+      rescanBtn.textContent = "Re-scan models";
+    }
+  }});
 
   // --- Throttle (maxConcurrent) ---
   const throttleInput = el("input", { type: "number", min: "1", step: "1", value: prov.maxConcurrent ?? "", placeholder: "Unlimited" });
@@ -348,8 +417,9 @@ function enterEditRow(row, name, prov) {
   ]));
   form.appendChild(el("div", { class: "row" }, [
     el("label", { text: "Models" }),
-    modelsInput,
+    rescanBtn,
   ]));
+  form.appendChild(modelCheckboxContainer);
   form.appendChild(modelsHint);
   form.appendChild(el("div", { class: "row" }, [
     el("label", { text: "Throttle" }),
@@ -389,14 +459,11 @@ function enterEditRow(row, name, prov) {
     }
     const hasPricing = inputPriceInput.value || outputPriceInput.value;
     const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : null;
-    const modelNames = modelsInput.value.split(",").map(s => s.trim()).filter(Boolean);
-    const models = modelNames.map((m, i) => ({
-      name: m,
-      enabled: true,
-      // Attach pricing to the first model (pricing is per-model in the new
-      // API shape; most providers have uniform pricing across models).
-      ...(i === 0 && pricing ? { pricing } : {}),
-    }));
+    const models = readModelCheckboxes(modelCheckboxContainer, pricing);
+    if (!models.length) {
+      showToast("Enable at least one model", true);
+      return;
+    }
     reloadAfter(api(`/admin/api/providers/${encodeURIComponent(name)}`, {
       method: "PUT",
       body: {
@@ -461,8 +528,8 @@ function renderProvidersPanel() {
     el("option", { value: "metered", text: "Metered (pay per token)" }),
   ]);
 
-  // --- Model names input ---
-  const modelNamesInput = el("input", { type: "text", placeholder: "model1, model2 (comma-separated)" });
+  // --- Model checkboxes (populated by Scan) ---
+  const modelCheckboxContainer = el("div", {});
   const modelsHint = el("div", { class: "small" });
 
   // --- Throttle (maxConcurrent) ---
@@ -483,6 +550,19 @@ function renderProvidersPanel() {
     el("option", { value: "background", text: "Background" }),
   ]);
 
+  async function autoScanModels() {
+    if (!urlInput.value) return;
+    try {
+      const result = await api("/admin/api/instances/probe-models", { method: "POST", body: { baseUrl: urlInput.value, apiKey: keyInput.value || undefined } });
+      const discovered = result.models || [];
+      const enableAll = new Set(discovered.map(m => m.id));
+      renderModelCheckboxes(modelCheckboxContainer, discovered, enableAll);
+      modelsHint.textContent = `Found ${discovered.length} model(s). Uncheck any you don't want enabled.`;
+    } catch {
+      // Auto-scan failed; user can click "Scan models" manually.
+    }
+  }
+
   const presetSelect = el("select", { onchange: (ev) => {
     const preset = state.providerPresets.find((p) => p.id === ev.target.value);
     if (preset && preset.id !== "custom") urlInput.value = preset.baseUrl;
@@ -497,6 +577,8 @@ function renderProvidersPanel() {
       throttleInput.placeholder = "Unlimited";
       prioritySelect.value = "interactive";
     }
+    // Auto-scan models for known presets so models appear immediately.
+    autoScanModels();
   }});
   for (const preset of state.providerPresets) {
     presetSelect.appendChild(el("option", { value: preset.id, text: preset.label }));
@@ -505,7 +587,7 @@ function renderProvidersPanel() {
   const row0 = el("div", { class: "row" }, [el("label", { text: "Preset" }), presetSelect]);
   const row1 = el("div", { class: "row" }, [nameInput, urlInput]);
   const row2 = el("div", { class: "row" }, [el("label", { text: "Cost" }), costTypeSelect, keyInput]);
-  const rowModels = el("div", { class: "row" }, [el("label", { text: "Models" }), modelNamesInput]);
+  const rowModels = el("div", { class: "row" }, [el("label", { text: "Models" }), el("span", { class: "small", text: "Scan a provider URL to discover available models" })]);
 
   const rowThrottle = el("div", { class: "row" }, [
     el("label", { text: "Throttle" }),
@@ -523,16 +605,15 @@ function renderProvidersPanel() {
   ]);
 
   const rowProbe = el("div", { class: "row" }, [
-    el("button", { text: "List models", onclick: async () => {
+    el("button", { text: "Scan models", onclick: async () => {
       if (!urlInput.value) return showToast("Enter a base URL first", true);
       try {
-        const { models } = await api("/admin/api/instances/probe-models", { method: "POST", body: { baseUrl: urlInput.value, apiKey: keyInput.value || undefined } });
-        if (models.length) {
-          modelNamesInput.value = models.join(", ");
-          modelsHint.textContent = `Found ${models.length} model(s). Edit the list to enable only the ones you want.`;
-        } else {
-          modelsHint.textContent = "No models found. You can still enter model names manually.";
-        }
+        const result = await api("/admin/api/instances/probe-models", { method: "POST", body: { baseUrl: urlInput.value, apiKey: keyInput.value || undefined } });
+        const discovered = result.models || [];
+        // All newly discovered models start enabled.
+        const enableAll = new Set(discovered.map(m => m.id));
+        renderModelCheckboxes(modelCheckboxContainer, discovered, enableAll);
+        modelsHint.textContent = `Found ${discovered.length} model(s). Uncheck any you don't want enabled.`;
       } catch (err) {
         modelsHint.textContent = err.message;
       }
@@ -547,8 +628,9 @@ function renderProvidersPanel() {
   const row5 = el("div", { class: "row" }, [
     el("button", { class: "primary", text: "Save", onclick: () => {
       if (!nameInput.value || !urlInput.value) return showToast("Fill in name and base URL", true);
-      const modelNames = modelNamesInput.value.split(",").map(s => s.trim()).filter(Boolean);
-      if (!modelNames.length) return showToast("Enter at least one model name", true);
+      if (!modelCheckboxContainer.checkboxes || !modelCheckboxContainer.checkboxes.size) {
+        return showToast("Click 'Scan models' first, then enable at least one model", true);
+      }
       const throttle = parseThrottle(throttleInput);
       if (throttle === undefined) return;
       const rpmRaw = rpmInput.value.trim();
@@ -559,11 +641,8 @@ function renderProvidersPanel() {
       }
       const hasPricing = inputPriceInput.value || outputPriceInput.value;
       const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : null;
-      const models = modelNames.map((m, i) => ({
-        name: m,
-        enabled: true,
-        ...(i === 0 && pricing ? { pricing } : {}),
-      }));
+      const models = readModelCheckboxes(modelCheckboxContainer, pricing);
+      if (!models.length) return showToast("Enable at least one model", true);
       reloadAfter(api(`/admin/api/providers/${encodeURIComponent(nameInput.value)}`, {
         method: "PUT",
         body: {

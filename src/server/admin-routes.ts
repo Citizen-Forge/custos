@@ -345,8 +345,10 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
         reply.code(502);
         return { error: `HTTP ${res.status} from ${baseUrl}/models` };
       }
-      const json = (await res.json()) as { data?: { id: string }[] };
-      return { models: (json.data ?? []).map((m) => m.id) };
+      // Return the full model objects so the admin UI can display
+      // metadata (owned_by, created) alongside each model ID.
+      const json = (await res.json()) as { data?: { id: string; owned_by?: string; created?: number }[] };
+      return { models: (json.data ?? []).map((m) => ({ id: m.id, owned_by: m.owned_by ?? null, created: m.created ?? null })) };
     } catch (err) {
       reply.code(502);
       return { error: `couldn't reach ${baseUrl}: ${(err as Error).message}` };
