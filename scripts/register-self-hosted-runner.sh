@@ -4,7 +4,7 @@
 # self-hosted GitHub Actions runner for the custos project on Unraid.
 #
 # Usage:
-#   export RUNNER_TOKEN="ABC123..."   # mint via the Register Runner workflow
+#   export RUNNER_TOKEN="ABC123..."   # see token-source notes below
 #   bash scripts/register-self-hosted-runner.sh
 #
 # Behavior:
@@ -20,6 +20,15 @@
 #     in. Unraid runs as root by default, so without this opt the svc
 #     refuses to launch.
 #
+# Token source (any of):
+#   * Locally from a machine whose `gh` is authed with admin on
+#     github.com/Citizen-Forge/custos -- the repo owner (Tall-Paul):
+#         gh api -X POST repos/Citizen-Forge/custos/actions/runners/registration-token -q '.token'
+#   * github.com -> Citizen-Forge/custos -> Settings -> Actions ->
+#     Runners -> New self-hosted runner -> Linux x64. The bash block
+#     GitHub shows for the ./config.sh --token step embeds the token.
+#   Token lifetime is ~1h; mint close to bootstrap, not hours earlier.
+#
 # Tunables (env):
 #   RUNNER_TOKEN    Required. Short-lived registration token.
 #   RUNNER_VERSION  Default 2.321.0. Pin newer if you need newer features.
@@ -28,7 +37,7 @@
 
 set -euo pipefail
 
-: "${RUNNER_TOKEN:?Error: RUNNER_TOKEN env var is required. Mint one via the Register Runner workflow: https://github.com/Citizen-Forge/custos/actions/workflows/register-runner.yml}"
+: "${RUNNER_TOKEN:?Error: RUNNER_TOKEN env var is required. Mint one with: gh api -X POST repos/Citizen-Forge/custos/actions/runners/registration-token (Tall-Paul on this machine) OR via github.com -> Settings -> Actions -> Runners -> New self-hosted runner}"
 
 RUNNER_VERSION="${RUNNER_VERSION:-2.321.0}"
 RUNNER_NAME="${RUNNER_NAME:-Unraid-Custos}"
