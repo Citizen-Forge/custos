@@ -88,9 +88,15 @@ if [ ! -e ./run.sh ]; then
     fi
   fi
   tar xzf "$TARBALL"
-  # Defensive: ensure run.sh/config.sh/svc.sh are executable after
-  # extract, regardless of what mode bits the upstream tar shipped.
-  chmod +x ./run.sh ./config.sh ./svc.sh
+  # Defensive: ensure the always-present top-level scripts are
+  # executable after extract, regardless of upstream mode bits.
+  chmod +x ./run.sh ./config.sh ./env.sh
+  # chmod the v2.300+ canonical supervisor if present. It moved
+  # out of ./svc.sh into ./bin/runsvc.sh somewhere around that
+  # release; old versions still ship ./svc.sh at the top level,
+  # also chmod that defensively so this branch runs on both shapes.
+  [ -f ./bin/runsvc.sh ] && chmod +x ./bin/runsvc.sh
+  [ -f ./svc.sh ] && chmod +x ./svc.sh
   rm -f "$TARBALL"
 fi
 
@@ -106,30 +112,57 @@ echo "==> Configuring runner '${RUNNER_NAME}' against ${REPO_URL}"
   --labels "custos,x64,linux,self-hosted" \
   --runnergroup "Default"
 
-# 3. Service install. /etc/rc.d/rc.<name> init script is the canonical
-#    Unraid-on-6.x path; Unraid 7.x's systemd shim forwards this when it
-#    can. Errors here are non-fatal -- the next step falls back.
-echo "==> Install service via svc.sh"
-./svc.sh install "${RUNNER_NAME}" 2>&1 || \
-  echo "Warning: svc.sh install failed; falling through to detached start."
-
-# 4. Start. Try svc.sh start first -- if it fails (typical on Unraid 7
-#    where systemd isn't fully wired), start detached under nohup.
-#    pgrep guard prevents accumulating duplicate detached runners across
-#    reboots if svc.sh keeps failing for the same /etc-transient reason.
+# 3 + 4. Install + Start, dispatching by what the tarball shipped.
+#
+#    The actions/runner "service" abstraction changed across releases:
+#      * <= v2.299: top-level ./svc.sh writes sysvinit-style rc files
+#        into /etc; on hosts with persistent /etc + systemd this works.
+#      * >= v2.300: top-level ./svc.sh is gone. The supervisor script
+#        moved to ./bin/runsvc.sh, which itself just runs
+#        `node ./bin/RunnerService.js` in foreground and assumes the
+#        caller (systemd / launchd / etc.) will supervise it.
+#    Unraid 6.x has neither systemd nor a persistent /etc. Both shapes
+#    above are unreliable on Unraid. The canonical Unraid path is:
+#    detached nohup ./run.sh backgrounded under /boot/config/go
+#    persistence (step 5). The script below tries the vendor-supplied
+#    supervisors like ./svc.sh and ./bin/runsvc.sh only as a portability
+#    concession for non-Unraid hosts; the Unraid path is the
+#    always-applied detached nohup fallback at the end.
 mkdir -p "$RUNNER_DIR/logs"
-if ./svc.sh status 2>/dev/null | grep -qiE 'active|running|started'; then
-  echo "==> Service already running"
-elif ./svc.sh start; then
-  echo "==> Started via svc.sh"
+
+# Already-running guard: covers both run.sh (legacy / Unraid canonical)
+# AND RunnerService.js (v2.300+ on hosts with a real supervisor).
+if pgrep -f "$RUNNER_DIR/run.sh" >/dev/null; then
+  RUNNING_PIDS=$(pgrep -f "$RUNNER_DIR/run.sh" | tr '\n' ' ')
+  echo "==> Runner already running (run.sh detached, pids: $RUNNING_PIDS)"
+elif pgrep -f "RunnerService.js" >/dev/null; then
+  RUNNING_PIDS=$(pgrep -f "RunnerService.js" | tr '\n' ' ')
+  echo "==> Runner service already running (RunnerService.js, pids: $RUNNING_PIDS)"
 else
-  if pgrep -f "$RUNNER_DIR/run.sh" >/dev/null; then
-    echo "==> Detached runner already running (pid: $(pgrep -f "$RUNNER_DIR/run.sh" | tr '\n' ' ')); skip nohup"
-  else
-    echo "==> svc.sh start failed (likely Unraid 7 /etc transient); starting detached"
-    nohup ./run.sh >"$RUNNER_DIR/logs/runner.log" 2>&1 &
-    echo "    PID=$!, logs at $RUNNER_DIR/logs/runner.log"
+  # Legacy path: ./svc.sh present means pre-v2.300 tarball.
+  if [ -x ./svc.sh ]; then
+    echo "==> Legacy ./svc.sh detected; attempting install + start"
+    ./svc.sh install "${RUNNER_NAME}" 2>/dev/null || \
+      echo "Warning: ./svc.sh install failed (Unraid /etc transient?); will fall through."
+    ./svc.sh start 2>&1 || \
+      echo "Warning: ./svc.sh start failed; will fall through to detached start."
   fi
+fi
+
+# Final safety net: regardless of what svc.sh did, ensure the runner
+# is alive. The detached nohup under /boot/config/go is the canonical
+# Unraid 6.x path and survives both the absent-svc.sh case AND any
+# svc.sh-failed-on-ephemeral-/etc case.
+sleep 2
+if ! pgrep -f "$RUNNER_DIR/run.sh" >/dev/null && \
+   ! pgrep -f "RunnerService.js" >/dev/null; then
+  echo "==> Starting runner detached (no ./run.sh or RunnerService.js alive)"
+  nohup ./run.sh >"$RUNNER_DIR/logs/runner.log" 2>&1 </dev/null &
+  # disown removes the job from the shell's job table so SIGHUP from
+  # the ssh session exiting can't propagate to the runner. Safe under
+  # non-interactive shells too (errors silently when no job to act on).
+  disown $! 2>/dev/null || true
+  echo "    PID=$!  logs at $RUNNER_DIR/logs/runner.log"
 fi
 
 # 5. Unraid-specific persistence. /boot/config/go runs at the very end of
@@ -147,17 +180,25 @@ $PERSIST_MARKER
 [ -x "$RUNNER_DIR/run.sh" ] && {
   export RUNNER_ALLOW_RUNASROOT=1
   cd "$RUNNER_DIR"
-  ./svc.sh install "${RUNNER_NAME}" 2>/dev/null || true
-  if ! ./svc.sh status 2>/dev/null | grep -qiE 'active|running|started'; then
-    if ./svc.sh start 2>/dev/null; then :; else
-      # pgrep guard: don't accumulate two runners from consecutive
-      # boots if svc.sh keeps failing for the same /etc-transient
-      # reason. The first forked runner stays connected; subsequent
-      # boots just confirm it's still running.
-      if ! pgrep -f "$RUNNER_DIR/run.sh" >/dev/null; then
-        nohup ./run.sh >"$RUNNER_DIR/logs/runner.log" 2>&1 &
-      fi
-    fi
+  # mkdir logs on every boot in case Unraid array reset wiped
+  # /mnt/user/appdata; the nohup redirect below writes into this dir
+  # and would silently fail otherwise.
+  mkdir -p "$RUNNER_DIR/logs"
+  # Legacy ./svc.sh path: works on hosts with persistent /etc +
+  # systemd/sysvinit. Best-effort on Unraid where /etc is RAM-backed.
+  [ -x ./svc.sh ] && {
+    ./svc.sh install "${RUNNER_NAME}" 2>/dev/null || true
+    ./svc.sh start 2>/dev/null || true
+  }
+  # Canonical Unraid path: pgrep guard, then detached nohup if neither
+  # the wrapper nor RunnerService.js is alive. The guard prevents
+  # accumulating a second runner across consecutive Unraid boots where
+  # svc.sh keeps failing for the same /etc reason.
+  sleep 2
+  if ! pgrep -f "$RUNNER_DIR/run.sh" >/dev/null && \
+     ! pgrep -f "RunnerService.js" >/dev/null; then
+    nohup ./run.sh >"$RUNNER_DIR/logs/runner.log" 2>&1 </dev/null &
+    disown $! 2>/dev/null || true
   fi
 }
 EOF
