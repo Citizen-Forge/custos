@@ -109,6 +109,20 @@ async function describeProviders(runtime: Runtime) {
 export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): void {
   const oauthFlows = new OAuthFlowTracker();
 
+  app.get("/admin/api/version", async () => {
+    // Prefer the COMMIT_SHA env var (set as a Docker build arg), fall
+    // back to live git (works in local dev but not inside the container
+    // unless .git is copied -- we don't, because it's large).
+    let commit = process.env.COMMIT_SHA;
+    if (!commit) {
+      try {
+        const { execSync } = await import("node:child_process");
+        commit = execSync("git rev-parse --short HEAD", { encoding: "utf8", timeout: 3000 }).trim();
+      } catch { /* ignore -- fall back to unknown */ }
+    }
+    return { commit: commit || null };
+  });
+
   app.get("/admin", async (_req, reply) => {
     const html = await readFile(join(process.cwd(), "public", "admin.html"), "utf8");
     reply.header("content-type", "text/html; charset=utf-8");

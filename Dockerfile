@@ -21,6 +21,8 @@ COPY ui/ ./
 RUN npm run build
 
 FROM base AS runtime
+ARG COMMIT_SHA
+ENV COMMIT_SHA=${COMMIT_SHA}
 ENV NODE_ENV=production
 
 # The engineering pipeline runs real development work in here, so the tools

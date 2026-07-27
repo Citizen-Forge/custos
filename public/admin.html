@@ -158,7 +158,10 @@
     <h1>Custos</h1>
     <p>Providers, projects, and agent orchestration</p>
   </div>
-  <button onclick="fetch('/logout', {method: 'POST'}).then(() => location.href = '/login')">Log out</button>
+  <div style="display: flex; align-items: center; gap: 10px;">
+    <span id="commit-hash" class="small" style="font-size: 11px; font-family: monospace;"></span>
+    <button onclick="fetch('/logout', {method: 'POST'}).then(() => location.href = '/login')">Log out</button>
+  </div>
 </header>
 <main id="app">
   <section class="panel"><p class="small">Loading…</p></section>
@@ -266,6 +269,14 @@ async function api(path, opts = {}) {
 
 async function loadState() {
   state = await api("/admin/api/state");
+  // Fetch version (commit hash) and display in header.
+  api("/admin/api/version").then((v) => {
+    const el = document.getElementById("commit-hash");
+    if (el && v.commit) {
+      el.textContent = v.commit;
+      el.title = `Deployed commit: ${v.commit}`;
+    }
+  }).catch(() => {/* version endpoint is informational only */});
   state.projects = (await api("/admin/api/projects")).projects;
   for (const project of state.projects) {
     // Chats are lazy-loaded on first click of the chat toggle — no pre-fetch.
