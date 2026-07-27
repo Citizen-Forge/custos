@@ -899,7 +899,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         }
       }
 
-      await updateSettings(projectId, { pmConfigured: true });
+      await updateSettings(projectId, { pmConfigured: true, pmLastRunAt: Date.now() });
       this.emit(
         "activity",
         projectId,

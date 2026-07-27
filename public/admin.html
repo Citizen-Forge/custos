@@ -269,11 +269,13 @@ async function loadState() {
   state.projects = (await api("/admin/api/projects")).projects;
   for (const project of state.projects) {
     project.chats = (await api(`/admin/api/projects/${project.id}/chats`)).chats;
-    // Fetch per-project settings which include budget + spend data.
+    // Fetch per-project settings which include budget + spend data AND agent roster.
     const settingsResp = await api(`/admin/api/projects/${project.id}/settings`);
     project.budget = settingsResp.settings.budget;
     project.spentUsd = settingsResp.spentUsd ?? 0;
     project.subscriptionUsd = settingsResp.subscriptionUsd ?? 0;
+    project.agents = settingsResp.agents ?? [];
+    project.pmLastRunAt = settingsResp.settings.pmLastRunAt ?? null;
   }
   state.recentConversations = (await api("/admin/api/remote/conversations")).conversations;
   render();
@@ -888,6 +890,32 @@ function renderProject(project) {
   // Budget bar (only when a monthly cap is configured).
   const budgetBar = renderBudgetBar(project);
   if (budgetBar) wrap.appendChild(budgetBar);
+
+  // Agent roster — shows provider/model per role, PM timestamp, and a
+  // re-assign button so operators can see at a glance whether a recent
+  // provider edit or budget cap change needs a fresh assignment pass.
+  const roster = project.agents || [];
+  const roleLabels = { "product-owner": "PO", "engineering-manager": "EM", engineer: "Eng", qa: "QA", devops: "DevOps", "project-manager": "PM" };
+  const roleOrder = ["product-owner", "engineering-manager", "engineer", "qa", "devops"];
+  // Only show the built-in roles the PM assigns, excluding the PM itself and steering.
+  // Use roleOrder to guarantee deterministic display: PO, EM, Eng, QA, DevOps.
+  const byRole = new Map(roster.filter((a) => roleOrder.includes(a.role)).map((a) => [a.role, a]));
+  const shown = roleOrder.map((r) => byRole.get(r)).filter(Boolean);
+  if (shown.length) {
+    const rosterRow = el("div", { class: "row", style: "flex-wrap: wrap; gap: 4px 8px;" });
+    for (const agent of shown) {
+      rosterRow.appendChild(el("span", { class: `badge ${agent.role === "engineer" ? "warn" : "ok"}`, text: `${roleLabels[agent.role] || agent.role}: ${agent.providerKey}/${agent.model}` }));
+    }
+    // PM last-run timestamp (only shown if the PM has ever run).
+    if (project.pmLastRunAt) {
+      const pmDate = new Date(project.pmLastRunAt);
+      rosterRow.appendChild(el("span", { class: "small", text: `PM assigned ${pmDate.toLocaleDateString()} ${pmDate.toLocaleTimeString()}` }));
+    }
+    rosterRow.appendChild(el("button", { text: "Re-assign", onclick: () => reloadAfter(
+      api(`/admin/api/projects/${project.id}/reassign-models`, { method: "POST" }), "Project Manager re-assigning models"
+    )}));
+    wrap.appendChild(rosterRow);
+  }
 
   wrap.appendChild(el("div", { class: "row" }, [
     el("button", { text: "New chat", onclick: () => reloadAfter(

@@ -238,6 +238,10 @@ export interface ProjectSettings {
    * orchestrator runs the PM on every tick (once per project) to seed
    * the roster with budget-aware model choices. */
   pmConfigured: boolean;
+  /** When the Project Manager last completed an assignment pass. Null when
+   * the PM has never run. Rendered in the project card so operators can see
+   * whether a recent provider or budget edit needs a manual reassignment. */
+  pmLastRunAt: number | null;
   updatedAt: number;
 }
 
@@ -254,6 +258,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     budget: { monthlyUsd: null, infraMonthlyUsd: null },
     paused: false,
     pmConfigured: false,
+    pmLastRunAt: null,
     autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,

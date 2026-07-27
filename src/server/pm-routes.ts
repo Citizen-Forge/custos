@@ -224,8 +224,10 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
 
   app.get("/admin/api/projects/:id/settings", async (req) => {
     const { id } = req.params as { id: string };
+    await agentStore.ensureProjectAgents(id);
     return {
       settings: await getSettings(id),
+      agents: await agentStore.listAgents(id),
       spentUsd: await runs.monthlySpendUsd(id),
       subscriptionUsd: await runs.monthlyUnbilledUsd(id),
     };
