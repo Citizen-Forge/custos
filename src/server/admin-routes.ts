@@ -110,17 +110,8 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
   const oauthFlows = new OAuthFlowTracker();
 
   app.get("/admin/api/version", async () => {
-    // Prefer the COMMIT_SHA env var (set as a Docker build arg), fall
-    // back to live git (works in local dev but not inside the container
-    // unless .git is copied -- we don't, because it's large).
-    let commit = process.env.COMMIT_SHA;
-    if (!commit) {
-      try {
-        const { execSync } = await import("node:child_process");
-        commit = execSync("git rev-parse --short HEAD", { encoding: "utf8", timeout: 3000 }).trim();
-      } catch { /* ignore -- fall back to unknown */ }
-    }
-    return { commit: commit || null };
+    const { getCommitHash } = await import("../version.js");
+    return { commit: await getCommitHash() };
   });
 
   app.get("/admin", async (_req, reply) => {
