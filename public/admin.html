@@ -322,17 +322,8 @@ async function startOAuthFlow() {
   }
 }  // -- Model provider instances (new providers shape) ------------------
 
-function providerModelList(prov) {
-  // Return comma-separated enabled model names, with a count of total.
-  const enabled = (prov.models || []).filter(m => m.enabled).map(m => m.name);
-  const total = (prov.models || []).length;
-  if (!enabled.length) return "—";
-  const label = enabled.join(", ");
-  return total > enabled.length ? `${label} (+${total - enabled.length} disabled)` : label;
-}
-
 function enterEditRow(row, name, prov) {
-  const wrapper = el("td", { colspan: "9" });
+  const wrapper = el("td", { colspan: "8" });
   const form = el("div");
 
   const urlInput = el("input", { type: "text", value: prov.baseUrl });
@@ -504,17 +495,27 @@ function renderProvidersPanel() {
 
   const table = el("table");
   table.appendChild(el("tr", {}, [
-    el("th", { text: "Name" }), el("th", { text: "Base URL" }), el("th", { text: "Models" }), el("th", { text: "Type" }), el("th", { text: "API key" }), el("th", { text: "Throttle" }), el("th", { text: "RPM" }), el("th", { text: "Priority" }), el("th", { text: "" }),
+    el("th", { text: "Provider" }), el("th", { text: "Base URL" }), el("th", { text: "Type" }), el("th", { text: "API key" }), el("th", { text: "Throttle" }), el("th", { text: "RPM" }), el("th", { text: "Priority" }), el("th", { text: "" }),
   ]));
   for (const [name, prov] of Object.entries(state.providers)) {
     const throttleText = prov.maxConcurrent == null ? "—" : String(prov.maxConcurrent);
     const rpmText = prov.rpmLimit == null ? "—" : String(prov.rpmLimit);
     const priorityText = prov.priority == null ? "—" : (prov.priority === "interactive" ? "Interactive" : "Background");
     const costLabel = { free: "Free", subscription: "Sub", metered: "Metered" }[prov.costType] || prov.costType || "?";
-    const dataRow = el("tr", {}, [
-      el("td", { text: name }),
+    const expanded = true; // start expanded
+    const dataRow = el("tr", { class: "provider-row" }, [
+      el("td", { style: "cursor: pointer;", onclick: (ev) => {
+        // Toggle visibility of model detail rows beneath this provider.
+        let sib = dataRow.nextElementSibling;
+        while (sib && sib.classList.contains("model-detail")) {
+          const hidden = sib.style.display === "none";
+          sib.style.display = hidden ? "" : "none";
+          sib = sib.nextElementSibling;
+        }
+        const toggle = ev.currentTarget.querySelector(".provider-toggle");
+        if (toggle) toggle.textContent = toggle.textContent === "▾" ? "▸" : "▾";
+      } }),
       el("td", { text: prov.baseUrl }),
-      el("td", { text: providerModelList(prov) }),
       el("td", { text: costLabel }),
       el("td", { text: prov.apiKeyConfigured ? prov.apiKeyMasked : "—" }),
       el("td", { text: throttleText }),
@@ -527,7 +528,34 @@ function renderProvidersPanel() {
         )}),
       ]),
     ]);
+    // Insert toggle icon as the first child of the first cell.
+    dataRow.cells[0].insertBefore(el("span", { class: "provider-toggle", style: "margin-right: 6px;", text: "▾" }), dataRow.cells[0].firstChild);
+    dataRow.cells[0].appendChild(el("strong", { text: name }));
     table.appendChild(dataRow);
+
+    // Model sub-rows — visible by default, toggled by clicking the provider name.
+    const models = prov.models || [];
+    for (const model of models) {
+      const modelRow = el("tr", { class: "model-detail" });
+      const modelTd = el("td", { colspan: "8", style: "padding: 2px 8px 2px 28px; font-size: 12px; border-bottom: none;" });
+      modelTd.appendChild(el("span", {
+        class: `badge ${model.enabled ? "ok" : "off"}`,
+        style: "font-size: 10px; padding: 1px 5px; margin-right: 6px;",
+        text: model.enabled ? "✓" : "✕",
+      }));
+      modelTd.appendChild(el("code", { style: "font-size: 12px;", text: model.name }));
+      if (model.pricing) {
+        modelTd.appendChild(el("span", { class: "small", style: "margin-left: 12px;", text: `In: $${model.pricing.inputPerMillion}/1M  Out: $${model.pricing.outputPerMillion}/1M` }));
+      } else {
+        modelTd.appendChild(el("span", { class: "small", style: "margin-left: 12px;", text: "—" }));
+      }
+      modelRow.appendChild(modelTd);
+      table.appendChild(modelRow);
+    }
+    // Separator row between providers
+    table.appendChild(el("tr", { class: "model-detail" }, [
+      el("td", { colspan: "8", style: "padding: 0; border-bottom: 1px solid var(--border); height: 0;" }),
+    ]));
   }
   section.appendChild(table);
 
