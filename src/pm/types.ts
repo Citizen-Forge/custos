@@ -95,7 +95,7 @@ export interface Idea {
   updatedAt: number;
 }
 
-export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops";
+export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops" | "project-manager";
 
 export interface CostProfile {
   inputPerMTok: number;
@@ -233,6 +233,11 @@ export interface ProjectSettings {
   /** Model alias the Steering Co tab runs on. Deliberately a high-end model
    * -- the whole point of that tab is a hard-to-fool sparring partner. */
   steeringModel: string;
+  /** Whether the Project Manager agent has run at least once to assign
+   * provider/models to the built-in roles. Until this is true the
+   * orchestrator runs the PM on every tick (once per project) to seed
+   * the roster with budget-aware model choices. */
+  pmConfigured: boolean;
   updatedAt: number;
 }
 
@@ -248,7 +253,8 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     deployConfig: {},
     budget: { monthlyUsd: null, infraMonthlyUsd: null },
     paused: false,
-    autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false },
+    pmConfigured: false,
+    autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,
     updatedAt: Date.now(),

@@ -13,6 +13,7 @@ export const ROLE_DEFAULT_MODEL: Record<AgentRole, [providerKey: string, model: 
   engineer: ["anthropic", "claude-sonnet-5"],
   qa: ["anthropic", "claude-sonnet-5"],
   devops: ["anthropic", "claude-sonnet-5"],
+  "project-manager": ["anthropic", "claude-sonnet-5"],
 };
 
 /**
@@ -274,15 +275,6 @@ You are given a monthly infrastructure budget for this project and what has been
 - Deployments must be reversible: keep the previous version recoverable, and say in your report how to roll back.
 - Never commit credentials, and never print secret values in your report — reference them by name.`;
 
-export const ROLE_PROMPTS: Record<AgentRole, string> = {
-  steering: STEERING_PROMPT,
-  "product-owner": PRODUCT_OWNER_PROMPT,
-  "engineering-manager": ENGINEERING_MANAGER_PROMPT,
-  engineer: ENGINEER_PROMPT,
-  qa: QA_PROMPT,
-  devops: DEVOPS_PROMPT,
-};
-
 /** Output shapes, kept next to the prompts they belong to so a change to
  * one is visibly a change to the other. Each is fed through
  * outputContract() with the tag the orchestrator parses for. */
@@ -365,6 +357,65 @@ export const PROVISION_SHAPE = `{
   "defaultBranch": "the branch name you initialised, or null",
   "blockedReason": "when status is blocked; otherwise null"
 }`;
+
+
+
+export const PROJECT_MANAGER_PROMPT = `You are the Project Manager for this software project. Your job is to decide which provider and model each built-in role should use, given the project's budget and the available providers.
+
+You run once when the project is created. After that, the engineering manager handles per-ticket model selection, and you are only called again when the operator asks you to re-evaluate.
+
+## What you decide
+
+For each role listed below, pick a provider and model from the menu you're given. Consider:
+
+- **Budget**: if the project has a monthly USD cap, reserve high-end metered models for work that genuinely needs them. Free and subscription models should handle the routine load.
+- **Role purpose**: QA and DevOps need reliable, deterministic models that follow instructions closely — they review code and run infrastructure. The Product Owner plans roadmaps and needs broad knowledge and good judgement. The Engineering Manager makes cost-quality decisions about other agents.
+- **Provider cost type**:
+  - **Free** (Ollama, Gemini Free): good for routine work, often rate-limited or slower. Route QA and DevOps here if they're reliable enough for the project.
+  - **Subscription** (Anthropic via OAuth): no per-token cost, strong models. The natural home for the EM, PO, and hard tickets.
+  - **Metered** (OpenAI, Anthropic API key): pay per token. Reserve for high-value work where free models aren't good enough.
+- **Capability rating**: models with higher ratings have proven more reliable on this project's codebase.
+- **Availability**: skip models that are currently unavailable (cooldown, exhausted window).
+
+## Roles to assign
+
+Each role needs a providerKey and model from the menu:
+
+1. **product-owner** — plans roadmaps, grooms backlog, writes stories. Needs strong reasoning and broad knowledge.
+2. **engineering-manager** — sizes tickets, assigns engineers, tunes agent prompts. Needs strong judgement.
+3. **engineer** — writes code. May cover different complexity levels; the EM will create specialists as needed.
+4. **qa** — reviews code, runs tests, bounces failing work. Needs reliability and instruction-following.
+5. **devops** — provisions repos, deploys builds. Needs reliability and infrastructure knowledge.
+
+## Rules
+
+- Every role must get a valid providerKey+model from the menu. No empty assignments.
+- Prefer free models for routine work (QA, DevOps) when the project has a budget cap.
+- Keep the EM and PO on the strongest available models — their decisions affect everyone else.
+- If the budget is null (unlimited), you have more freedom to use metered models.
+- If only one provider is configured, assign everything to it and note the risk.`;
+
+export const ASSIGN_MODELS_SHAPE = `{
+  "assignments": [
+    {
+      "role": "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops",
+      "providerKey": "exactly one of the providerKey values from the menu",
+      "model": "exactly one of the model values from the menu, paired with that providerKey",
+      "rationale": "one line: why this provider/model for this role"
+    }
+  ],
+  "notes": "any observations about provider availability, budget constraints, or risks the operator should know"
+}`
+
+export const ROLE_PROMPTS: Record<AgentRole, string> = {
+  steering: STEERING_PROMPT,
+  "product-owner": PRODUCT_OWNER_PROMPT,
+  "engineering-manager": ENGINEERING_MANAGER_PROMPT,
+  engineer: ENGINEER_PROMPT,
+  qa: QA_PROMPT,
+  devops: DEVOPS_PROMPT,
+  "project-manager": PROJECT_MANAGER_PROMPT,
+};
 
 export const DEVOPS_SHAPE = `{
   "status": "deployed" | "blocked",

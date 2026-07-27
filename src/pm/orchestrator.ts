@@ -12,8 +12,8 @@ import { ensureWorkspace, isGitRepo, releaseWorkspace } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
 import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-registry.js";
 import { hasGitCredentials, listSecrets } from "./vault.js";
-import { ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
-import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProvisionContract, QaContract } from "./contracts.js";
+import { ASSIGN_MODELS_SHAPE, ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
+import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, ProjectSettings, WorkItem } from "./types.js";
 
 const TICK_MS = Number(process.env.CUSTOS_ORCHESTRATOR_TICK_MS ?? 20_000);
@@ -118,6 +118,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     if (await this.overBudget(project.id, settings)) return;
+
+    // Run the Project Manager on the first tick to assign provider/models
+    // to the built-in roles based on budget and available providers. After
+    // that, the engineering manager handles per-ticket model selection.
+    if (!settings.pmConfigured && settings.autonomy["project-manager"]) {
+      void this.assignModels(project.id);
+      return;
+    }
 
     if (settings.autonomy["product-owner"]) {
       const inbox = (await ideas.listIdeas(project.id)).filter((idea) => idea.status === "inbox");
@@ -794,6 +802,109 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
       const recorded = (await listFacts(projectId)).length;
       this.emit("activity", projectId, `Codebase survey complete — ${recorded} fact(s) now recorded for this project.`);
+    });
+  }
+
+  // ------------------------------------------------------- project manager
+
+  /**
+   * Asks the Project Manager agent to assign a provider and model to each
+   * built-in role based on the project's budget and the available providers.
+   * Runs once on the first tick. After this, `pmConfigured` is set to true
+   * and the orchestrator never runs the PM again for this project (except on
+   * manual re-trigger).
+   */
+  async assignModels(projectId: string): Promise<void> {
+    await this.guard(`assign-models:${projectId}`, projectId, async (signal) => {
+      const ctx = await this.resolve(projectId, "project-manager");
+      if (!ctx) return;
+
+      const menu = agentStore.listProviderOptions(this.runtime.config);
+      const models = await syncFromConfig(
+        this.runtime.config,
+        menu.filter((option) => option.providerKey === "anthropic").map((option) => option.model),
+      );
+      const allAgents = await agentStore.listAgents(projectId);
+      const roster = allAgents.filter((a) => a.role !== "project-manager" && a.role !== "steering");
+
+      const prompt = [
+        await this.projectHeader(ctx.project, ctx.settings),
+        "",
+        "## Your task",
+        "",
+        `This project has a monthly budget of ${ctx.settings.budget.monthlyUsd === null ? "unlimited" : `$${ctx.settings.budget.monthlyUsd}`}. Assign a provider and model to each role below, choosing from the provider menu.`,
+        "",
+        `The following roles need assignments:`,
+        ...roster.map((a) => `- **${a.role}** (currently on ${a.providerKey}/${a.model})`),
+        "",
+        "## Provider and model menu",
+        "",
+        renderModelMenu(models),
+        "",
+        "## Budget and constraints",
+        "",
+        ctx.settings.budget.monthlyUsd !== null
+          ? `Metered spend: $${await this.runtime.spendTracker.getProjectSpend(projectId).catch(() => 0)} of $${ctx.settings.budget.monthlyUsd} used.`
+          : "No budget cap — all providers are available.",
+        "",
+        "Assign every role. Use the menu's providerKey and model values exactly as shown.",
+      ].join("\n");
+
+      const result = await runAgent<ProjectManagerContract>(this.runtime, {
+        signal,
+        agent: ctx.agent,
+        projectId,
+        cwd: ctx.project.workspaceDir,
+        prompt,
+        tag: "custos-assign-models",
+        outputContract: outputContract("custos-assign-models", ASSIGN_MODELS_SHAPE),
+      });
+
+      await this.applyFacts(projectId, ctx.agent, result.parsed);
+
+      if (!result.ok || !result.parsed?.assignments?.length) {
+        this.emit("activity", projectId, `Project Manager failed: ${result.error ?? "no assignments returned"}`);
+        // Don't set pmConfigured so it retries on the next tick.
+        return;
+      }
+
+      // Build a map of current agents by role for quick lookup.
+      const agentByRole = new Map(roster.map((a) => [a.role, a]));
+      // Only provider keys that actually exist may be assigned.
+      const knownProviders = new Set(menu.map((option) => option.providerKey));
+      let changed = 0;
+
+      for (const assignment of result.parsed.assignments) {
+        if (!assignment.role || !assignment.providerKey || !assignment.model) continue;
+        if (!knownProviders.has(assignment.providerKey)) {
+          this.emit("activity", projectId, `PM: skipped "${assignment.role}" — unknown provider "${assignment.providerKey}"`);
+          continue;
+        }
+        const agent = agentByRole.get(assignment.role);
+        if (!agent) {
+          this.emit("activity", projectId, `PM: skipped "${assignment.role}" — no agent found for this role`);
+          continue;
+        }
+        // Only update if the assignment actually changes something.
+        if (agent.providerKey !== assignment.providerKey || agent.model !== assignment.model) {
+          await agentStore.updateAgent(agent.id, {
+            providerKey: assignment.providerKey,
+            model: assignment.model,
+          });
+          await agentStore.appendAgentNote(
+            agent.id,
+            `Project Manager assigned ${assignment.providerKey}/${assignment.model} for ${assignment.role}${assignment.rationale ? `: ${assignment.rationale}` : ""}`,
+          );
+          changed++;
+        }
+      }
+
+      await updateSettings(projectId, { pmConfigured: true });
+      this.emit(
+        "activity",
+        projectId,
+        `Project Manager assigned models to ${changed} role(s): ${result.parsed.assignments.map((a) => `${a.role} → ${a.providerKey}/${a.model}`).join(", ")}`,
+      );
     });
   }
 

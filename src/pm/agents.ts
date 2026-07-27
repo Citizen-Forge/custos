@@ -156,14 +156,34 @@ export function listProviderOptions(config: GatewayConfig): ProviderOption[] {
   for (const model of ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]) {
     options.push({ providerKey: "anthropic", model, free: anthropicFree, inputPerMTok: null, outputPerMTok: null, budgetUsd: null });
   }
+  // Prefer the new providers shape with its model list.
+  if (config.providers) {
+    for (const [key, def] of Object.entries(config.providers)) {
+      for (const modelDef of def.models) {
+        if (!modelDef.enabled) continue;
+        const pricing = modelDef.pricing;
+        options.push({
+          providerKey: key,
+          model: modelDef.name,
+          free: !pricing,
+          inputPerMTok: pricing?.inputPerMillion ?? null,
+          outputPerMTok: pricing?.outputPerMillion ?? null,
+          budgetUsd: null, // Budget is now project-level, not provider-level.
+        });
+      }
+    }
+  }
+  // Also read from the deprecated shape for backward compat.
   for (const [key, instance] of Object.entries(config.openaiCompatibleInstances)) {
+    // Skip if already covered by the new providers shape (dedup by name).
+    if (options.some((o) => o.providerKey === key)) continue;
     options.push({
       providerKey: key,
       model: instance.model,
       free: !instance.pricing,
       inputPerMTok: instance.pricing?.inputPerMillion ?? null,
       outputPerMTok: instance.pricing?.outputPerMillion ?? null,
-      budgetUsd: instance.budget?.limitUsd ?? null,
+      budgetUsd: null,
     });
   }
   return options;
@@ -181,6 +201,7 @@ export async function ensureProjectAgents(projectId: string): Promise<AgentDef[]
     { role: "qa", name: "QA", maxComplexity: "high" },
     { role: "devops", name: "DevOps", maxComplexity: "high" },
     { role: "engineer", name: "Generalist Engineer", maxComplexity: "medium" },
+    { role: "project-manager", name: "Project Manager", maxComplexity: "high" },
   ];
   for (const spec of roles) {
     const existing = await agents.find((row) => row.projectId === projectId && row.role === spec.role);

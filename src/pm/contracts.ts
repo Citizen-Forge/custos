@@ -98,6 +98,16 @@ export interface DevopsContract extends WithFacts {
   blockedReason?: string | null;
 }
 
+export interface ProjectManagerContract extends WithFacts {
+  assignments?: Array<{
+    role: "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops";
+    providerKey: string;
+    model: string;
+    rationale?: string;
+  }>;
+  notes?: string;
+}
+
 /** Emitted by the steering chat when the user hands an idea off. Parsed out
  * of ordinary assistant text rather than a contract run, since steering is
  * an interactive chat and not an orchestrated agent. */
