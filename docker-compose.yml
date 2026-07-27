@@ -1,6 +1,10 @@
 services:
   gateway:
-    build: .
+    # CI pushes `:main` on every push to main; `docker compose pull gateway
+    # && docker compose up -d --no-deps gateway` keeps consumers current
+    # with the rolling tag (see .github/workflows/docker-image.yml). For
+    # in-place development instead, swap this for `build: .`.
+    image: ghcr.io/citizen-forge/custos:main
     ports:
       - "8787:8787"
     environment:
