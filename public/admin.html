@@ -825,7 +825,25 @@ function renderProjectsPanel() {
         const badgesRow = el("div", { style: "display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; align-items: center;" });
         for (const agent of shown) {
           // Compact badge: just providerKey/model, no role label (shown by position)
-          badgesRow.appendChild(el("span", { class: `badge ${agent.role === "engineer" ? "warn" : "ok"}`, style: "font-size: 10px; padding: 1px 5px;", text: `${roleLabels[agent.role]}:${agent.model.includes("/") ? agent.model.split("/").pop() : agent.model}` }));
+          // Build a tooltip with the full providerKey/model, specialty, and QA stats.
+          const tooltipLines = [`${agent.providerKey}/${agent.model}`];
+          if (agent.specialty) tooltipLines.push(`Specialty: ${agent.specialty}`);
+          const { assigned, completed, qaRejections } = agent.stats || {};
+          const statsParts = [];
+          if (assigned != null) statsParts.push(`Assigned: ${assigned}`);
+          if (completed != null) statsParts.push(`Done: ${completed}`);
+          if (qaRejections != null) statsParts.push(`QA ✘: ${qaRejections}`);
+          if (statsParts.length) tooltipLines.push(statsParts.join(" | "));
+          if (agent.notes?.length) {
+            const lastNote = agent.notes[agent.notes.length - 1];
+            tooltipLines.push(`Last note: ${lastNote.length > 80 ? lastNote.slice(0, 80) + "..." : lastNote}`);
+          }
+          badgesRow.appendChild(el("span", {
+            class: `badge ${agent.role === "engineer" ? "warn" : "ok"}`,
+            style: "font-size: 10px; padding: 1px 5px; cursor: help;",
+            title: tooltipLines.join("\n"),
+            text: `${roleLabels[agent.role]}:${agent.model.includes("/") ? agent.model.split("/").pop() : agent.model}`,
+          }));
         }
         if (project.pmLastRunAt) {
           const pmDate = new Date(project.pmLastRunAt);
