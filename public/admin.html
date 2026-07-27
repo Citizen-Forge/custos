@@ -312,12 +312,11 @@ function render() {
   app.appendChild(renderSecurityPanel());
 }
 
-async function startOAuthFlow() {
+async function startOAuthFlow(area) {
   const mode = confirm("Use your Claude Pro/Max subscription? Cancel to create an API key instead (Console mode).") ? "max" : "console";
   try {
     const { flowId, authorizationUrl } = await api("/admin/api/oauth/start", { method: "POST", body: { mode } });
     window.open(authorizationUrl, "_blank");
-    const area = $("#oauth-flow-area");
     area.innerHTML = "";
     const row = el("div", { class: "row" });
     row.appendChild(el("label", { text: "Code" }));
@@ -331,7 +330,9 @@ async function startOAuthFlow() {
   } catch (err) {
     showToast(err.message, true);
   }
-}  // -- Model provider instances (new providers shape) ------------------
+}
+
+  // -- Model provider instances (new providers shape) ------------------
 
 function enterEditRow(row, name, prov) {
   const wrapper = el("td", { colspan: "8" });
@@ -481,7 +482,7 @@ function renderProvidersPanel() {
   if (anthropic.oauth.connected) {
     oauthRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px; color: var(--danger);", text: "Disconnect OAuth", onclick: () => reloadAfter(api("/admin/api/oauth/disconnect", { method: "POST" }), "OAuth disconnected") }));
   } else {
-    oauthRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Connect OAuth", onclick: startOAuthFlow }));
+    oauthRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Connect OAuth", onclick: () => startOAuthFlow($("#oauth-flow-area")) }));
   }
   anthSection.appendChild(oauthRow);
   anthSection.appendChild(el("div", { id: "oauth-flow-area", style: "margin-top: 4px;" }));
