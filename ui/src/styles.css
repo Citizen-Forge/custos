@@ -877,6 +877,10 @@ input[type='password'] {
   background: rgba(217, 193, 91, 0.18);
   color: var(--warn);
 }
+.badge.stalled {
+  background: rgba(217, 112, 91, 0.18);
+  color: var(--danger);
+}
 .badge.succeeded {
   background: rgba(91, 217, 143, 0.18);
   color: var(--ok);
@@ -1324,6 +1328,9 @@ input[type='password'] {
   border-radius: 8px;
 }
 .running-row.stalled {
+  border-left-color: var(--warn);
+}
+.running-row.waiting {
   border-left-color: var(--warn);
 }
 .running-head {

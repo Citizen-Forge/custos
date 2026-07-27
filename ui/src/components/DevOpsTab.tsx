@@ -301,11 +301,33 @@ export default function DevOpsTab({
         {activity?.active.length ? (
           <div className="running-list">
             {activity.active.map((run) => {
+              const timeSinceLastEvent = Date.now() - run.lastEventAt
               const stalled = activity.stalledRunIds.includes(run.id)
+              // Three-tier status: actively producing events (<2min), waiting
+              // in provider queue (2-6min, still within the stall threshold), or
+              // genuinely stalled (>6min, no events beyond the threshold). The
+              // middle tier is the one that looks like it's stuck but isn't —
+              // the agent is waiting for a throttled provider slot to free up.
+              // 2-minute lull threshold avoids flickering on slow CoT models
+              // that routinely spend 90-120s thinking between tool calls.
+              const status: 'running' | 'waiting' | 'stalled' =
+                stalled ? 'stalled' :
+                timeSinceLastEvent < 120_000 ? 'running' :
+                'waiting'
+              const statusBadge = {
+                running: <span className="badge working">running</span>,
+                waiting: <span className="badge warn">waiting</span>,
+                stalled: <span className="badge stalled">no activity</span>,
+              }[status]
+              const statusHint = {
+                running: 'actively processing',
+                waiting: 'waiting in queue for provider',
+                stalled: 'no events for over 6 minutes — may be hung',
+              }[status]
               return (
-                <div key={run.id} className={`running-row${stalled ? ' stalled' : ''}`}>
+                <div key={run.id} className={`running-row${stalled ? ' stalled' : status === 'waiting' ? ' waiting' : ''}`}>
                   <div className="running-head">
-                    <span className={`badge ${stalled ? 'warn' : 'working'}`}>{stalled ? 'no activity' : 'running'}</span>
+                    {statusBadge}
                     <strong>{run.role}</strong>
                     <span className="muted">
                       {run.providerKey}/{run.model}
@@ -314,8 +336,15 @@ export default function DevOpsTab({
                     <span className="muted">{run.toolCalls} tool calls</span>
                   </div>
                   <div className="running-action">
-                    {run.currentAction ?? 'thinking…'}
-                    <span className="muted"> · last moved {relativeTime(run.lastEventAt)}</span>
+                    {run.currentAction
+                      ? run.currentAction
+                      : status === 'waiting'
+                        ? <span className="muted">waiting for an available provider slot…</span>
+                        : <span className="muted">thinking…</span>
+                    }
+                    <span className="muted" title={statusHint}>
+                      {' · '}last moved {relativeTime(run.lastEventAt)}
+                    </span>
                   </div>
                 </div>
               )
