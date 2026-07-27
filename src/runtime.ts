@@ -120,7 +120,6 @@ export class Runtime {
         model: defaultModel.name,
         apiKey: providerDef.apiKey,
         pricing: defaultModel.pricing,
-        budget: providerDef.budget,
         maxConcurrent: providerDef.maxConcurrent,
         rpmLimit: providerDef.rpmLimit,
         priority: providerDef.priority,

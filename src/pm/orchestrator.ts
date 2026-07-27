@@ -193,7 +193,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   private async overBudget(projectId: string, settings: ProjectSettings): Promise<boolean> {
     if (settings.budget.monthlyUsd === null) return false;
-    const spent = await runs.monthlySpendUsd(projectId);
+    const spent = await this.runtime.spendTracker.getProjectSpend(projectId);
     if (spent < settings.budget.monthlyUsd) return false;
     this.emit("activity", projectId, `Paused: this month's agent budget ($${settings.budget.monthlyUsd}) is spent.`);
     return true;

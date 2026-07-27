@@ -11,23 +11,19 @@ export interface BudgetConfig {
   periodDays: number;
 }
 
-interface SpendRecord {
+export interface SpendRecord {
   periodStart: number;
   spentUsd: number;
 }
 
 const SPEND_PATH = process.env.GATEWAY_SPEND_PATH ?? "data/spend.json";
-const DEFAULT_PERIOD_DAYS = 30;
 
 /**
- * Tracks cumulative $ spend per named provider instance so the router can
- * fall through to the next priority entry once a configured budget is
- * exhausted for its current period -- the same idea as the existing
- * rate-limit cooldown, just triggered by cumulative cost instead of a 429.
- * Fixed-window reset (not a true rolling window): once periodDays elapses
- * since the window started, the next request resets the counter rather
- * than decaying old spend continuously. Simpler, close enough for a
- * self-hosted spend cap.
+ * Tracks cumulative $ spend per project+provider pair, so the orchestrator
+ * can check a project's total spend against its monthly budget without
+ * re-aggregating individual run records. Keys are "${projectId}:${providerName}".
+ * Fixed-window reset (not a true rolling window): once a calendar month
+ * elapses since the period started, the next record resets the counter.
  */
 export class SpendTracker {
   private ledger: Record<string, SpendRecord> = {};
@@ -48,46 +44,70 @@ export class SpendTracker {
     await writeFile(SPEND_PATH, JSON.stringify(this.ledger, null, 2), "utf8");
   }
 
-  private periodMs(budget: BudgetConfig | undefined): number {
-    return (budget?.periodDays ?? DEFAULT_PERIOD_DAYS) * 24 * 60 * 60 * 1000;
+  private key(projectId: string, providerName: string): string {
+    return `${projectId}:${providerName}`;
   }
 
-  async isWithinBudget(instanceName: string, budget: BudgetConfig | undefined): Promise<boolean> {
-    if (!budget) return true;
-    await this.ensureLoaded();
-    const record = this.ledger[instanceName];
-    if (!record) return true;
-    if (Date.now() - record.periodStart > this.periodMs(budget)) return true; // period rolled over
-    return record.spentUsd < budget.limitUsd;
+  private periodMs(monthStart: number): number {
+    // A single calendar month from the period start.
+    const start = new Date(monthStart);
+    const next = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+    return next.getTime() - start.getTime();
   }
 
-  async getSpend(instanceName: string, budget: BudgetConfig | undefined): Promise<{ spentUsd: number; periodStart: number } | null> {
-    await this.ensureLoaded();
-    const record = this.ledger[instanceName];
-    if (!record) return null;
-    if (Date.now() - record.periodStart > this.periodMs(budget)) return null; // expired period reads as fresh
-    return record;
-  }
-
+  /**
+   * Record a direct cost in USD against a project+provider pair.
+   * Period resets on a calendar-month boundary from the first recorded
+   * cost for this project+provider pair.
+   */
   async record(
-    instanceName: string,
-    pricing: PricingConfig | undefined,
-    usage: { input_tokens: number; output_tokens: number },
-    budget: BudgetConfig | undefined,
+    projectId: string,
+    providerName: string,
+    costUsd: number,
   ): Promise<void> {
-    if (!pricing) return;
+    if (!costUsd || costUsd <= 0) return;
     await this.ensureLoaded();
 
-    const cost = (usage.input_tokens / 1_000_000) * pricing.inputPerMillion + (usage.output_tokens / 1_000_000) * pricing.outputPerMillion;
+    const k = this.key(projectId, providerName);
     const now = Date.now();
-    const existing = this.ledger[instanceName];
+    const existing = this.ledger[k];
 
-    if (!existing || now - existing.periodStart > this.periodMs(budget)) {
-      this.ledger[instanceName] = { periodStart: now, spentUsd: cost };
+    if (!existing || now - existing.periodStart > this.periodMs(existing.periodStart)) {
+      this.ledger[k] = { periodStart: now, spentUsd: costUsd };
     } else {
-      existing.spentUsd += cost;
+      existing.spentUsd += costUsd;
     }
 
     await this.save();
+  }
+
+  /**
+   * Total cost across all providers for this project since the start of
+   * the current period (per-provider periods may differ slightly since
+   * each starts on its first recorded cost). Returns 0 when nothing has
+   * been recorded for this project.
+   */
+  async getProjectSpend(projectId: string): Promise<number> {
+    await this.ensureLoaded();
+    let total = 0;
+    const prefix = `${projectId}:`;
+    for (const [k, record] of Object.entries(this.ledger)) {
+      if (!k.startsWith(prefix)) continue;
+      const elapsed = Date.now() - record.periodStart;
+      if (elapsed <= this.periodMs(record.periodStart)) {
+        total += record.spentUsd;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Return every spend record keyed by `${projectId}:${providerName}` that
+   * is still within its period. Used by internal tooling and debugging; the
+   * admin UI summarises via getProjectSpend.
+   */
+  async snapshot(): Promise<Record<string, SpendRecord>> {
+    await this.ensureLoaded();
+    return { ...this.ledger };
   }
 }

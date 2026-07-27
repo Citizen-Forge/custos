@@ -262,5 +262,15 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   // would contradict the very menu it decides from.
   await agents.recordRunResult(agent.id, { costUsd: billed ? (costUsd ?? undefined) : undefined, runMs });
 
+  // Also record against the project-level spend tracker so the
+  // orchestrator can check the project's budget without re-aggregating
+  // individual run records. Only billed (metered) spend counts.
+  if (billed && costUsd != null && costUsd > 0) {
+    // The project-level budget check doesn't need provider-level
+    // granularity for enforcement, but recording per-provider lets the
+    // admin surface show where the money went.
+    await runtime.spendTracker.record(projectId, agent.providerKey, costUsd);
+  }
+
   return { runId: run.id, ok, parsed, text: await redactSecrets(text), error, costUsd, runMs };
 }

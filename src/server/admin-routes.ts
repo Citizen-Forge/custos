@@ -8,7 +8,7 @@ import type { TaskKind, ComplexityTier } from "../types.js";
 import { startOAuthFlow, exchangeCode, type OAuthMode } from "../auth/oauth.js";
 import { getOAuthStatus, saveTokens, clearTokens } from "../auth/credentials.js";
 import { OAuthFlowTracker } from "../auth/oauth-flow-tracker.js";
-import type { PricingConfig, BudgetConfig } from "../providers/spend-tracker.js";
+import type { PricingConfig } from "../providers/spend-tracker.js";
 import type { Priority } from "../providers/types.js";
 
 const TASK_KINDS: TaskKind[] = ["general", "permissionClassifier", "memoryCurator", "complexityClassifier"];
@@ -82,8 +82,6 @@ async function describeProviders(runtime: Runtime) {
   if (!providers) return {};
   const entries = await Promise.all(
     Object.entries(providers).map(async ([name, def]) => {
-      const budget = def.budget;
-      const spend = budget ? await runtime.spendTracker.getSpend(name, budget) : null;
       // Expose pricing from the first enabled model so the admin UI's
       // Edit form can pre-fill its pricing fields (pricing is per-model
       // in the new shape but most providers have uniform pricing).
@@ -97,8 +95,6 @@ async function describeProviders(runtime: Runtime) {
           pricing: firstEnabled?.pricing ?? null,
           apiKeyConfigured: Boolean(def.apiKey),
           apiKeyMasked: def.apiKey ? maskApiKey(def.apiKey) : null,
-          budget: def.budget ?? null,
-          spentUsd: spend?.spentUsd ?? 0,
           maxConcurrent: def.maxConcurrent ?? null,
           rpmLimit: def.rpmLimit ?? null,
           priority: def.priority ?? null,
@@ -209,7 +205,7 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
 
   app.put("/admin/api/providers/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, priority, budget } = req.body as {
+    const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, priority } = req.body as {
       baseUrl: string;
       costType: "free" | "subscription" | "metered";
       models: { name: string; enabled: boolean; pricing?: PricingConfig | null }[];
@@ -217,7 +213,6 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
       maxConcurrent?: number | null;
       rpmLimit?: number | null;
       priority?: Priority | null;
-      budget?: BudgetConfig | null;
     };
     if (!baseUrl || !models?.length) {
       reply.code(400);
@@ -249,7 +244,6 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
           maxConcurrent: maxConcurrent ?? undefined,
           rpmLimit: rpmLimit ?? undefined,
           priority: priority ?? undefined,
-          budget: budget ?? undefined,
         },
       },
     }));
@@ -273,12 +267,11 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
   // Keep old instances endpoint working for backward compat.
   app.put("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, model, apiKey, pricing, budget, maxConcurrent, priority, rpmLimit } = req.body as {
+    const { baseUrl, model, apiKey, pricing, maxConcurrent, priority, rpmLimit } = req.body as {
       baseUrl: string;
       model: string;
       apiKey?: string | null;
       pricing?: PricingConfig | null;
-      budget?: BudgetConfig | null;
       maxConcurrent?: number | null;
       rpmLimit?: number | null;
       priority?: Priority | null;
@@ -315,7 +308,6 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
           maxConcurrent: maxConcurrent ?? undefined,
           rpmLimit: rpmLimit ?? undefined,
           priority: priority ?? undefined,
-          budget: budget ?? undefined,
         },
       },
     }));

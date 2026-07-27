@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import type { TaskKind, ComplexityTier } from "./types.js";
 import type { OpenAICompatibleInstanceConfig } from "./providers/openai-compatible.js";
 import type { Priority } from "./providers/types.js";
-import type { PricingConfig, BudgetConfig } from "./providers/spend-tracker.js";
+import type { PricingConfig } from "./providers/spend-tracker.js";
 
 export interface ProviderEntry {
   /** References either "anthropic" or a key in `openaiCompatibleInstances` (or
@@ -75,9 +75,6 @@ export interface ProviderDef {
   rpmLimit?: number;
   /** Per-instance throttle priority override. */
   priority?: Priority;
-  /** Monthly USD budget. Requires at least one metered model with pricing
-   * to actually enforce. */
-  budget?: BudgetConfig;
   /** Emit late vendor metadata deltas in streaming responses. */
   emitLateMetadataDelta?: boolean;
 }
@@ -200,7 +197,6 @@ function migrateInstanceToProvider(name: string, instance: OpenAICompatibleInsta
     apiKey: instance.apiKey,
     maxConcurrent: instance.maxConcurrent,
     priority: instance.priority,
-    budget: instance.budget,
     emitLateMetadataDelta: instance.emitLateMetadataDelta,
   };
 }

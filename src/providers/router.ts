@@ -136,19 +136,13 @@ export class ProviderRouter {
         continue;
       }
 
-      // Budget and priority come from either the new `providers` shape or
+      // Per-instance priority resolution. Precedence:
+      // Priority comes from either the new `providers` shape or
       // the deprecated `openaiCompatibleInstances` shape, whichever is
       // present. The router doesn't care about the hierarchy -- it only
       // needs the values associated with this provider name.
       const providerDef = this.config.providers?.[entry.provider];
       const instanceConfig = this.config.openaiCompatibleInstances[entry.provider];
-      const budget = providerDef?.budget ?? instanceConfig?.budget;
-      if (!(await this.spendTracker.isWithinBudget(entry.provider, budget))) {
-        skipped.push(`"${entry.provider}" has spent its configured budget for this period`);
-        continue;
-      }
-
-      // Per-instance priority resolution. Precedence:
       //   1. caller-supplied `options.priority` (highest)
       //   2. instance-pinned `priority` from config.json (overrides the
       //      task default for this provider specifically)
