@@ -1,43 +1,25 @@
 # Builds and pushes the Custos Docker image to ghcr.io.
 #
+# Runner strategy:
+#   - PRs (validate): GHA-managed ubuntu-latest. Fork PRs NEVER run on
+#     self-hosted runners (GitHub's secret-exfiltration guard); running
+#     them through `pull_request` on ubuntu-latest is the safe path.
+#   - Pushes (publish): self-hosted runner on the Unraid box. Docker.io
+#     round-trips stay on the LAN, the GHA ubuntu NAT flake stops
+#     mattering, and the GHA cache API isn't needed -- the host-level
+#     buildx cache at /tmp/custos-build-cache keeps pushes warm.
+#
 # Free-hosting rationale: GHCR is free for public GitHub repos with
 # unlimited storage and bandwidth. Docker Hub's free tier rate-limits
-# unauthenticated pulls to 100 per 6 hours, which breaks the
-# Unraid-pull-on-update flow. ECR / Quay would also work but require
-# extra accounts and credential plumbing.
+# unauthenticated pulls to 100 per 6 hours, which breaks Unraid's
+# anonymous `docker compose pull` flow. ECR / Quay would also work but
+# require extra accounts and credential plumbing.
 #
-# Trigger scope:
-#   - push to main: build + push to ghcr.io with :main and :sha-<short>
-#     tags. Unraid's `docker compose pull && up -d` fetches whichever
-#     tag the local docker-compose.yml pins to.
-#   - pull_request to main: build-only validation. Login is skipped
-#     because fork PRs don't have `secrets.GITHUB_TOKEN` populated
-#     (security isolation) -- the login step has `if: github.event_name
-#     == 'push'` to fail-loud-or-skip correctly. PR builds still read
-#     the GHA cache (cache-from) so warm builds are fast.
-#
-# Concurrency: cancel older runs when a new commit lands before the
-# previous build finishes -- saves GHA minutes and avoids overlapping
-# cache writes.
-#
-# First-time setup on a fresh repo:
-#   ghcr.io packages default to PRIVATE on first push, which would
-#   `401 Unauthorized` an anonymous `docker pull` from Unraid. The
-#   auto-flip step that used to live here was removed because the
-#   default `GITHUB_TOKEN`'s `packages: write` scope cannot PATCH
-#   package visibility per GitHub's docs -- only a PAT with admin
-#   scope can, which is not worth wiring for a one-time setup. The
-#   user (repo owner) should flip the package to public once via
-#   github.com -> Packages -> ghcr.io/<owner>/<repo> -> Package
-#   settings -> Change visibility -> Public. After that, every
-#   subsequent push rolls the `:main` tag and Unraid's `docker
-#   compose pull` reaches it without auth.
-#
-# Data preservation guarantee for the running deployment: the workflow
-# only REPLACES the image; the user's docker-compose.yml keeps the
-# same bind mounts (`./data`, `./workspace`, `./data/claude-home`) and
-# named volumes (`qdrant-storage`), so `docker compose pull && up -d`
-# swaps the image without touching runtime state.
+# Persistence after Unraid reboot: the bootstrap script
+# (scripts/register-self-hosted-runner.sh) wires a /boot/config/go
+# block so the runner re-installs and re-starts on every Unraid boot.
+# Unraid's /etc is RAM-backed and wipes on reboot; /boot/config is on
+# flash and survives.
 
 name: docker-image
 
@@ -47,13 +29,16 @@ on:
   pull_request:
     branches: [main]
 
-# Cancel older runs in flight when a new commit lands on the same ref.
+# Cancel older runs in flight when a new commit lands on the same ref --
+# saves minutes on the GHA-hosted validate job and avoids overlapping
+# cache writes on the self-hosted publish job.
 concurrency:
   group: docker-image-${{ github.ref }}
   cancel-in-progress: true
 
-# Default token scopes read repo contents; packages:write is needed
-# to push to ghcr.io.
+# contents:read for checkout; packages:write for ghcr.io push (publish
+# job only -- validate never logs in, since fork PRs reach this step
+# with packages:write stripped).
 permissions:
   contents: read
   packages: write
@@ -62,21 +47,61 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  build:
+  # ---- validate --------------------------------------------------------
+  # PR-only build that parses the Dockerfile + base-image pull path.
+  # Fork PRs NEVER trigger this self-hosted branch, by GHA design. The
+  # build pushes nothing, so missing tokens are safe to ignore.
+  validate:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # Lowercase github.repository and export it as IMAGE_NAME so the
-      # downstream Resolve image metadata + Build steps can quote it in
-      # image tags without OCI rejecting the mixed-case repository name.
-      # Bash `${VAR,,}` is the lowercase parameter-expansion operator
-      # (bash 4.0+; Ubuntu 24.04 GHA runners ship bash 5.x). The
-      # GITHUB_REPOSITORY guard is defensive -- GHA-hosted runners
-      # always inject it, but `act` and self-hosted runners may not, in
-      # which case Build would otherwise die with a confusing
-      # `ghcr.io/:latest` error instead of an `::error::` annotation.
+      - name: Set IMAGE_NAME
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # The first push (140a92e) failed inside Set up Docker Buildx with
+      # `Get https://registry-1.docker.io/v2/: context deadline exceeded`.
+      # Same guard on ubuntu-latest PR builds keeps both runners on the
+      # same Docker Hub mirror, so what passes validate is what publish
+      # will see.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          config-inline: |
+            [registry."docker.io"]
+              mirrors = ["https://mirror.gcr.io"]
+
+      - name: Build (dry run)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          # Cache divergence vs the publish job is intentional: PRs
+          # validate on ubuntu-latest where the GHA cache API is
+          # reachable, so `type=gha` warms PR builds. The publish job
+          # runs on the Unraid self-hosted runner where `type=gha` is
+          # unreachable; it uses `type=local` against the runner's host
+          # filesystem (see publish job's Build and Push step).
+          cache-from: type=gha,scope=${{ github.ref }}
+
+  # ---- publish --------------------------------------------------------
+  # Push-to-main only. Runs on the Unraid self-hosted runner via label
+  # `custos`. Local buildx cache (`/tmp/custos-build-cache`) replaces
+  # the GHA cache API (which only works on GHA-managed ubuntu). The CI
+  # is now fully on the deploy target's LAN.
+  publish:
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, custos, linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same lowercase + unset guard as the validate job's step. The
+      # defensive `GITHUB_REPOSITORY` check is meaningful here -- a
+      # misconfigured self-hosted runner might not receive github's
+      # automatic env injection.
       - name: Set IMAGE_NAME
         run: |
           if [ -z "$GITHUB_REPOSITORY" ]; then
@@ -85,28 +110,14 @@ jobs:
           fi
           echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
-      # The first push (140a92e) failed inside this step's BuildKit
-      # bootstrap with `Get "https://registry-1.docker.io/v2/":
-      # context deadline exceeded` -- GHA runners occasionally can't
-      # reach Docker Hub's CDN from their outbound NAT range. mirror.gcr.io
-      # is Google's anonymous mirror of the full Docker Hub catalog
-      # (mirror.gcr.io/library/node, etc.) so every `FROM node:22-slim`
-      # and `moby/buildkit` pull routes through it instead. Free, no
-      # auth, no quota for our purposes.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
           config-inline: |
             [registry."docker.io"]
-              mirrors = ["https://mirror.gcr.io"] # ci: route Docker Hub pulls through Google's anonymous mirror
+              mirrors = ["https://mirror.gcr.io"]
 
-      # Fork PRs reach this step with secrets.GITHUB_TOKEN populated
-      # as an empty object. Skipping on pull_request events avoids a
-      # confusing login failure on every incoming fork PR. Same-repo
-      # PR builds still happen (the build step reads cache + validates
-      # the Dockerfile parses) without trying to push to GHCR.
       - name: Log in to ${{ env.REGISTRY }}
-        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -118,9 +129,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # `main` is the rolling channel Unraid pulls.
-          # `sha-<short>` is the immutable per-commit tag for diagnostics
-          # and rollbacks ("redeploy to image before commit X").
+          # :main is the rolling channel Unraid pulls.
+          # :sha-<short> is the immutable per-commit tag for rollbacks.
           tags: |
             type=ref,event=branch
             type=sha,prefix=sha-,format=short
@@ -132,30 +142,21 @@ jobs:
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
             org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0
 
-      - name: Build (and push to ${{ env.REGISTRY }} on main)
+      - name: Build and Push
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          # linux/amd64 only -- Unraid runs x86_64. Multi-arch would
-          # double workflow minutes and isn't justified yet; add
-          # linux/arm64 when (if) there's a Pi-class deployment.
           platforms: linux/amd64
-          # PR builds validate the Dockerfile without pushing (no token
-          # scopes in fork PRs anyway).
-          push: ${{ github.event_name == 'push' }}
+          push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # GitHub Actions cache (free 10GB per repo). `scope` keys the
-          # cache to the ref so other workflows on this repo don't
-          # collide. `cache-from` reads the cache on every build (PR
-          # included). `cache-to` writes only when `push: true` -- on
-          # PRs the empty-string form is the documented "no writer"
-          # no-op and skips the writer's warning.
-          cache-from: type=gha,scope=${{ github.ref }}
-          cache-to: ${{ github.event_name == 'push' && format('type=gha,scope={0},mode=max', github.ref) || '' }}
-          # Provenance attestation (SLSA in-toto). ~Free; downstream
-          # verifiers can attest the image came from this repo + SHA.
+          # `type=local` writes buildx's compressed cache to a path on the
+          # self-hosted runner's filesystem. `mode=max` keeps all layers
+          # (no GC). First push is cold (no cache dir exists yet);
+          # subsequent pushes reuse the prior tree.
+          cache-from: type=local,src=/tmp/custos-build-cache
+          cache-to: type=local,dest=/tmp/custos-build-cache,mode=max
           provenance: true
