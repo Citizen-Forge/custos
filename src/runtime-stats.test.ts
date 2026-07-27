@@ -19,6 +19,8 @@ function provider(overrides: Partial<ProviderRuntimeStats>): ProviderRuntimeStat
     queuedTotal: 0,
     maxConcurrent: 1,
     slotsUtilization: 0,
+    rpmLimit: null,
+    rateTokens: null,
     ...overrides,
   };
 }

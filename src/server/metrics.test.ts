@@ -28,6 +28,8 @@ describe("GET /metrics", () => {
           queuedTotal: 8,
           maxConcurrent: 4,
           slotsUtilization: 0.5,
+          rpmLimit: null,
+          rateTokens: null,
           cooldownUntil: undefined,
         },
         anthropic: {
@@ -38,6 +40,8 @@ describe("GET /metrics", () => {
           queuedTotal: 0,
           maxConcurrent: 0,
           slotsUtilization: 0,
+          rpmLimit: null,
+          rateTokens: null,
           cooldownUntil: 1_700_000_000_000,
         },
       },

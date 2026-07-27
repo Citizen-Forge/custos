@@ -30,6 +30,9 @@ export interface OpenAICompatibleInstanceConfig {
    * gateway imposes no additional wait on upstreams that can take the
    * full request rate. */
   maxConcurrent?: number;
+  /** Requests per minute limit. When set, the throttle proactively shapes
+   * traffic instead of only reacting to 429s. Set to 10 for Gemini Free. */
+  rpmLimit?: number;
   /** Per-instance throttle priority override. The router's task-derived
    * default (chat/perms/complexity classifiers -> "interactive";
    * memoryCurator -> "background") still applies unless the instance

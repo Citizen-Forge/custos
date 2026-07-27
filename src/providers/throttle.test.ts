@@ -540,6 +540,72 @@ describe("ThrottledProvider", () => {
     ps2.forEach((p) => p.catch(() => {}));
   });
 
+  // -- RPM token bucket ---------------------------------------------------
+
+  it("rpmLimit: admits requests up to the rate limit and queues beyond it", async () => {
+    // With maxConcurrent=5 but rpmLimit=3, after 3 quick admits the 4th
+    // should queue even though concurrency slots are available.
+    const inner = makeBlockingProvider();
+    const t = new ThrottledProvider(inner, { maxConcurrent: 5, rpmLimit: 3 });
+
+    // First 3 should get tokens immediately.
+    const p1 = t.complete(ZERO_REQ);
+    assert.equal(t.active, 1, "first request got a slot");
+    const p2 = t.complete(ZERO_REQ);
+    const p3 = t.complete(ZERO_REQ);
+    assert.equal(t.active, 3, "three requests got tokens");
+
+    // 4th should queue due to rate limit, even though concurrency (5) is available.
+    const p4 = t.complete(ZERO_REQ);
+    assert.equal(t.active, 3, "still only 3 active -- rate limit hit");
+    assert.equal(t.queued, 1, "4th is queued (rate limited, not concurrency limited)");
+
+    const s = t.stats();
+    assert.equal(s.rpmLimit, 3);
+    assert.ok(s.rateTokens !== null && s.rateTokens < 1, "tokens should be near 0 after 3 admits");
+
+    p1.catch(() => {});
+    p2.catch(() => {});
+    p3.catch(() => {});
+    p4.catch(() => {});
+  });
+
+  it("rpmLimit: constructor rejects non-positive values", () => {
+    const inner = { name: "x", complete: async () => OK_RESPONSE };
+    assert.throws(
+      () => new ThrottledProvider(inner, { maxConcurrent: 1, rpmLimit: 0 }),
+      /positive integer/,
+    );
+    assert.throws(
+      () => new ThrottledProvider(inner, { maxConcurrent: 1, rpmLimit: -1 }),
+      /positive integer/,
+    );
+    assert.throws(
+      () => new ThrottledProvider(inner, { maxConcurrent: 1, rpmLimit: 1.5 }),
+      /positive integer/,
+    );
+  });
+
+  it("rpmLimit: stats shows rpmLimit and rateTokens when set", () => {
+    const t = new ThrottledProvider(
+      { name: "rate-limited", complete: async () => OK_RESPONSE },
+      { maxConcurrent: 1, rpmLimit: 10 },
+    );
+    const s = t.stats();
+    assert.equal(s.rpmLimit, 10);
+    assert.ok(s.rateTokens !== null && s.rateTokens > 0);
+  });
+
+  it("rpmLimit: stats shows null metrics when no rate limit configured", () => {
+    const t = new ThrottledProvider(
+      { name: "unlimited", complete: async () => OK_RESPONSE },
+      { maxConcurrent: 1 },
+    );
+    const s = t.stats();
+    assert.equal(s.rpmLimit, null);
+    assert.equal(s.rateTokens, null);
+  });
+
   it("abortAll with mixed interactive + background entries empties both buckets", async () => {
     // The full-abortAll path was previously exercised only with all
     // submissions in the default-interactive bucket. Pin it now with

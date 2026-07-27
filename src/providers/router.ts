@@ -136,8 +136,13 @@ export class ProviderRouter {
         continue;
       }
 
+      // Budget and priority come from either the new `providers` shape or
+      // the deprecated `openaiCompatibleInstances` shape, whichever is
+      // present. The router doesn't care about the hierarchy -- it only
+      // needs the values associated with this provider name.
+      const providerDef = this.config.providers?.[entry.provider];
       const instanceConfig = this.config.openaiCompatibleInstances[entry.provider];
-      const budget = instanceConfig?.budget;
+      const budget = providerDef?.budget ?? instanceConfig?.budget;
       if (!(await this.spendTracker.isWithinBudget(entry.provider, budget))) {
         skipped.push(`"${entry.provider}" has spent its configured budget for this period`);
         continue;
@@ -151,8 +156,9 @@ export class ProviderRouter {
       // Resolving per-entry rather than once in complete() is what makes
       // the instance override possible -- each candidate gets a chance to
       // contribute its own priority before its request is dispatched.
+      const instancePriority = providerDef?.priority ?? instanceConfig?.priority;
       const resolvedPriority: Priority = options?.priority
-        ?? instanceConfig?.priority
+        ?? instancePriority
         ?? (task ? priorityForTask(task) : "interactive");
       const mergedOptions: CompleteOptions = { ...options, priority: resolvedPriority };
 

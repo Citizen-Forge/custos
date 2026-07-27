@@ -68,6 +68,9 @@ export function modelId(providerKey: string, model: string): string {
  * by the OAuth subscription; with one it's billed per token. */
 export function classifyBilling(providerKey: string, config: GatewayConfig): Billing {
   if (providerKey === "anthropic") return config.anthropic?.apiKey ? "metered" : "subscription";
+  // Prefer the new providers shape, fall back to deprecated.
+  const def = config.providers?.[providerKey];
+  if (def) return def.costType === "metered" ? "metered" : def.costType === "subscription" ? "subscription" : "free";
   const instance = config.openaiCompatibleInstances[providerKey];
   return instance?.pricing ? "metered" : "free";
 }
@@ -194,8 +197,18 @@ export async function setCapability(providerKey: string, model: string, capabili
  * happened to run before. */
 export async function syncFromConfig(config: GatewayConfig, anthropicModels: string[]): Promise<ModelRecord[]> {
   for (const model of anthropicModels) await ensureModel("anthropic", model, config);
-  for (const [key, instance] of Object.entries(config.openaiCompatibleInstances)) {
-    await ensureModel(key, instance.model, config);
+  // Prefer the new providers shape with its model list.
+  if (config.providers) {
+    for (const [key, def] of Object.entries(config.providers)) {
+      for (const modelDef of def.models) {
+        if (modelDef.enabled) await ensureModel(key, modelDef.name, config);
+      }
+    }
+  } else {
+    // Fall back to deprecated openaiCompatibleInstances.
+    for (const [key, instance] of Object.entries(config.openaiCompatibleInstances)) {
+      await ensureModel(key, instance.model, config);
+    }
   }
   return listModels();
 }

@@ -77,29 +77,27 @@ async function updateConfig(runtime: Runtime, mutate: (cfg: GatewayConfig) => Ga
   return runtime.config;
 }
 
-async function describeInstances(runtime: Runtime) {
+async function describeProviders(runtime: Runtime) {
+  const providers = runtime.config.providers;
+  if (!providers) return {};
   const entries = await Promise.all(
-    Object.entries(runtime.config.openaiCompatibleInstances).map(async ([name, instance]) => {
-      const spend = instance.pricing ? await runtime.spendTracker.getSpend(name, instance.budget) : null;
+    Object.entries(providers).map(async ([name, def]) => {
+      const budget = def.budget;
+      const spend = budget ? await runtime.spendTracker.getSpend(name, budget) : null;
       return [
         name,
         {
-          baseUrl: instance.baseUrl,
-          model: instance.model,
-          apiKeyConfigured: Boolean(instance.apiKey),
-          apiKeyMasked: instance.apiKey ? maskApiKey(instance.apiKey) : null,
-          pricing: instance.pricing ?? null,
-          budget: instance.budget ?? null,
+          baseUrl: def.baseUrl,
+          costType: def.costType,
+          models: def.models,
+          apiKeyConfigured: Boolean(def.apiKey),
+          apiKeyMasked: def.apiKey ? maskApiKey(def.apiKey) : null,
+          budget: def.budget ?? null,
           spentUsd: spend?.spentUsd ?? 0,
-          // `null` (not omitted) so the UI doesn't have to special-case
-          // "field missing" vs "field present and zero" -- a positive
-          // integer means throttle-on; null means unlimited.
-          maxConcurrent: instance.maxConcurrent ?? null,
-          // Same null-or-value shape: null means "no per-instance override",
-          // the router falls back to its task-derived default; a value
-          // ("interactive" | "background") pins the throttle bucket for
-          // every request through this instance, overriding the task kind.
-          priority: instance.priority ?? null,
+          maxConcurrent: def.maxConcurrent ?? null,
+          rpmLimit: def.rpmLimit ?? null,
+          priority: def.priority ?? null,
+          emitLateMetadataDelta: def.emitLateMetadataDelta ?? null,
         },
       ] as const;
     }),
@@ -127,9 +125,9 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
         apiKeyMasked: config.anthropic?.apiKey ? maskApiKey(config.anthropic.apiKey) : null,
         oauth,
       },
-      instances: await describeInstances(runtime),
+      providers: await describeProviders(runtime),
       embeddingProvider: config.embeddingProvider,
-      providerNames: ["anthropic", ...Object.keys(config.openaiCompatibleInstances)],
+      providerNames: ["anthropic", ...Object.keys(config.providers ?? {})],
       providerPresets: PROVIDER_PRESETS,
       tasks: config.tasks,
       complexityRouting: config.complexityRouting,
@@ -202,41 +200,33 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
     return { ok: true, oauth: await getOAuthStatus() };
   });
 
-  // -- Model provider instances --------------------------------------------
+  // -- Provider instances (new providers shape) --------------------------
 
-  app.put("/admin/api/instances/:name", async (req, reply) => {
+  app.put("/admin/api/providers/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, model, apiKey, pricing, budget, maxConcurrent, priority } = req.body as {
+    const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, priority, budget } = req.body as {
       baseUrl: string;
-      model: string;
+      costType: "free" | "subscription" | "metered";
+      models: { name: string; enabled: boolean; pricing?: PricingConfig | null }[];
       apiKey?: string | null;
-      pricing?: PricingConfig | null;
-      budget?: BudgetConfig | null;
-      // `null` here means "clear the throttle" -- same as omitting the
-      // field; the UI sends `null` rather than omitting for uniformity.
       maxConcurrent?: number | null;
-      // `null` here means "no per-instance override"; the router falls
-      // back to its task-derived default. A value pins the throttle
-      // bucket for every request through this instance.
+      rpmLimit?: number | null;
       priority?: Priority | null;
+      budget?: BudgetConfig | null;
     };
-    if (!baseUrl || !model) {
+    if (!baseUrl || !models?.length) {
       reply.code(400);
-      return { error: "baseUrl and model are required" };
+      return { error: "baseUrl and at least one model are required" };
     }
-    if (budget && !pricing) {
-      reply.code(400);
-      return { error: "a budget requires pricing to be set too, otherwise there's no cost to check it against" };
-    }
-    // Anything other than undefined/null/falsy-positive-integer is a bad
-    // config value: ThrottledProvider would throw on construction,
-    // tearing down Runtime.reload mid-render and leaving the gateway in
-    // a half-initialized state. Reject loudly so the bad input stays
-    // out of config.json entirely.
     if (maxConcurrent !== undefined && maxConcurrent !== null &&
         (!Number.isInteger(maxConcurrent) || maxConcurrent < 1)) {
       reply.code(400);
       return { error: "maxConcurrent must be a positive integer (set to null to disable the throttle)" };
+    }
+    if (rpmLimit !== undefined && rpmLimit !== null &&
+        (!Number.isInteger(rpmLimit) || rpmLimit < 1)) {
+      reply.code(400);
+      return { error: "rpmLimit must be a positive integer (set to null for unlimited)" };
     }
     if (priority !== undefined && priority !== null && priority !== "interactive" && priority !== "background") {
       reply.code(400);
@@ -244,20 +234,83 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
     }
     await updateConfig(runtime, (cfg) => ({
       ...cfg,
-      openaiCompatibleInstances: {
-        ...cfg.openaiCompatibleInstances,
-        // `... ?? undefined` lets JSON.stringify drop the field entirely
-        // when null is sent -- consistent with the rest of the instance
-        // fields (apiKey/pricing/budget all coerce falsey -> undefined
-        // here for the same reason).
+      providers: {
+        ...cfg.providers,
         [name]: {
           baseUrl,
-          model,
+          costType,
+          models: models.map((m) => ({ name: m.name, enabled: m.enabled, ...(m.pricing ? { pricing: m.pricing } : {}) })),
           apiKey: apiKey || undefined,
-          pricing: pricing ?? undefined,
-          budget: budget ?? undefined,
           maxConcurrent: maxConcurrent ?? undefined,
+          rpmLimit: rpmLimit ?? undefined,
           priority: priority ?? undefined,
+          budget: budget ?? undefined,
+        },
+      },
+    }));
+    return { ok: true };
+  });
+
+  app.delete("/admin/api/providers/:name", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const usages = findInstanceUsages(runtime.config, name);
+    if (usages.length > 0) {
+      reply.code(409);
+      return { error: `"${name}" is still referenced by: ${usages.join(", ")} -- remove those references first` };
+    }
+    await updateConfig(runtime, (cfg) => {
+      const { [name]: _removed, ...rest } = cfg.providers ?? {};
+      return { ...cfg, providers: rest };
+    });
+    return { ok: true };
+  });
+
+  // Keep old instances endpoint working for backward compat.
+  app.put("/admin/api/instances/:name", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const { baseUrl, model, apiKey, pricing, budget, maxConcurrent, priority, rpmLimit } = req.body as {
+      baseUrl: string;
+      model: string;
+      apiKey?: string | null;
+      pricing?: PricingConfig | null;
+      budget?: BudgetConfig | null;
+      maxConcurrent?: number | null;
+      rpmLimit?: number | null;
+      priority?: Priority | null;
+    };
+    if (!baseUrl || !model) {
+      reply.code(400);
+      return { error: "baseUrl and model are required" };
+    }
+    if (maxConcurrent !== undefined && maxConcurrent !== null &&
+        (!Number.isInteger(maxConcurrent) || maxConcurrent < 1)) {
+      reply.code(400);
+      return { error: "maxConcurrent must be a positive integer (set to null to disable the throttle)" };
+    }
+    if (rpmLimit !== undefined && rpmLimit !== null &&
+        (!Number.isInteger(rpmLimit) || rpmLimit < 1)) {
+      reply.code(400);
+      return { error: "rpmLimit must be a positive integer (set to null for unlimited)" };
+    }
+    if (priority !== undefined && priority !== null && priority !== "interactive" && priority !== "background") {
+      reply.code(400);
+      return { error: `priority must be "interactive", "background", or null (got ${JSON.stringify(priority)})` };
+    }
+    // Write to the new providers shape, migrating from old-style entry.
+    const costType = pricing ? "metered" : "free";
+    await updateConfig(runtime, (cfg) => ({
+      ...cfg,
+      providers: {
+        ...cfg.providers,
+        [name]: {
+          baseUrl,
+          costType,
+          models: [{ name: model, enabled: true, ...(pricing ? { pricing } : {}) }],
+          apiKey: apiKey || undefined,
+          maxConcurrent: maxConcurrent ?? undefined,
+          rpmLimit: rpmLimit ?? undefined,
+          priority: priority ?? undefined,
+          budget: budget ?? undefined,
         },
       },
     }));
@@ -272,8 +325,8 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
       return { error: `"${name}" is still referenced by: ${usages.join(", ")} -- remove those references first` };
     }
     await updateConfig(runtime, (cfg) => {
-      const { [name]: _removed, ...rest } = cfg.openaiCompatibleInstances;
-      return { ...cfg, openaiCompatibleInstances: rest };
+      const { [name]: _removed, ...rest } = cfg.providers ?? {};
+      return { ...cfg, providers: rest };
     });
     return { ok: true };
   });

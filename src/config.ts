@@ -2,9 +2,12 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { TaskKind, ComplexityTier } from "./types.js";
 import type { OpenAICompatibleInstanceConfig } from "./providers/openai-compatible.js";
+import type { Priority } from "./providers/types.js";
+import type { PricingConfig, BudgetConfig } from "./providers/spend-tracker.js";
 
 export interface ProviderEntry {
-  /** References either "anthropic" or a key in `openaiCompatibleInstances`. */
+  /** References either "anthropic" or a key in `openaiCompatibleInstances` (or
+   * a key in `providers` when the new shape is in use). */
   provider: string;
   priority: number;
 }
@@ -36,13 +39,60 @@ export interface ComplexityRoutingConfig {
   tiers: Record<ComplexityTier, ProviderEntry[]>;
 }
 
+/** How using a provider is paid for. Determines what "unavailable" means
+ * and what running out looks like:
+ *   "free" — no cost, but usually rate-limited (Gemini free tier, Ollama)
+ *   "subscription" — flat fee with a usage window (Anthropic's 5-hour session)
+ *   "metered" — pay per token (OpenAI API, Anthropic API key) */
+export type CostType = "free" | "subscription" | "metered";
+
+/** A model available under a provider. Multiple models share the provider's
+ * base URL, API key, and rate-limit budget. */
+export interface ModelDef {
+  name: string;
+  /** Whether this model is enabled for use. Disabled models stay in the
+   * config so re-enabling is a toggle rather than a re-add. */
+  enabled: boolean;
+  /** Per-model pricing. Only meaningful for metered providers; free and
+   * subscription providers have no per-token cost to track. */
+  pricing?: PricingConfig;
+}
+
+/** Top-level provider abstraction. Replaces the flat
+ * `openaiCompatibleInstances` entry-by-entry config with a named provider
+ * that can serve multiple models through the same base URL and API key. */
+export interface ProviderDef {
+  baseUrl: string;
+  /** How this provider is paid for. Inferred from `pricing` when not set. */
+  costType: CostType;
+  models: ModelDef[];
+  /** Omit for servers that don't need auth (a local Ollama). */
+  apiKey?: string;
+  /** Max concurrent requests. 1 forces strict serial. */
+  maxConcurrent?: number;
+  /** Requests per minute limit. When set, the throttle proactively shapes
+   * traffic instead of only reacting to 429s. Set to 10 for Gemini Free. */
+  rpmLimit?: number;
+  /** Per-instance throttle priority override. */
+  priority?: Priority;
+  /** Monthly USD budget. Requires at least one metered model with pricing
+   * to actually enforce. */
+  budget?: BudgetConfig;
+  /** Emit late vendor metadata deltas in streaming responses. */
+  emitLateMetadataDelta?: boolean;
+}
+
 export interface GatewayConfig {
   anthropic?: AnthropicConfig;
-  /** Named instances of any OpenAI-chat-completions-compatible provider --
-   * Ollama, OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter, etc.
-   * Named (not typed by brand) so different tasks can use different
-   * models/providers, e.g. a small fast one for permission classification
-   * and a bigger one for general use. */
+  /** Named providers, each with one or more models. The replacement for
+   * `openaiCompatibleInstances` — providers share a base URL, API key, and
+   * rate-limit budget across all their models, so configuring "Gemini Free"
+   * once and enabling several Gemini models underneath is the natural shape.
+   * `loadConfig()` auto-migrates from the old flat shape so existing
+   * config.json files work unmodified until the admin UI saves the new form. */
+  providers?: Record<string, ProviderDef>;
+  /** @deprecated Use `providers` instead. Still read during migration so
+   * existing configs don't break. */
   openaiCompatibleInstances: Record<string, OpenAICompatibleInstanceConfig>;
   embeddingProvider: EmbeddingProviderConfig;
   tasks: Record<TaskKind, ProviderEntry[]>;
@@ -63,13 +113,21 @@ const OLLAMA_HOST = "http://localhost:11434";
 const CONFIG_PATH = process.env.GATEWAY_CONFIG_PATH ?? "data/config.json";
 
 const DEFAULT_CONFIG: GatewayConfig = {
-  openaiCompatibleInstances: {
-    // Ollama on consumer hardware can't usefully process two inference
-    // jobs at once; concurrency 1 queues further requests at the gateway
-    // instead of letting them pile up on the host.
-    ollama: { baseUrl: `${OLLAMA_HOST}/v1`, model: "qwen2.5:14b-instruct-q4_K_M", maxConcurrent: 1 },
-    "ollama-fast": { baseUrl: `${OLLAMA_HOST}/v1`, model: "qwen2.5:3b-instruct", maxConcurrent: 1 },
+  providers: {
+    ollama: {
+      baseUrl: `${OLLAMA_HOST}/v1`,
+      costType: "free",
+      models: [{ name: "qwen2.5:14b-instruct-q4_K_M", enabled: true }],
+      maxConcurrent: 1,
+    },
+    "ollama-fast": {
+      baseUrl: `${OLLAMA_HOST}/v1`,
+      costType: "free",
+      models: [{ name: "qwen2.5:3b-instruct", enabled: true }],
+      maxConcurrent: 1,
+    },
   },
+  openaiCompatibleInstances: {},
   embeddingProvider: { baseUrl: OLLAMA_HOST, model: "nomic-embed-text" },
   tasks: {
     general: [
@@ -126,9 +184,31 @@ export async function getApiKeySource(): Promise<"file" | "env" | "none"> {
   return "none";
 }
 
+/** Infers costType from an instance config. Metered when pricing is set,
+ * free otherwise -- the old shape had no explicit subscription flag. */
+function inferCostType(instance: OpenAICompatibleInstanceConfig): CostType {
+  return instance.pricing ? "metered" : "free";
+}
+
+/** Migrates an old-style openaiCompatibleInstances entry to a ProviderDef.
+ * Each old instance becomes a provider with one enabled model. */
+function migrateInstanceToProvider(name: string, instance: OpenAICompatibleInstanceConfig): ProviderDef {
+  return {
+    baseUrl: instance.baseUrl,
+    costType: inferCostType(instance),
+    models: [{ name: instance.model, enabled: true, pricing: instance.pricing }],
+    apiKey: instance.apiKey,
+    maxConcurrent: instance.maxConcurrent,
+    priority: instance.priority,
+    budget: instance.budget,
+    emitLateMetadataDelta: instance.emitLateMetadataDelta,
+  };
+}
+
 export async function loadConfig(): Promise<GatewayConfig> {
   const fileConfig = await readFileConfig();
 
+  // Merge the default config with the file config.
   const merged: GatewayConfig = {
     ...DEFAULT_CONFIG,
     ...fileConfig,
@@ -143,6 +223,27 @@ export async function loadConfig(): Promise<GatewayConfig> {
     },
   };
 
+  // If the file config has the new providers shape, use it directly.
+  // Otherwise, migrate from the old openaiCompatibleInstances shape.
+  if (fileConfig.providers) {
+    merged.providers = {
+      ...DEFAULT_CONFIG.providers,
+      ...fileConfig.providers,
+    };
+  } else {
+    // Migrate: merge default providers with migrated old instances.
+    const migrated: Record<string, ProviderDef> = {};
+    // Start with defaults
+    for (const [name, instance] of Object.entries(DEFAULT_CONFIG.providers ?? {})) {
+      migrated[name] = { ...instance, models: [...instance.models] };
+    }
+    // Overlay migrated old instances (including file-merged ones)
+    for (const [name, instance] of Object.entries(merged.openaiCompatibleInstances)) {
+      migrated[name] = migrateInstanceToProvider(name, instance);
+    }
+    merged.providers = migrated;
+  }
+
   if (!merged.anthropic?.apiKey && process.env.ANTHROPIC_API_KEY) {
     merged.anthropic = { ...merged.anthropic, apiKey: process.env.ANTHROPIC_API_KEY };
   }
@@ -152,14 +253,17 @@ export async function loadConfig(): Promise<GatewayConfig> {
 
 /** Persists to data/config.json. Only ever writes what the admin UI (or a
  * hand-edited config file) explicitly set -- an env-sourced API key is
- * never written back, so removing the env var still falls back cleanly. */
+ * never written back, so removing the env var still falls back cleanly.
+ * Writes the new `providers` shape; the old `openaiCompatibleInstances`
+ * field is no longer persisted (loadConfig migrates it on read). */
 export async function saveConfig(config: GatewayConfig): Promise<void> {
-  const toPersist: GatewayConfig = { ...config };
-  if (toPersist.anthropic?.apiKey && (await getApiKeySource()) === "env" && toPersist.anthropic.apiKey === process.env.ANTHROPIC_API_KEY) {
-    // Unchanged from the env-sourced value -- don't persist it as if the
-    // admin had explicitly set it via the file/UI.
-    toPersist.anthropic = { ...toPersist.anthropic, apiKey: undefined };
+  const toPersist: Record<string, unknown> = { ...config };
+  const anthropic = toPersist.anthropic as { apiKey?: string } | undefined;
+  if (anthropic?.apiKey && (await getApiKeySource()) === "env" && anthropic.apiKey === process.env.ANTHROPIC_API_KEY) {
+    anthropic.apiKey = undefined;
   }
+  // Drop the deprecated field -- we write the new shape going forward.
+  delete toPersist.openaiCompatibleInstances;
   await mkdir(dirname(CONFIG_PATH), { recursive: true });
   await writeFile(CONFIG_PATH, JSON.stringify(toPersist, null, 2), "utf8");
 }

@@ -97,12 +97,23 @@ export interface ThrottleStats {
   maxConcurrent: number;
   /** `active / maxConcurrent`, in [0, 1]. 0 when not throttled. */
   slotsUtilization: number;
+  /** Requests-per-minute limit. null when no rate limit is configured. */
+  rpmLimit: number | null;
+  /** Current token-bucket level. Starts at `rpmLimit` and decrements on
+   * each admitted request, refilling continuously (at `rpmLimit/60` per
+   * second). Null when no rate limit is set. */
+  rateTokens: number | null;
 }
 
 export interface ThrottleOptions {
   /** Max in-flight requests this provider will handle simultaneously.
    * 1 forces strict serial (useful for single-shot local models). */
   maxConcurrent: number;
+  /** Requests-per-minute cap. When set, the throttle admits at most this
+   * many requests per minute using a token-bucket algorithm, proactively
+   * queuing requests that would exceed the rate instead of only reacting
+   * to 429s. Set to 10 for Gemini Free. Unset means no rate limit. */
+  rpmLimit?: number;
   /** Wall-clock ms after which a still-queued background request is
    * promoted to "fairly-due" and jumps ahead of fresh interactive
    * requests in the next pump() pass. Default 5000. Set to 0 to
@@ -127,6 +138,12 @@ export class ThrottledProvider implements Provider {
   private readonly inner: Provider;
   private readonly slots: number;
   private readonly agedMs: number;
+  /** Requests-per-minute token-bucket limit. null = unlimited. */
+  private readonly rpmLimit: number | null;
+  /** Current token count. Starts at rpmLimit and refills continuously. */
+  private rateTokens: number;
+  /** Last refill timestamp in ms epoch, used to compute token refill. */
+  private lastRefill: number;
   /** Sub-queues keyed by priority. Pump() drains interactive first,
    * unless a stale background entry is at the head of the background
    * queue (the anti-starvation aging). */
@@ -145,10 +162,16 @@ export class ThrottledProvider implements Provider {
     if (options.priorityAgedMs !== undefined && (!Number.isFinite(options.priorityAgedMs) || options.priorityAgedMs < 0)) {
       throw new Error(`ThrottledProvider: priorityAgedMs must be a non-negative number, got ${options.priorityAgedMs}`);
     }
+    if (options.rpmLimit !== undefined && (!Number.isInteger(options.rpmLimit) || options.rpmLimit < 1)) {
+      throw new Error(`ThrottledProvider: rpmLimit must be a positive integer, got ${options.rpmLimit}`);
+    }
     this.inner = inner;
     this.name = inner.name;
     this.slots = options.maxConcurrent;
     this.agedMs = options.priorityAgedMs ?? DEFAULT_AGED_MS;
+    this.rpmLimit = options.rpmLimit ?? null;
+    this.rateTokens = this.rpmLimit ?? 0;
+    this.lastRefill = Date.now();
   }
 
   /** Slots currently occupied. */
@@ -172,6 +195,29 @@ export class ThrottledProvider implements Provider {
    * stats surface (and any external monitoring) can consume without
    * poking at internal getters one field at a time. Safe to call on
    * any throttled provider; returns 0/empty values when idle. */
+  /** Refill the token bucket based on elapsed time since last refill. */
+  private refillTokens(): void {
+    if (this.rpmLimit === null) return;
+    const now = Date.now();
+    const elapsedMs = now - this.lastRefill;
+    if (elapsedMs <= 0) return;
+    // Refill at a rate of rpmLimit tokens per 60 seconds.
+    const add = (elapsedMs / 60_000) * this.rpmLimit;
+    this.rateTokens = Math.min(this.rpmLimit, this.rateTokens + add);
+    this.lastRefill = now;
+  }
+
+  /** Try to consume a rate-limit token. Returns true if a token was
+   * available and consumed, false otherwise. Always returns true when
+   * no rate limit is configured. */
+  private tryConsumeToken(): boolean {
+    this.refillTokens();
+    if (this.rpmLimit === null) return true;
+    if (this.rateTokens < 1) return false;
+    this.rateTokens -= 1;
+    return true;
+  }
+
   stats(): ThrottleStats {
     const queuedInteractive = this.interactivePending.length;
     const queuedBackground = this.backgroundPending.length;
@@ -182,10 +228,9 @@ export class ThrottledProvider implements Provider {
       queuedBackground,
       queuedTotal: queuedInteractive + queuedBackground,
       maxConcurrent: this.slots,
-      // 0 means "provider isn't throttled, no ratio meaningful" -- the
-      // shape always includes the field so the JSON consumer doesn't
-      // have to special-case missing keys.
       slotsUtilization: this.slots > 0 ? this.inFlight / this.slots : 0,
+      rpmLimit: this.rpmLimit,
+      rateTokens: this.rpmLimit !== null ? Math.max(0, Math.round(this.rateTokens * 100) / 100) : null,
     };
   }
 
@@ -228,7 +273,10 @@ export class ThrottledProvider implements Provider {
   }
 
   private acquireSlot(signal: AbortSignal | undefined, priority: Priority): Promise<void> {
-    if (this.inFlight < this.slots) {
+    // Check both concurrency AND rate limit. If either is exhausted,
+    // queue the request. Rate tokens are consumed atomically with the
+    // slot assignment so we never admit a request that can't run.
+    if (this.inFlight < this.slots && this.tryConsumeToken()) {
       this.inFlight++;
       return Promise.resolve();
     }
@@ -286,7 +334,15 @@ export class ThrottledProvider implements Provider {
   }
 
   private pump(): void {
+    // Refill tokens before checking availability so a burst of releases
+    // across multiple poll cycles is handled correctly.
+    this.refillTokens();
     while (this.inFlight < this.slots) {
+      // Check rate limit: if no tokens available, stop pumping. The
+      // remaining queued entries stay queued until a refill or a new
+      // acquire call restocks tokens.
+      if (this.rpmLimit !== null && this.rateTokens < 1) break;
+
       const next = this.pickNext();
       if (!next) break;
       // Race window: the abort listener rejected the promise and
@@ -298,6 +354,8 @@ export class ThrottledProvider implements Provider {
         next.signal.removeEventListener("abort", next.onAbort);
       }
       this.inFlight++;
+      // Consume a rate token when the request is actually admitted.
+      if (this.rpmLimit !== null) this.rateTokens = Math.max(0, this.rateTokens - 1);
       next.resolve();
     }
   }

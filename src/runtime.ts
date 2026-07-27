@@ -106,10 +106,49 @@ export class Runtime {
     } else {
       providers.anthropic = anthropicInner;
     }
+    // Wire up providers from the new `providers` config shape. Each
+    // provider gets its own ThrottledProvider (handling both concurrency and
+    // rate limiting) ONLY when maxConcurrent or rpmLimit is explicitly set.
+    // Providers without either stay unlimited (no ThrottledProvider wrapper)
+    // to preserve the pre-Phase-1 default for Anthropic and similar.
+    for (const [name, providerDef] of Object.entries(config.providers ?? {})) {
+      const defaultModel = providerDef.models.find((m) => m.enabled) ?? providerDef.models[0];
+      if (!defaultModel) continue;
+      // Build an OpenAICompatibleInstanceConfig from the provider def.
+      const instanceConfig = {
+        baseUrl: providerDef.baseUrl,
+        model: defaultModel.name,
+        apiKey: providerDef.apiKey,
+        pricing: defaultModel.pricing,
+        budget: providerDef.budget,
+        maxConcurrent: providerDef.maxConcurrent,
+        rpmLimit: providerDef.rpmLimit,
+        priority: providerDef.priority,
+        emitLateMetadataDelta: providerDef.emitLateMetadataDelta,
+      };
+      const inner = new OpenAICompatibleProvider(name, instanceConfig);
+      if (providerDef.maxConcurrent || providerDef.rpmLimit) {
+        const opts: { maxConcurrent: number; rpmLimit?: number } = {
+          maxConcurrent: providerDef.maxConcurrent ?? 1,
+        };
+        if (providerDef.rpmLimit) opts.rpmLimit = providerDef.rpmLimit;
+        const t = new ThrottledProvider(inner, opts);
+        providers[name] = t;
+        newThrottles.add(t);
+      } else {
+        providers[name] = inner;
+      }
+    }
+    // Also wire up deprecated openaiCompatibleInstances for backward compat.
     for (const [name, instance] of Object.entries(config.openaiCompatibleInstances)) {
+      if (providers[name]) continue; // already wired from new shape
       const inner = new OpenAICompatibleProvider(name, instance);
-      if (instance.maxConcurrent) {
-        const t = new ThrottledProvider(inner, { maxConcurrent: instance.maxConcurrent });
+      if (instance.maxConcurrent || instance.rpmLimit) {
+        const opts: { maxConcurrent: number; rpmLimit?: number } = {
+          maxConcurrent: instance.maxConcurrent ?? 1,
+        };
+        if (instance.rpmLimit) opts.rpmLimit = instance.rpmLimit;
+        const t = new ThrottledProvider(inner, opts);
         providers[name] = t;
         newThrottles.add(t);
       } else {
