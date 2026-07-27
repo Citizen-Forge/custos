@@ -31,7 +31,9 @@
 #
 # Tunables (env):
 #   RUNNER_TOKEN    Required. Short-lived registration token.
-#   RUNNER_VERSION  Default 2.321.0. Pin newer if you need newer features.
+#   RUNNER_VERSION  Default 2.336.0 (latest stable as of writing). The
+#                   runner's own ./run.sh handles in-place upgrades once
+#                   installed, so this pin only matters for first install.
 #   RUNNER_NAME     Default Unraid-Custos. The friendly label GitHub shows.
 #
 
@@ -39,7 +41,7 @@ set -euo pipefail
 
 : "${RUNNER_TOKEN:?Error: RUNNER_TOKEN env var is required. Mint one with: gh api -X POST repos/Citizen-Forge/custos/actions/runners/registration-token (Tall-Paul on this machine) OR via github.com -> Settings -> Actions -> Runners -> New self-hosted runner}"
 
-RUNNER_VERSION="${RUNNER_VERSION:-2.321.0}"
+RUNNER_VERSION="${RUNNER_VERSION:-2.336.0}"
 RUNNER_NAME="${RUNNER_NAME:-Unraid-Custos}"
 RUNNER_DIR="/mnt/user/appdata/custos-runner"
 REPO_URL="https://github.com/Citizen-Forge/custos"
