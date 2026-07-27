@@ -2,10 +2,31 @@ import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { ProviderRouter, type AvailabilityListener } from "./providers/router.js";
 import { SpendTracker } from "./providers/spend-tracker.js";
-import { ThrottledProvider } from "./providers/throttle.js";
+import { ThrottledProvider, type ThrottleStats } from "./providers/throttle.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import type { Provider } from "./providers/types.js";
 import type { EmbeddingConfig } from "./memory/embeddings.js";
+
+/** Per-provider runtime stats, used by the admin endpoint, the periodic
+ * stats logger, and the threshold-alert monitor. Extends ThrottleStats
+ * with the router-level cooldown overlay so callers see "why is this
+ * provider skipped" alongside the throttle queue depth in one shape. */
+export interface ProviderRuntimeStats extends ThrottleStats {
+  /** ms epoch when the router cooldown expires; undefined when the
+   *  provider is currently available. */
+  cooldownUntil?: number;
+}
+
+/** Runtime-wide stats snapshot. Returned by `Runtime.stats()` and
+ *  consumed by the admin endpoint, the periodic logger, and the
+ *  threshold monitor. Always a fresh object so callers never see
+ *  stale data through a shared reference. */
+export interface RuntimeStats {
+  providers: Record<string, ProviderRuntimeStats>;
+  /** ms epoch at which the snapshot was taken -- useful when log lines
+   *  and HTTP responses are correlated after the fact. */
+  timestamp: number;
+}
 
 /**
  * Holds the currently-active config-derived objects (providers, router,
@@ -31,6 +52,35 @@ export class Runtime {
   setAvailabilityListener(listener: AvailabilityListener): void {
     this.availabilityListener = listener;
     this.router?.setAvailabilityListener(listener);
+  }
+
+  /** Per-provider stats snapshot aggregating every live throttle plus
+   *  the router's cooldown state. Used by the admin stats endpoint,
+   *  the periodic stats logger, and the sustained-threshold alert
+   *  monitor. Returns a fresh object on every call -- no caching --
+   *  so callers always see live data. Guards against being called
+   *  before the first `reload()` completes (defensive: the definite
+   *  assignment assertion on `router!` means a premature call would
+   *  throw a TypeError instead of returning empty data). */
+  stats(): RuntimeStats {
+    if (!this.router) {
+      return { providers: {}, timestamp: Date.now() };
+    }
+    const providers: Record<string, ProviderRuntimeStats> = {};
+    for (const t of this.liveThrottles) {
+      providers[t.name] = t.stats();
+    }
+    // Overlay router cooldown info onto each throttled provider's
+    // stats. Non-throttled providers that happen to be on cooldown
+    // (e.g. Anthropic with no maxConcurrent configured) won't show up
+    // here -- the cooldown map is read-only on this path, so existing
+    // throttle stats are never mutated to lose data.
+    const cooldowns = this.router.cooldowns();
+    for (const [name, until] of Object.entries(cooldowns)) {
+      const existing = providers[name];
+      if (existing) existing.cooldownUntil = until;
+    }
+    return { providers, timestamp: Date.now() };
   }
 
   async reload(): Promise<void> {

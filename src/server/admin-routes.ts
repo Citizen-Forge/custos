@@ -9,6 +9,7 @@ import { startOAuthFlow, exchangeCode, type OAuthMode } from "../auth/oauth.js";
 import { getOAuthStatus, saveTokens, clearTokens } from "../auth/credentials.js";
 import { OAuthFlowTracker } from "../auth/oauth-flow-tracker.js";
 import type { PricingConfig, BudgetConfig } from "../providers/spend-tracker.js";
+import type { Priority } from "../providers/types.js";
 
 const TASK_KINDS: TaskKind[] = ["general", "permissionClassifier", "memoryCurator", "complexityClassifier"];
 const COMPLEXITY_TIERS: ComplexityTier[] = ["low", "medium", "high"];
@@ -90,6 +91,15 @@ async function describeInstances(runtime: Runtime) {
           pricing: instance.pricing ?? null,
           budget: instance.budget ?? null,
           spentUsd: spend?.spentUsd ?? 0,
+          // `null` (not omitted) so the UI doesn't have to special-case
+          // "field missing" vs "field present and zero" -- a positive
+          // integer means throttle-on; null means unlimited.
+          maxConcurrent: instance.maxConcurrent ?? null,
+          // Same null-or-value shape: null means "no per-instance override",
+          // the router falls back to its task-derived default; a value
+          // ("interactive" | "background") pins the throttle bucket for
+          // every request through this instance, overriding the task kind.
+          priority: instance.priority ?? null,
         },
       ] as const;
     }),
@@ -126,14 +136,21 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
       clientApiKey: config.clientApiKey ?? null,
       setup: buildSetupInstructions(config.clientApiKey),
     };
-  });
-
-  // -- Client API key (gates /v1/messages, /hooks/*, /memory/search) ------
+  });  // -- Client API key (gates /v1/messages, /hooks/*, /memory/search) ------
 
   app.post("/admin/api/client-key/generate", async () => {
     const key = `custos-${randomBytes(24).toString("base64url")}`;
     await updateConfig(runtime, (cfg) => ({ ...cfg, clientApiKey: key }));
     return { clientApiKey: key };
+  });
+
+  // -- Runtime stats ------------------------------------------------------
+  // Live snapshot of per-provider throttle queue depth + router cooldown
+  // state. Consumed by the admin UI for an at-a-glance saturation view
+  // and by external monitoring (Prometheus scrape, custom dashboard).
+  // Admin-authed via the same session cookie as the rest of /admin/api/*.
+  app.get("/admin/api/runtime/stats", async () => {
+    return runtime.stats();
   });
 
   app.post("/admin/api/client-key/clear", async () => {
@@ -189,12 +206,19 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
 
   app.put("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, model, apiKey, pricing, budget } = req.body as {
+    const { baseUrl, model, apiKey, pricing, budget, maxConcurrent, priority } = req.body as {
       baseUrl: string;
       model: string;
       apiKey?: string | null;
       pricing?: PricingConfig | null;
       budget?: BudgetConfig | null;
+      // `null` here means "clear the throttle" -- same as omitting the
+      // field; the UI sends `null` rather than omitting for uniformity.
+      maxConcurrent?: number | null;
+      // `null` here means "no per-instance override"; the router falls
+      // back to its task-derived default. A value pins the throttle
+      // bucket for every request through this instance.
+      priority?: Priority | null;
     };
     if (!baseUrl || !model) {
       reply.code(400);
@@ -204,11 +228,37 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
       reply.code(400);
       return { error: "a budget requires pricing to be set too, otherwise there's no cost to check it against" };
     }
+    // Anything other than undefined/null/falsy-positive-integer is a bad
+    // config value: ThrottledProvider would throw on construction,
+    // tearing down Runtime.reload mid-render and leaving the gateway in
+    // a half-initialized state. Reject loudly so the bad input stays
+    // out of config.json entirely.
+    if (maxConcurrent !== undefined && maxConcurrent !== null &&
+        (!Number.isInteger(maxConcurrent) || maxConcurrent < 1)) {
+      reply.code(400);
+      return { error: "maxConcurrent must be a positive integer (set to null to disable the throttle)" };
+    }
+    if (priority !== undefined && priority !== null && priority !== "interactive" && priority !== "background") {
+      reply.code(400);
+      return { error: `priority must be "interactive", "background", or null (got ${JSON.stringify(priority)})` };
+    }
     await updateConfig(runtime, (cfg) => ({
       ...cfg,
       openaiCompatibleInstances: {
         ...cfg.openaiCompatibleInstances,
-        [name]: { baseUrl, model, apiKey: apiKey || undefined, pricing: pricing ?? undefined, budget: budget ?? undefined },
+        // `... ?? undefined` lets JSON.stringify drop the field entirely
+        // when null is sent -- consistent with the rest of the instance
+        // fields (apiKey/pricing/budget all coerce falsey -> undefined
+        // here for the same reason).
+        [name]: {
+          baseUrl,
+          model,
+          apiKey: apiKey || undefined,
+          pricing: pricing ?? undefined,
+          budget: budget ?? undefined,
+          maxConcurrent: maxConcurrent ?? undefined,
+          priority: priority ?? undefined,
+        },
       },
     }));
     return { ok: true };

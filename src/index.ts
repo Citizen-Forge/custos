@@ -19,6 +19,7 @@ import { ensureAdminPassword } from "./auth/admin-session.js";
 import { RemoteSessionManager } from "./remote/session-manager.js";
 import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
+import { StatsMonitor, DEFAULT_ALERT_RULES } from "./runtime-stats.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const QDRANT_URL = process.env.QDRANT_URL ?? "http://localhost:6333";
@@ -93,6 +94,29 @@ async function main() {
   registerPmRoutes(app, runtime, orchestrator);
   registerPmEventRoutes(app, orchestrator);
   registerUiRoutes(app);
+
+  // Periodic stats monitor: polls Runtime.stats() and emits sustained-
+  // threshold alerts. Interval defaults to 30s; tune via
+  // STATS_MONITOR_INTERVAL_MS. Snapshot logging is opt-in
+  // (STATS_LOG_SNAPSHOT=1) because 30s cadence is noisy without a
+  // downstream log scraper. Threshold alerts always fire -- the whole
+  // point of this monitor is to surface saturation before it shows up
+  // as user-visible latency.
+  const statsMonitor = new StatsMonitor(
+    () => runtime.stats(),
+    {
+      intervalMs: Number(process.env.STATS_MONITOR_INTERVAL_MS ?? 30_000),
+      rules: DEFAULT_ALERT_RULES,
+      logSnapshot: process.env.STATS_LOG_SNAPSHOT === "1",
+    },
+  );
+  statsMonitor.start();
+  // Tie monitor lifecycle to Fastify's shutdown so SIGTERM/SIGINT (and
+  // app.close()) clears the timer instead of leaving a dangling
+  // interval that keeps the event loop busy.
+  app.addHook("onClose", async () => {
+    statsMonitor.stop();
+  });
 
   await app.listen({ port: PORT, host: "0.0.0.0" });
 }

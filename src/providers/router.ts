@@ -46,6 +46,14 @@ class CooldownTracker {
     const until = this.coolingUntil.get(provider);
     return until === undefined || Date.now() >= until;
   }
+
+  /** Snapshot of provider -> coolingUntilMs for every provider currently
+   * on cooldown. Used by the runtime stats surface so the admin UI and
+   * any alert rule can see "why is this provider skipped" alongside
+   * the throttle queue depth. Returns ms epoch values. */
+  snapshot(): Array<[string, number]> {
+    return [...this.coolingUntil.entries()];
+  }
 }
 
 /** Told about every provider-level availability change, so something
@@ -58,7 +66,7 @@ export interface AvailabilityListener {
 }
 
 export class ProviderRouter {
-  private readonly cooldowns = new CooldownTracker();
+  private readonly cooldownTracker = new CooldownTracker();
   private listener: AvailabilityListener | null = null;
 
   constructor(
@@ -71,24 +79,43 @@ export class ProviderRouter {
     this.listener = listener;
   }
 
+  /** Per-provider cooldown deadlines as a snapshot map. Empty when no
+   * provider is currently cooling down. The runtime stats surface
+   * overlays these onto each throttled provider's stats; non-throttled
+   * providers that happen to be on cooldown (rare, e.g. Anthropic with
+   * no maxConcurrent configured) won't appear in the stats output --
+   * visible only in the router's error message stream. */
+  cooldowns(): Record<string, number> {
+    return Object.fromEntries(this.cooldownTracker.snapshot());
+  }
+
   /** Looks up a fixed task's configured priority list. The task-derived
    * throttle priority is the default; an explicit `options.priority` wins
    * (rare -- direct callers might want to send a synthetic request as
-   * background without reverse-engineering the task kind). */
+   * background without reverse-engineering the task kind). The full
+   * precedence chain -- caller > instance > task default -- is resolved
+   * per-entry inside completeWithEntries, so we don't pre-stamp
+   * `merged.priority` here: doing so would lose the signal that
+   * distinguishes "caller didn't set a priority" from "caller set it to
+   * the task default", and the instance-level override wouldn't get a
+   * chance to win. */
   async complete(task: TaskKind, request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<RoutedResponse> {
-    const merged: CompleteOptions = { priority: priorityForTask(task), ...options };
-    return this.completeWithEntries(this.config.tasks[task], request, merged, `task "${task}"`);
+    return this.completeWithEntries(this.config.tasks[task], request, options, `task "${task}"`, task);
   }
 
   /** Runs the same priority/failover logic against an explicit entry list
    * instead of a fixed task -- used for complexity-tier routing, where the
    * entry list is picked dynamically per-turn rather than being one of the
-   * fixed task kinds. */
+   * fixed task kinds. The optional `task` parameter is the only way the
+   * per-entry priority resolver knows what the task-derived fallback
+   * should be; direct callers that don't have a task kind (e.g. the
+   * complexity-tier path) leave it unset and the fallback is "interactive". */
   async completeWithEntries(
     entries: ProviderEntry[],
     request: AnthropicMessagesRequest,
     options?: CompleteOptions,
     label = "entries",
+    task?: TaskKind,
   ): Promise<RoutedResponse> {
     const sorted = [...entries].sort((a, b) => a.priority - b.priority);
     let lastError: Error | undefined;
@@ -104,26 +131,40 @@ export class ProviderRouter {
         skipped.push(`"${entry.provider}" is not a configured provider`);
         continue;
       }
-      if (!this.cooldowns.isAvailable(provider.name)) {
+      if (!this.cooldownTracker.isAvailable(provider.name)) {
         skipped.push(`"${entry.provider}" is cooling down after a rate limit or outage`);
         continue;
       }
 
-      const budget = this.config.openaiCompatibleInstances[entry.provider]?.budget;
+      const instanceConfig = this.config.openaiCompatibleInstances[entry.provider];
+      const budget = instanceConfig?.budget;
       if (!(await this.spendTracker.isWithinBudget(entry.provider, budget))) {
         skipped.push(`"${entry.provider}" has spent its configured budget for this period`);
         continue;
       }
 
+      // Per-instance priority resolution. Precedence:
+      //   1. caller-supplied `options.priority` (highest)
+      //   2. instance-pinned `priority` from config.json (overrides the
+      //      task default for this provider specifically)
+      //   3. task-derived default (or "interactive" when no task is in scope)
+      // Resolving per-entry rather than once in complete() is what makes
+      // the instance override possible -- each candidate gets a chance to
+      // contribute its own priority before its request is dispatched.
+      const resolvedPriority: Priority = options?.priority
+        ?? instanceConfig?.priority
+        ?? (task ? priorityForTask(task) : "interactive");
+      const mergedOptions: CompleteOptions = { ...options, priority: resolvedPriority };
+
       try {
-        const response = await provider.complete(request, options);
+        const response = await provider.complete(request, mergedOptions);
         // A success is proof the window reopened, whatever we last recorded.
         this.listener?.onAvailable(provider.name);
         return { ...response, providerName: provider.name };
       } catch (err) {
         if (err instanceof ProviderUnavailableError) {
           const retryAfterMs = err.retryAfterMs ?? DEFAULT_COOLDOWN_MS;
-          this.cooldowns.markUnavailable(provider.name, err.retryAfterMs);
+          this.cooldownTracker.markUnavailable(provider.name, err.retryAfterMs);
           // Anthropic's 429 carries its own 5-hour unified reset, so this is
           // the exact moment and duration a subscription window is known to
           // be exhausted -- the one signal worth telling the manager about.

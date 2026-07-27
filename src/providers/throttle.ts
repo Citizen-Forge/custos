@@ -75,6 +75,30 @@ function combineSignals(primary: AbortSignal | undefined, fallback: AbortSignal)
   return controller.signal;
 }
 
+/** Per-throttle load snapshot. Returned by `ThrottledProvider.stats()` and
+ * folded into RuntimeStats by the runtime; the same shape gets logged
+ * periodically and surfaced through the admin stats endpoint so all
+ * monitoring surfaces (UI, log scraper, alert rule) consume one
+ * canonical schema. */
+export interface ThrottleStats {
+  /** Provider name (matches the key in `openaiCompatibleInstances`, or
+   * "anthropic" for the wrapped Anthropic provider). */
+  name: string;
+  /** Currently in-flight requests. */
+  active: number;
+  /** Sub-queue depth for interactive requests. */
+  queuedInteractive: number;
+  /** Sub-queue depth for background requests. */
+  queuedBackground: number;
+  /** Sum of both buckets -- equivalent to the old `queued` getter. */
+  queuedTotal: number;
+  /** Configured slot cap. 0 means "not throttled" (no ThrottledProvider
+   * wrap), in which case `slotsUtilization` is also 0. */
+  maxConcurrent: number;
+  /** `active / maxConcurrent`, in [0, 1]. 0 when not throttled. */
+  slotsUtilization: number;
+}
+
 export interface ThrottleOptions {
   /** Max in-flight requests this provider will handle simultaneously.
    * 1 forces strict serial (useful for single-shot local models). */
@@ -142,6 +166,27 @@ export class ThrottledProvider implements Provider {
    * without conflating the two. */
   queuedFor(priority: Priority): number {
     return priority === "interactive" ? this.interactivePending.length : this.backgroundPending.length;
+  }
+
+  /** Snapshot of this throttle's current load, in a shape the runtime
+   * stats surface (and any external monitoring) can consume without
+   * poking at internal getters one field at a time. Safe to call on
+   * any throttled provider; returns 0/empty values when idle. */
+  stats(): ThrottleStats {
+    const queuedInteractive = this.interactivePending.length;
+    const queuedBackground = this.backgroundPending.length;
+    return {
+      name: this.name,
+      active: this.inFlight,
+      queuedInteractive,
+      queuedBackground,
+      queuedTotal: queuedInteractive + queuedBackground,
+      maxConcurrent: this.slots,
+      // 0 means "provider isn't throttled, no ratio meaningful" -- the
+      // shape always includes the field so the JSON consumer doesn't
+      // have to special-case missing keys.
+      slotsUtilization: this.slots > 0 ? this.inFlight / this.slots : 0,
+    };
   }
 
   complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {

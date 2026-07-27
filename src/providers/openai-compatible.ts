@@ -1,6 +1,6 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type VendorMetadata } from "../types.js";
 import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf } from "./openai-translate.js";
-import type { CompleteOptions, Provider, ProviderResponse } from "./types.js";
+import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
 
 export interface OpenAICompatibleInstanceConfig {
@@ -30,6 +30,17 @@ export interface OpenAICompatibleInstanceConfig {
    * gateway imposes no additional wait on upstreams that can take the
    * full request rate. */
   maxConcurrent?: number;
+  /** Per-instance throttle priority override. The router's task-derived
+   * default (chat/perms/complexity classifiers -> "interactive";
+   * memoryCurator -> "background") still applies unless the instance
+   * pins its own. Tag Ollama as "background" so chat traffic to it
+   * doesn't lock out queued background work on its single slot -- the
+   * converse of the priority-queue's anti-starvation default, which
+   * assumes interactive callers should win. Omit for the router default;
+   * the admin UI's Add form defaults to "interactive" for non-Ollama
+   * presets so non-Ollama instances round-trip through the save path
+   * unchanged. Caller-supplied `options.priority` always wins over both. */
+  priority?: Priority;
   /** When true, late vendor metadata (arriving after
    * `content_block_start` has fired) is emitted inline as a custom
    * `content_block_delta` with `delta.type === "vendor_metadata_delta"`.

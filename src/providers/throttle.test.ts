@@ -487,6 +487,59 @@ describe("ThrottledProvider", () => {
     qBackground.catch(() => {});
   });
 
+  it("combineSignals fallback race: abortAll between t.complete() and runWithSlotAsync's microtask rejects synchronously", async () => {
+    // Pins the early-return on already-aborted fallback in combineSignals.
+    // Race: t.complete() synchronously pushes internalController onto
+    // inFlightControllers and queues runWithSlotAsync as a microtask. If
+    // a test then synchronously calls abortAll() (the only public path
+    // that touches internalController), the controller is aborted BEFORE
+    // the microtask reaches combineSignals. AbortSignal listeners don't
+    // replay retroactively, so without the early-return combineSignals
+    // would attach a listener that never fires and inner.complete() would
+    // park forever. With the early-return, the inner sees the already-
+    // aborted combined signal and rejects on the next microtask.
+    const t = new ThrottledProvider(makeBlockingProvider(), { maxConcurrent: 1 });
+    const p = t.complete(ZERO_REQ);
+    t.abortAll("reload");
+    await assert.rejects(p, (err: unknown) => err instanceof Error);
+    assert.equal(t.active, 0, "abort reached the inner promise; the slot released");
+  });
+
+  it("stats() returns a shape matching the current load snapshot", () => {
+    // Static snapshot on an idle throttle with no priorityAgedMs
+    // override so the shape is deterministic.
+    const inner = makeBlockingProvider();
+    const t = new ThrottledProvider(inner, { maxConcurrent: 3 });
+    const s = t.stats();
+    assert.equal(s.name, "blocking");
+    assert.equal(s.active, 0);
+    assert.equal(s.queuedInteractive, 0);
+    assert.equal(s.queuedBackground, 0);
+    assert.equal(s.queuedTotal, 0);
+    assert.equal(s.maxConcurrent, 3);
+    assert.equal(s.slotsUtilization, 0);
+
+    // Drive some load and re-check.
+    const ps = Array.from({ length: 5 }, () => t.complete(ZERO_REQ, { priority: "interactive" }));
+    const s2 = t.stats();
+    assert.equal(s2.active, 3, "first 3 took slots");
+    assert.equal(s2.queuedInteractive, 2, "next 2 queued in interactive bucket");
+    assert.equal(s2.queuedBackground, 0, "no background traffic");
+    assert.equal(s2.queuedTotal, 2);
+    assert.equal(s2.slotsUtilization, 1, "3/3 slots used");
+
+    // Add some background queued entries.
+    const ps2 = Array.from({ length: 2 }, () => t.complete(ZERO_REQ, { priority: "background" }));
+    const s3 = t.stats();
+    assert.equal(s3.queuedInteractive, 2);
+    assert.equal(s3.queuedBackground, 2);
+    assert.equal(s3.queuedTotal, 4);
+
+    // Cleanup dangling promises.
+    ps.forEach((p) => p.catch(() => {}));
+    ps2.forEach((p) => p.catch(() => {}));
+  });
+
   it("abortAll with mixed interactive + background entries empties both buckets", async () => {
     // The full-abortAll path was previously exercised only with all
     // submissions in the default-interactive bucket. Pin it now with
