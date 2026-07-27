@@ -268,7 +268,8 @@ async function loadState() {
   state = await api("/admin/api/state");
   state.projects = (await api("/admin/api/projects")).projects;
   for (const project of state.projects) {
-    project.chats = (await api(`/admin/api/projects/${project.id}/chats`)).chats;
+    // Chats are lazy-loaded on first click of the chat toggle — no pre-fetch.
+    project.chats = null;
     // Fetch per-project settings which include budget + spend data AND agent roster.
     const settingsResp = await api(`/admin/api/projects/${project.id}/settings`);
     project.budget = settingsResp.settings.budget;
@@ -747,27 +748,40 @@ function renderProjectsPanel() {
       nameCell.appendChild(el("br"));
       nameCell.appendChild(el("span", { class: "small", text: project.workspaceDir }));
 
-      const chats = project.chats || [];
-      const chatCount = chats.length;
+      // Lazy-load toggle: fetches chats on first click, toggles detail row after.
       const chatToggle = el("span", {
         class: "small",
         style: "cursor: pointer; color: var(--accent); margin-left: 4px;",
-        text: chatCount === 0 ? "(no chats)" : `▼ ${chatCount} chat${chatCount !== 1 ? "s" : ""}`,
-        onclick: (ev) => {
+        text: `► Chats`,
+        onclick: async (ev) => {
           ev.stopPropagation();
-          const detailRow = tr.nextElementSibling;
-          if (detailRow && detailRow.classList.contains("chat-detail")) {
-            const hidden = detailRow.style.display === "none";
-            detailRow.style.display = hidden ? "" : "none";
-            chatToggle.textContent = hidden
-              ? `▲ ${chatCount} chat${chatCount !== 1 ? "s" : ""}`
-              : `▼ ${chatCount} chat${chatCount !== 1 ? "s" : ""}`;
+          let detailRow = tr.nextElementSibling;
+          if (!detailRow || !detailRow.classList.contains("chat-detail")) {
+            // First click — fetch chats and build the detail row.
+            chatToggle.textContent = "► Loading…";
+            let chats;
+            try {
+              const resp = await api(`/admin/api/projects/${project.id}/chats`);
+              chats = resp.chats || [];
+            } catch {
+              chats = [];
+            }
+            detailRow = el("tr", { class: "chat-detail" });
+            const detailTd = el("td", { colspan: "3", style: "padding: 0; border: none;" });
+            const chatWrap = el("div", { style: "margin: 0 0 8px 0; display: flex; flex-direction: column; gap: 4px;" });
+            for (const chat of chats) {
+              chatWrap.appendChild(renderChat(chat));
+            }
+            detailTd.appendChild(chatWrap);
+            detailRow.appendChild(detailTd);
+            tr.parentNode.insertBefore(detailRow, tr.nextSibling);
           }
+          const hidden = detailRow.style.display === "none";
+          detailRow.style.display = hidden ? "" : "none";
+          chatToggle.textContent = hidden ? "▲ Chats" : "► Chats";
         },
       });
-      if (chatCount > 0) {
-        nameCell.appendChild(chatToggle);
-      }
+      nameCell.appendChild(chatToggle);
       tr.appendChild(nameCell);
 
       // --- Column 2: Budget bar (compact inline) ---
@@ -851,18 +865,6 @@ function renderProjectsPanel() {
       tr.appendChild(controlsCell);
       tbody.appendChild(tr);
 
-      // Expandable chat detail row (hidden by default)
-      if (chatCount > 0) {
-        const detailTr = el("tr", { class: "chat-detail", style: "display: none;" });
-        const detailTd = el("td", { colspan: "3", style: "padding: 0; border: none;" });
-        const chatWrap = el("div", { style: "margin: 0 0 8px 0; display: flex; flex-direction: column; gap: 4px;" });
-        for (const chat of chats) {
-          chatWrap.appendChild(renderChat(chat));
-        }
-        detailTd.appendChild(chatWrap);
-        detailTr.appendChild(detailTd);
-        tbody.appendChild(detailTr);
-      }
     }
 
     table.appendChild(tbody);
