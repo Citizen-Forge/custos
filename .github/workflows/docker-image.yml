@@ -1,0 +1,130 @@
+# Builds and pushes the Custos Docker image to ghcr.io.
+#
+# Free-hosting rationale: GHCR is free for public GitHub repos with
+# unlimited storage and bandwidth. Docker Hub's free tier rate-limits
+# unauthenticated pulls to 100 per 6 hours, which breaks the
+# Unraid-pull-on-update flow. ECR / Quay would also work but require
+# extra accounts and credential plumbing.
+#
+# Trigger scope:
+#   - push to main: build + push to ghcr.io with :main and :sha-<short>
+#     tags. Unraid's `docker compose pull && up -d` fetches whichever
+#     tag the local docker-compose.yml pins to.
+#   - pull_request to main: build-only validation. Login is skipped
+#     because fork PRs don't have `secrets.GITHUB_TOKEN` populated
+#     (security isolation) -- the login step has `if: github.event_name
+#     == 'push'` to fail-loud-or-skip correctly. PR builds still read
+#     the GHA cache (cache-from) so warm builds are fast.
+#
+# Concurrency: cancel older runs when a new commit lands before the
+# previous build finishes -- saves GHA minutes and avoids overlapping
+# cache writes.
+#
+# First-time setup on a fresh repo:
+#   1. After the first push runs successfully, the package is created
+#      PRIVATE on ghcr.io by default. Go to GitHub -> Packages ->
+#      ghcr.io/citizen-forge/custos -> Package settings -> Change
+#      visibility -> Public, so the free unlimited-storage tier
+#      applies. Subsequent pushes inherit the package-level setting.
+#   2. Tags visible after first push: `:latest`, `:main`, `:sha-<short>`.
+#      On Unraid, `docker pull ghcr.io/citizen-forge/custos:main` is
+#      the rolling channel that this workflow updates on every push.
+#
+# Data preservation guarantee for the running deployment: the workflow
+# only REPLACES the image; the user's docker-compose.yml keeps the
+# same bind mounts (`./data`, `./workspace`, `./data/claude-home`) and
+# named volumes (`qdrant-storage`), so `docker compose pull && up -d`
+# swaps the image without touching runtime state.
+
+name: docker-image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel older runs in flight when a new commit lands on the same ref.
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default token scopes read repo contents; packages:write is needed
+# to push to ghcr.io.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Fork PRs reach this step with secrets.GITHUB_TOKEN populated
+      # as an empty object. Skipping on pull_request events avoids a
+      # confusing login failure on every incoming fork PR. Same-repo
+      # PR builds still happen (the build step reads cache + validates
+      # the Dockerfile parses) without trying to push to GHCR.
+      - name: Log in to ${{ env.REGISTRY }}
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `main` is the rolling channel Unraid pulls.
+          # `sha-<short>` is the immutable per-commit tag for diagnostics
+          # and rollbacks ("redeploy to image before commit X").
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=${{ github.repository }}
+            org.opencontainers.image.description=${{ github.event.repository.description }}
+            org.opencontainers.image.source=${{ github.event.repository.html_url }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.licenses=PolyForm-Noncommercial-1.0.0
+
+      - name: Build (and push to ${{ env.REGISTRY }} on main)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          # linux/amd64 only -- Unraid runs x86_64. Multi-arch would
+          # double workflow minutes and isn't justified yet; add
+          # linux/arm64 when (if) there's a Pi-class deployment.
+          platforms: linux/amd64
+          # PR builds validate the Dockerfile without pushing (no token
+          # scopes in fork PRs anyway).
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub Actions cache (free 10GB per repo). `scope` keys the
+          # cache to the ref so other workflows on this repo don't
+          # collide. `cache-from` reads the cache on every build (PR
+          # included). `cache-to` writes only when `push: true` -- on
+          # PRs the empty-string form is the documented "no writer"
+          # no-op and skips the writer's warning.
+          cache-from: type=gha,scope=${{ github.ref }}
+          cache-to: ${{ github.event_name == 'push' && format('type=gha,scope={0},mode=max', github.ref) || '' }}
+          # Provenance attestation (SLSA in-toto). ~Free; downstream
+          # verifiers can attest the image came from this repo + SHA.
+          provenance: true
