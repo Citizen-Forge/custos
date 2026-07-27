@@ -84,12 +84,17 @@ async function describeProviders(runtime: Runtime) {
     Object.entries(providers).map(async ([name, def]) => {
       const budget = def.budget;
       const spend = budget ? await runtime.spendTracker.getSpend(name, budget) : null;
+      // Expose pricing from the first enabled model so the admin UI's
+      // Edit form can pre-fill its pricing fields (pricing is per-model
+      // in the new shape but most providers have uniform pricing).
+      const firstEnabled = def.models.find((m) => m.enabled) ?? def.models[0];
       return [
         name,
         {
           baseUrl: def.baseUrl,
           costType: def.costType,
           models: def.models,
+          pricing: firstEnabled?.pricing ?? null,
           apiKeyConfigured: Boolean(def.apiKey),
           apiKeyMasked: def.apiKey ? maskApiKey(def.apiKey) : null,
           budget: def.budget ?? null,

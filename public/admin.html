@@ -225,7 +225,7 @@ function render() {
   const app = $("#app");
   app.innerHTML = "";
   app.appendChild(renderAnthropicPanel());
-  app.appendChild(renderInstancesPanel());
+  app.appendChild(renderProvidersPanel());
   app.appendChild(renderTasksPanel());
   app.appendChild(renderComplexityPanel());
   app.appendChild(renderProjectsPanel());
@@ -295,59 +295,81 @@ async function startOAuthFlow() {
   } catch (err) {
     showToast(err.message, true);
   }
+}  // -- Model provider instances (new providers shape) ------------------
+
+function providerModelList(prov) {
+  // Return comma-separated enabled model names, with a count of total.
+  const enabled = (prov.models || []).filter(m => m.enabled).map(m => m.name);
+  const total = (prov.models || []).length;
+  if (!enabled.length) return "—";
+  const label = enabled.join(", ");
+  return total > enabled.length ? `${label} (+${total - enabled.length} disabled)` : label;
 }
 
-// -- Model provider instances ---------------------------------------------
-
-function enterEditRow(row, name, instance) {
-  // Swap the row's body with a colspan cell holding the edit form.
-  // Save and Cancel both end up calling `loadState()` (Cancel directly,
-  // Save via `reloadAfter`) so we don't have to do any rollback bookkeeping
-  // here -- the next render produces a fresh, non-edit row.
-  // colspan matches the 8-column table header in renderInstancesPanel().
-  // If a column is added below (e.g. an at-a-glance "Uptime" cell), bump
-  // this in lockstep -- a stale colspan silently truncates the edit
-  // summary under the top buttons.
-  const wrapper = el("td", { colspan: "8" });
+function enterEditRow(row, name, prov) {
+  const wrapper = el("td", { colspan: "9" });
   const form = el("div");
 
-  const urlInput = el("input", { type: "text", value: instance.baseUrl });
-  const modelInput = el("input", { type: "text", value: instance.model });
-  const keyInput = el("input", { type: "password", placeholder: instance.apiKeyConfigured ? "(set -- enter to replace)" : "API key (blank = none)" });
-  // `value` falls back to empty string when maxConcurrent was null on
-  // the loaded state, so the input renders blank rather than "null".
-  // The form's Save handler translates an empty input to `null` on the wire,
-  // which the server treats as "clear the throttle".
-  const throttleInput = el("input", { type: "number", min: "1", step: "1", value: instance.maxConcurrent ?? "", placeholder: "Unlimited" });
-  // Priority selector. Defaults to "interactive" when the loaded instance
-  // had no per-instance override (null on the wire) -- matches the
-  // existing task-derived default for chat/perms/complexity traffic, so
-  // non-Ollama instances round-trip through Save unchanged. Server stores
-  // the explicit value, even if it's "interactive", so a future flip back
-  // to "use task default" requires an explicit "Clear" path (currently
-  // the form always sends the selected value).
+  const urlInput = el("input", { type: "text", value: prov.baseUrl });
+  const keyInput = el("input", { type: "password", placeholder: prov.apiKeyConfigured ? "(set -- enter to replace)" : "API key (blank = none)" });
+
+  // --- Cost type selector ---
+  const costTypeSelect = el("select", {}, [
+    el("option", { value: "free", text: "Free" }),
+    el("option", { value: "subscription", text: "Subscription" }),
+    el("option", { value: "metered", text: "Metered (pay per token)" }),
+  ]);
+  costTypeSelect.value = prov.costType || "free";
+
+  // --- Models list (simple: one input per model, first is primary) ---
+  const modelsInput = el("input", { type: "text", value: (prov.models || []).filter(m => m.enabled).map(m => m.name).join(", "), placeholder: "model1, model2, ..." });
+  const modelsHint = el("div", { class: "small", text: (prov.models || []).length > 0
+    ? `Currently ${prov.models.length} model(s). Comma-separate multiple model names.`
+    : "Enter model names, comma-separated. Enables all by default." });
+
+  // --- Throttle (maxConcurrent) ---
+  const throttleInput = el("input", { type: "number", min: "1", step: "1", value: prov.maxConcurrent ?? "", placeholder: "Unlimited" });
+
+  // --- RPM limit ---
+  const rpmInput = el("input", { type: "number", min: "1", step: "1", value: prov.rpmLimit ?? "", placeholder: "Unlimited" });
+
+  // --- Priority selector ---
   const prioritySelect = el("select", {}, [
     el("option", { value: "interactive", text: "Interactive" }),
     el("option", { value: "background", text: "Background" }),
   ]);
-  prioritySelect.value = instance.priority ?? "interactive";
+  prioritySelect.value = prov.priority ?? "interactive";
 
   form.appendChild(el("div", { class: "row" }, [urlInput]));
-  form.appendChild(el("div", { class: "row" }, [modelInput]));
   form.appendChild(el("div", { class: "row" }, [keyInput]));
+  form.appendChild(el("div", { class: "row" }, [
+    el("label", { text: "Cost type" }),
+    costTypeSelect,
+  ]));
+  form.appendChild(el("div", { class: "row" }, [
+    el("label", { text: "Models" }),
+    modelsInput,
+  ]));
+  form.appendChild(modelsHint);
   form.appendChild(el("div", { class: "row" }, [
     el("label", { text: "Throttle" }),
     throttleInput,
+    el("span", { class: "small", text: "max concurrent" }),
+    el("label", { text: "RPM limit" }),
+    rpmInput,
+    el("span", { class: "small", text: "requests/min (set to 10 for Gemini Free)" }),
+  ]));
+  form.appendChild(el("div", { class: "row" }, [
     el("label", { text: "Priority" }),
     prioritySelect,
-    el("span", { class: "small", text: "max concurrent + per-instance throttle bucket (interactive preempts background)" }),
+    el("span", { class: "small", text: "interactive preempts background" }),
   ]));
 
-  form.appendChild(el("p", { class: "small", text: "Optional: budget-based fallback. If set, this instance is skipped once its spend cap is hit for the current period, and the router falls through to the next entry in that task's priority list." }));
-  const inputPriceInput = el("input", { type: "text", placeholder: "$ per 1M input tokens", value: instance.pricing ? String(instance.pricing.inputPerMillion) : "" });
-  const outputPriceInput = el("input", { type: "text", placeholder: "$ per 1M output tokens", value: instance.pricing ? String(instance.pricing.outputPerMillion) : "" });
-  const budgetLimitInput = el("input", { type: "text", placeholder: "budget cap $ (optional)", value: instance.budget ? String(instance.budget.limitUsd) : "" });
-  const budgetPeriodInput = el("input", { type: "text", placeholder: "period days (default 30)", value: instance.budget ? String(instance.budget.periodDays) : "" });
+  form.appendChild(el("p", { class: "small", text: "Optional: budget-based fallback. If set, this provider is skipped once its spend cap is hit for the current period." }));
+  const inputPriceInput = el("input", { type: "text", placeholder: "$ per 1M input tokens", value: prov.pricing ? String(prov.pricing.inputPerMillion) : "" });
+  const outputPriceInput = el("input", { type: "text", placeholder: "$ per 1M output tokens", value: prov.pricing ? String(prov.pricing.outputPerMillion) : "" });
+  const budgetLimitInput = el("input", { type: "text", placeholder: "budget cap $ (optional)", value: prov.budget ? String(prov.budget.limitUsd) : "" });
+  const budgetPeriodInput = el("input", { type: "text", placeholder: "period days (default 30)", value: prov.budget ? String(prov.budget.periodDays) : "" });
   form.appendChild(el("div", { class: "row" }, [inputPriceInput, outputPriceInput, budgetLimitInput, budgetPeriodInput]));
 
   const saveBtn = el("button", { class: "primary", text: "Save" });
@@ -355,16 +377,18 @@ function enterEditRow(row, name, instance) {
   form.appendChild(el("div", { class: "row" }, [saveBtn, cancelBtn]));
 
   wrapper.appendChild(form);
-
-  // Replace the row's contents in place. We don't snapshot the original
-  // because Cancel and Save both re-render the whole panel via loadState.
   while (row.firstChild) row.removeChild(row.firstChild);
   row.appendChild(wrapper);
 
   saveBtn.onclick = () => {
-    // Empty input => null on the wire => server drops the field => throttle off.
     const throttle = parseThrottle(throttleInput);
     if (throttle === undefined) return;
+    const rpmRaw = rpmInput.value.trim();
+    const rpmVal = rpmRaw ? Number(rpmRaw) : null;
+    if (rpmVal !== null && (!Number.isInteger(rpmVal) || rpmVal < 1)) {
+      showToast("RPM limit must be a positive integer (or blank for unlimited)", true);
+      return;
+    }
     const hasPricing = inputPriceInput.value || outputPriceInput.value;
     if (budgetLimitInput.value && !hasPricing) {
       showToast("A budget needs pricing set too", true);
@@ -372,54 +396,63 @@ function enterEditRow(row, name, instance) {
     }
     const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : null;
     const budget = budgetLimitInput.value ? { limitUsd: Number(budgetLimitInput.value), periodDays: Number(budgetPeriodInput.value) || 30 } : null;
-    reloadAfter(api(`/admin/api/instances/${encodeURIComponent(name)}`, {
+    const modelNames = modelsInput.value.split(",").map(s => s.trim()).filter(Boolean);
+    const hasPricing = inputPriceInput.value || outputPriceInput.value;
+    const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : null;
+    const models = modelNames.map((m, i) => ({
+      name: m,
+      enabled: true,
+      // Attach pricing to the first model (pricing is per-model in the new
+      // API shape; most providers have uniform pricing across models).
+      ...(i === 0 && pricing ? { pricing } : {}),
+    }));
+    reloadAfter(api(`/admin/api/providers/${encodeURIComponent(name)}`, {
       method: "PUT",
       body: {
         baseUrl: urlInput.value,
-        model: modelInput.value,
+        costType: costTypeSelect.value,
+        models,
         apiKey: keyInput.value || null,
-        pricing,
-        budget,
         maxConcurrent: throttle,
+        rpmLimit: rpmVal,
         priority: prioritySelect.value,
+        budget,
       },
-    }), "Instance saved");
+    }), "Provider saved");
   };
   cancelBtn.onclick = () => loadState();
 }
 
-function renderInstancesPanel() {
+function renderProvidersPanel() {
   const section = el("section", { class: "panel" });
   section.appendChild(el("h2", { text: "Model providers" }));
-  section.appendChild(el("p", { class: "desc", text: "Any provider speaking the OpenAI chat-completions format: Ollama, OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter, or a custom endpoint. Give a task a fast cheap model or a bigger capable one." }));
+  section.appendChild(el("p", { class: "desc", text: "Any provider speaking the OpenAI chat-completions format: Ollama, OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter, or a custom endpoint. Each provider can serve multiple models sharing the same base URL, API key, and rate limit." }));
 
   const table = el("table");
   table.appendChild(el("tr", {}, [
-    el("th", { text: "Name" }), el("th", { text: "Base URL" }), el("th", { text: "Model" }), el("th", { text: "API key" }), el("th", { text: "Budget" }), el("th", { text: "Throttle" }), el("th", { text: "Priority" }), el("th", { text: "" }),
+    el("th", { text: "Name" }), el("th", { text: "Base URL" }), el("th", { text: "Models" }), el("th", { text: "Type" }), el("th", { text: "API key" }), el("th", { text: "Throttle" }), el("th", { text: "RPM" }), el("th", { text: "Priority" }), el("th", { text: "" }),
   ]));
-  for (const [name, instance] of Object.entries(state.instances)) {
-    const budgetText = instance.budget
-      ? `$${instance.spentUsd.toFixed(2)} / $${instance.budget.limitUsd} per ${instance.budget.periodDays}d`
-      : instance.pricing ? "tracked, no cap" : "—";
-    // `instance.maxConcurrent` arrives as `number | null` from /admin/api/state.
-    // Display an em-dash when null (no throttle) so the cell is unambiguous.
-    const throttleText = instance.maxConcurrent == null ? "—" : String(instance.maxConcurrent);
-    // Same null-or-value shape as maxConcurrent: null means "no per-instance
-    // override, fall back to the router's task-derived default". Capitalised
-    // first letter to match the selector labels below.
-    const priorityText = instance.priority == null ? "—" : (instance.priority === "interactive" ? "Interactive" : "Background");
+  for (const [name, prov] of Object.entries(state.providers)) {
+    const budgetText = prov.budget
+      ? `$${prov.spentUsd.toFixed(2)} / $${prov.budget.limitUsd} per ${prov.budget.periodDays}d`
+      : "—";
+    const throttleText = prov.maxConcurrent == null ? "—" : String(prov.maxConcurrent);
+    const rpmText = prov.rpmLimit == null ? "—" : String(prov.rpmLimit);
+    const priorityText = prov.priority == null ? "—" : (prov.priority === "interactive" ? "Interactive" : "Background");
+    const costLabel = { free: "Free", subscription: "Sub", metered: "Metered" }[prov.costType] || prov.costType || "?";
     const dataRow = el("tr", {}, [
       el("td", { text: name }),
-      el("td", { text: instance.baseUrl }),
-      el("td", { text: instance.model }),
-      el("td", { text: instance.apiKeyConfigured ? instance.apiKeyMasked : "—" }),
-      el("td", { text: budgetText }),
+      el("td", { text: prov.baseUrl }),
+      el("td", { text: providerModelList(prov) }),
+      el("td", { text: costLabel }),
+      el("td", { text: prov.apiKeyConfigured ? prov.apiKeyMasked : "—" }),
       el("td", { text: throttleText }),
+      el("td", { text: rpmText }),
       el("td", { text: priorityText }),
       el("td", {}, [
-        el("button", { text: "Edit", onclick: () => enterEditRow(dataRow, name, instance) }),
+        el("button", { text: "Edit", onclick: () => enterEditRow(dataRow, name, prov) }),
         el("button", { text: "Delete", class: "danger", onclick: () => reloadAfter(
-          api(`/admin/api/instances/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
+          api(`/admin/api/providers/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
         )}),
       ]),
     ]);
@@ -428,41 +461,46 @@ function renderInstancesPanel() {
   section.appendChild(table);
 
   section.appendChild(el("hr", { class: "sep" }));
-  section.appendChild(el("p", { class: "small", text: "Add or update an instance" }));
+  section.appendChild(el("p", { class: "small", text: "Add or update a provider" }));
 
-  const nameInput = el("input", { type: "text", placeholder: "name (e.g. ollama-fast)" });
+  const nameInput = el("input", { type: "text", placeholder: "name (e.g. gemini-free)" });
   const urlInput = el("input", { type: "text", placeholder: "base URL" });
-  const modelInput = el("input", { type: "text", placeholder: "model name" });
   const keyInput = el("input", { type: "password", placeholder: "API key (leave blank if none)" });
-  // Throttle input for new-instance creation. Auto-filled to "1" when
-  // the user picks an Ollama preset (the canonical case where local
-  // inference is single-slot on consumer hardware); left blank for other
-  // presets so the gateway imposes no concurrency limit and the upstream
-  // is allowed to set its own.
+
+  // --- Cost type selector for new providers ---
+  const costTypeSelect = el("select", {}, [
+    el("option", { value: "free", text: "Free (no cost, rate-limited)" }),
+    el("option", { value: "subscription", text: "Subscription (flat fee)" }),
+    el("option", { value: "metered", text: "Metered (pay per token)" }),
+  ]);
+
+  // --- Model names input ---
+  const modelNamesInput = el("input", { type: "text", placeholder: "model1, model2 (comma-separated)" });
+  const modelsHint = el("div", { class: "small" });
+
+  // --- Throttle (maxConcurrent) ---
   const throttleInput = el("input", { type: "number", min: "1", step: "1", placeholder: "Unlimited" });
-  // Priority selector for new-instance creation. The form always sends
-  // the selected value (never null), so non-Ollama instances persist
-  // "interactive" to config.json explicitly -- matches the existing
-  // task-derived default for general/perms/complexity traffic, so
-  // round-tripping through Save is a no-op behaviourally. Ollama preset
-  // auto-fills "background" so chat traffic to a local Ollama gets
-  // bumped behind queued curator work on its single slot.
+
+  // --- RPM limit (new!) ---
+  const rpmInput = el("input", { type: "number", min: "1", step: "1", value: "10", placeholder: "RPM limit" });
+  // Auto-fill RPM to 10 for known rate-limited presets.
+  function autoFillRpm(presetId) {
+    if (presetId === "gemini") { rpmInput.value = "10"; }
+    else if (presetId.startsWith("ollama")) { rpmInput.value = ""; }
+    else { rpmInput.value = ""; }
+  }
+
+  // --- Priority selector ---
   const prioritySelect = el("select", {}, [
     el("option", { value: "interactive", text: "Interactive" }),
     el("option", { value: "background", text: "Background" }),
   ]);
-  const modelsHint = el("div", { class: "small" });
 
   const presetSelect = el("select", { onchange: (ev) => {
     const preset = state.providerPresets.find((p) => p.id === ev.target.value);
     if (preset && preset.id !== "custom") urlInput.value = preset.baseUrl;
     if (preset && !nameInput.value) nameInput.value = preset.id;
-    // Ollama presets get the throttle + priority pair prefilled so a user
-    // adding "ollama" via the dropdown doesn't have to know either field
-    // exists -- they get the safe-default (single-slot + background)
-    // behaviour automatically. Other presets keep the empty/Interactive
-    // defaults so an unbounded Anthropic-class instance round-trips
-    // through Save unchanged.
+    autoFillRpm(preset ? preset.id : "");
     if (preset && preset.id.startsWith("ollama")) {
       throttleInput.value = "1";
       throttleInput.placeholder = "1 (Ollama preset)";
@@ -479,33 +517,42 @@ function renderInstancesPanel() {
 
   const row0 = el("div", { class: "row" }, [el("label", { text: "Preset" }), presetSelect]);
   const row1 = el("div", { class: "row" }, [nameInput, urlInput]);
-  const row2 = el("div", { class: "row" }, [modelInput, keyInput]);
-  // Throttle row sits between the apiKey row and the "List models"
-  // helper so it lands near the related fields without splitting them.
-  // The Priority select is inlined on the same row because the two
-  // fields are conceptually paired (both shape the per-provider
-  // concurrency limit), and packing them mirrors how the pricing/budget
-  // row above shares space.
+  const row2 = el("div", { class: "row" }, [el("label", { text: "Cost" }), costTypeSelect, keyInput]);
+  const rowModels = el("div", { class: "row" }, [el("label", { text: "Models" }), modelNamesInput]);
+
   const rowThrottle = el("div", { class: "row" }, [
     el("label", { text: "Throttle" }),
     throttleInput,
+    el("span", { class: "small", text: "max concurrent" }),
+    el("label", { text: "RPM" }),
+    rpmInput,
+    el("span", { class: "small", text: "req/min (Gemini Free = 10, blank = unlimited)" }),
+  ]);
+
+  const rowPriority = el("div", { class: "row" }, [
     el("label", { text: "Priority" }),
     prioritySelect,
-    el("span", { class: "small", text: "max concurrent + per-instance throttle bucket (interactive preempts background)" }),
+    el("span", { class: "small", text: "interactive preempts background" }),
   ]);
-  const row3 = el("div", { class: "row" }, [
+
+  const rowProbe = el("div", { class: "row" }, [
     el("button", { text: "List models", onclick: async () => {
       if (!urlInput.value) return showToast("Enter a base URL first", true);
       try {
         const { models } = await api("/admin/api/instances/probe-models", { method: "POST", body: { baseUrl: urlInput.value, apiKey: keyInput.value || undefined } });
-        modelsHint.textContent = models.length ? `Available: ${models.join(", ")}` : "No models found";
+        if (models.length) {
+          modelNamesInput.value = models.join(", ");
+          modelsHint.textContent = `Found ${models.length} model(s). Edit the list to enable only the ones you want.`;
+        } else {
+          modelsHint.textContent = "No models found. You can still enter model names manually.";
+        }
       } catch (err) {
         modelsHint.textContent = err.message;
       }
     }}),
   ]);
 
-  section.appendChild(el("p", { class: "small", text: "Optional: budget-based fallback. If set, this instance is skipped once its spend cap is hit for the current period, and the router falls through to the next entry in that task's priority list -- same mechanism as the rate-limit cooldown, triggered by cost instead." }));
+  section.appendChild(el("p", { class: "small", text: "Optional: budget-based fallback. If set, this provider is skipped once its spend cap is hit for the current period." }));
   const inputPriceInput = el("input", { type: "text", placeholder: "$ per 1M input tokens" });
   const outputPriceInput = el("input", { type: "text", placeholder: "$ per 1M output tokens" });
   const budgetLimitInput = el("input", { type: "text", placeholder: "budget cap in $ (optional)" });
@@ -514,21 +561,50 @@ function renderInstancesPanel() {
 
   const row5 = el("div", { class: "row" }, [
     el("button", { class: "primary", text: "Save", onclick: () => {
-      if (!nameInput.value || !urlInput.value || !modelInput.value) return showToast("Fill in name, base URL, and model", true);
+      if (!nameInput.value || !urlInput.value) return showToast("Fill in name and base URL", true);
+      const modelNames = modelNamesInput.value.split(",").map(s => s.trim()).filter(Boolean);
+      if (!modelNames.length) return showToast("Enter at least one model name", true);
       const hasPricing = inputPriceInput.value || outputPriceInput.value;
       if (budgetLimitInput.value && !hasPricing) return showToast("A budget needs pricing set too", true);
       const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : undefined;
       const budget = budgetLimitInput.value ? { limitUsd: Number(budgetLimitInput.value), periodDays: Number(budgetPeriodInput.value) || 30 } : undefined;
       const throttle = parseThrottle(throttleInput);
       if (throttle === undefined) return;
-      reloadAfter(api(`/admin/api/instances/${encodeURIComponent(nameInput.value)}`, { method: "PUT", body: { baseUrl: urlInput.value, model: modelInput.value, apiKey: keyInput.value || undefined, pricing, budget, maxConcurrent: throttle, priority: prioritySelect.value } }), "Instance saved");
+      const rpmRaw = rpmInput.value.trim();
+      const rpmVal = rpmRaw ? Number(rpmRaw) : null;
+      if (rpmVal !== null && (!Number.isInteger(rpmVal) || rpmVal < 1)) {
+        showToast("RPM limit must be a positive integer (or blank for unlimited)", true);
+        return;
+      }
+      const hasPricing = inputPriceInput.value || outputPriceInput.value;
+      const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : null;
+      const models = modelNames.map((m, i) => ({
+        name: m,
+        enabled: true,
+        ...(i === 0 && pricing ? { pricing } : {}),
+      }));
+      reloadAfter(api(`/admin/api/providers/${encodeURIComponent(nameInput.value)}`, {
+        method: "PUT",
+        body: {
+          baseUrl: urlInput.value,
+          costType: costTypeSelect.value,
+          models,
+          apiKey: keyInput.value || undefined,
+          maxConcurrent: throttle,
+          rpmLimit: rpmVal,
+          priority: prioritySelect.value,
+          budget,
+        },
+      }), "Provider saved");
     }}),
   ]);
   section.appendChild(row0);
   section.appendChild(row1);
   section.appendChild(row2);
+  section.appendChild(rowModels);
   section.appendChild(rowThrottle);
-  section.appendChild(row3);
+  section.appendChild(rowPriority);
+  section.appendChild(rowProbe);
   section.appendChild(modelsHint);
   section.appendChild(row4);
   section.appendChild(row5);
