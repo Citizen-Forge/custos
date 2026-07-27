@@ -304,6 +304,31 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
     return { ok: true };
   });
 
+  /** Toggle a single model's enabled state without opening the edit form. */
+  app.patch("/admin/api/providers/:name/models/:model", async (req, reply) => {
+    const { name, model: modelName } = req.params as { name: string; model: string };
+    const { enabled } = req.body as { enabled: boolean };
+    if (typeof enabled !== "boolean") {
+      reply.code(400);
+      return { error: "enabled must be a boolean" };
+    }
+    // Validate the provider and model exist.
+    const provider = runtime.config.providers?.[name];
+    if (!provider) { reply.code(404); return { error: `provider "${name}" not found` }; }
+    const decodedModel = decodeURIComponent(modelName);
+    const idx = provider.models.findIndex((m) => m.name === decodedModel);
+    if (idx === -1) { reply.code(404); return { error: `model "${decodedModel}" not found under provider "${name}"` }; }
+
+    await updateConfig(runtime, (cfg) => {
+      const target = cfg.providers?.[name];
+      if (!target) return cfg;
+      const models = [...target.models];
+      models[idx] = { ...models[idx], enabled };
+      return { ...cfg, providers: { ...cfg.providers, [name]: { ...target, models } } };
+    });
+    return { ok: true };
+  });
+
   // Keep old instances endpoint working for backward compat.
   app.put("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };

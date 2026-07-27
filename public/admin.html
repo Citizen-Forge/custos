@@ -597,11 +597,32 @@ function renderProvidersPanel() {
     for (const model of models) {
       const modelRow = el("tr", { class: "model-detail" });
       const modelTd = el("td", { colspan: "8", style: "padding: 2px 8px 2px 28px; font-size: 12px; border-bottom: none;" });
-      modelTd.appendChild(el("span", {
-        class: `badge ${model.enabled ? "ok" : "off"}`,
-        style: "font-size: 10px; padding: 1px 5px; margin-right: 6px;",
-        text: model.enabled ? "✓" : "✕",
-      }));
+      // Inline toggle to enable/disable a model without opening the edit form.
+      const toggleLabel = el("label", {
+        style: "display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; cursor: pointer; font-size: 11px;",
+        title: model.enabled ? "Disable this model" : "Enable this model",
+      });
+      const toggleCb = el("input", { type: "checkbox", checked: model.enabled ? "checked" : undefined, style: "margin: 0;" });
+      const toggleBadge = el("span", { text: model.enabled ? "✓" : "✕", style: model.enabled ? "color: var(--ok);" : "color: var(--muted);" });
+      toggleCb.onchange = async () => {
+        const enabled = toggleCb.checked;
+        try {
+          await api(`/admin/api/providers/${encodeURIComponent(name)}/models/${encodeURIComponent(model.name)}`, {
+            method: "PATCH",
+            body: { enabled },
+          });
+          toggleLabel.title = enabled ? "Disable this model" : "Enable this model";
+          toggleBadge.textContent = enabled ? "✓" : "✕";
+          toggleBadge.style.color = enabled ? "var(--ok)" : "var(--muted)";
+        } catch (err) {
+          // Revert the checkbox on failure.
+          toggleCb.checked = !enabled;
+          showToast(err.message, true);
+        }
+      };
+      toggleLabel.appendChild(toggleCb);
+      toggleLabel.appendChild(toggleBadge);
+      modelTd.appendChild(toggleLabel);
       modelTd.appendChild(el("code", { style: "font-size: 12px;", text: model.name }));
       if (model.pricing) {
         modelTd.appendChild(el("span", { class: "small", style: "margin-left: 12px;", text: `In: $${model.pricing.inputPerMillion}/1M  Out: $${model.pricing.outputPerMillion}/1M` }));
