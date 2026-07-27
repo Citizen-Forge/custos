@@ -139,6 +139,8 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
         apiKeySource,
         apiKeyMasked: config.anthropic?.apiKey ? maskApiKey(config.anthropic.apiKey) : null,
         oauth,
+        maxConcurrent: config.anthropic?.maxConcurrent ?? null,
+        rpmLimit: config.anthropic?.rpmLimit ?? null,
       },
       providers: await describeProviders(runtime),
       embeddingProvider: config.embeddingProvider,
@@ -169,6 +171,34 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
 
   // -- Anthropic auth --------------------------------------------------
 
+  app.put("/admin/api/anthropic", async (req, reply) => {
+    const { apiKey, maxConcurrent, rpmLimit } = req.body as { apiKey?: string | null; maxConcurrent?: number | null; rpmLimit?: number | null };
+    if (maxConcurrent !== undefined && maxConcurrent !== null && (!Number.isInteger(maxConcurrent) || maxConcurrent < 1)) {
+      reply.code(400);
+      return { error: "maxConcurrent must be a positive integer (or null for unlimited)" };
+    }
+    if (rpmLimit !== undefined && rpmLimit !== null && (!Number.isInteger(rpmLimit) || rpmLimit < 1)) {
+      reply.code(400);
+      return { error: "rpmLimit must be a positive integer (or null for unlimited)" };
+    }
+    const config = await updateConfig(runtime, (cfg) => ({
+      ...cfg,
+      anthropic: {
+        ...cfg.anthropic,
+        ...(apiKey !== undefined ? { apiKey: apiKey || undefined } : {}),
+        ...(maxConcurrent !== undefined ? { maxConcurrent: maxConcurrent ?? undefined } : {}),
+        ...(rpmLimit !== undefined ? { rpmLimit: rpmLimit ?? undefined } : {}),
+      },
+    }));
+    const result: Record<string, unknown> = {};
+    if (apiKey !== undefined) {
+      result.apiKeySource = await getApiKeySource();
+      result.apiKeyMasked = config.anthropic?.apiKey ? maskApiKey(config.anthropic.apiKey) : null;
+    }
+    return { ok: true, ...result };
+  });
+
+  // Keep the old endpoint for backward compat.
   app.put("/admin/api/anthropic-key", async (req, reply) => {
     const { apiKey } = req.body as { apiKey: string | null };
     const config = await updateConfig(runtime, (cfg) => ({

@@ -494,15 +494,39 @@ function renderProvidersPanel() {
   anthKeyRow.appendChild(anthKeyInput);
   anthKeyRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", class: "primary", text: "Save", onclick: () => {
     if (!anthKeyInput.value) return showToast("Enter a key first", true);
-    reloadAfter(api("/admin/api/anthropic-key", { method: "PUT", body: { apiKey: anthKeyInput.value } }), "API key saved");
+    reloadAfter(api("/admin/api/anthropic", { method: "PUT", body: { apiKey: anthKeyInput.value } }), "API key saved");
   }}));
   if (anthropic.apiKeySource !== "none") {
-    anthKeyRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Clear", onclick: () => reloadAfter(api("/admin/api/anthropic-key", { method: "PUT", body: { apiKey: null } }), "API key cleared") }));
+    anthKeyRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Clear", onclick: () => reloadAfter(api("/admin/api/anthropic", { method: "PUT", body: { apiKey: null } }), "API key cleared") }));
   }
   anthSection.appendChild(anthKeyRow);
   const sourceNote = anthropic.apiKeySource === "env" ? "using ANTHROPIC_API_KEY from the environment — OAuth is tried first" :
     anthropic.apiKeySource === "file" ? `configured (${anthropic.apiKeyMasked})` : "not configured — used as fallback when OAuth is unavailable";
   anthSection.appendChild(el("p", { style: "font-size: 11px; color: var(--muted); margin: 2px 0 0;", text: sourceNote }));
+
+  // Throttle + RPM row
+  const anthThrottleRow = el("div", { class: "row", style: "margin-top: 8px; margin-bottom: 0;" });
+  const anthThrottleInput = el("input", { type: "number", min: "1", step: "1", style: "flex: 0 0 80px; font-size: 12px; padding: 4px 7px;", value: anthropic.maxConcurrent ?? "", placeholder: "Unlimited" });
+  const anthRpmInput = el("input", { type: "number", min: "1", step: "1", style: "flex: 0 0 80px; font-size: 12px; padding: 4px 7px;", value: anthropic.rpmLimit ?? "", placeholder: "Unlimited" });
+  anthThrottleRow.appendChild(el("span", { style: "font-size: 12px; color: var(--muted); min-width: 50px;", text: "Throttle" }));
+  anthThrottleRow.appendChild(anthThrottleInput);
+  anthThrottleRow.appendChild(el("span", { class: "small", text: "max concurrent" }));
+  anthThrottleRow.appendChild(el("span", { style: "font-size: 12px; color: var(--muted); margin-left: 12px;", text: "RPM" }));
+  anthThrottleRow.appendChild(anthRpmInput);
+  anthThrottleRow.appendChild(el("span", { class: "small", text: "requests/min" }));
+  anthThrottleRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Save", onclick: () => {
+    const maxC = parseThrottle(anthThrottleInput);
+    if (maxC === undefined) return;
+    const rpmRaw = anthRpmInput.value.trim();
+    const rpmVal = rpmRaw ? Number(rpmRaw) : null;
+    if (rpmVal !== null && (!Number.isInteger(rpmVal) || rpmVal < 1)) {
+      showToast("RPM limit must be a positive integer (or blank for unlimited)", true);
+      return;
+    }
+    reloadAfter(api("/admin/api/anthropic", { method: "PUT", body: { maxConcurrent: maxC, rpmLimit: rpmVal } }), "Throttle settings saved");
+  }}));
+  anthSection.appendChild(anthThrottleRow);
+
   section.appendChild(anthSection);
 
   const table = el("table");

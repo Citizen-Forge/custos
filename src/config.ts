@@ -20,6 +20,9 @@ export interface AnthropicConfig {
    * this is rarely needed; think of it as a safety knob, not a tuning
    * surface. */
   maxConcurrent?: number;
+  /** Requests per minute limit for the Anthropic provider. When set, the
+   * throttle proactively shapes traffic instead of only reacting to 429s. */
+  rpmLimit?: number;
 }
 
 export interface EmbeddingProviderConfig {
