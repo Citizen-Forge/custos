@@ -295,54 +295,9 @@ async function reloadAfter(promise, successMessage) {
 function render() {
   const app = $("#app");
   app.innerHTML = "";
-  app.appendChild(renderAnthropicPanel());
   app.appendChild(renderProvidersPanel());
-
   app.appendChild(renderProjectsPanel());
   app.appendChild(renderSecurityPanel());
-}
-
-// -- Anthropic -----------------------------------------------------------
-
-function renderAnthropicPanel() {
-  const { anthropic } = state;
-  const section = el("section", { class: "panel" });
-  section.appendChild(el("h2", { text: "Anthropic" }));
-  section.appendChild(el("p", { class: "desc", text: "OAuth (your Claude subscription) or an API key. OAuth is tried first if connected." }));
-
-  const oauthRow = el("div", { class: "row" });
-  const badge = anthropic.oauth.connected
-    ? el("span", { class: "badge ok", text: `Connected via ${anthropic.oauth.source === "claude-code" ? "Claude Code's session" : "Custos login"}` })
-    : el("span", { class: "badge off", text: "Not connected" });
-  oauthRow.appendChild(el("label", { text: "OAuth" }));
-  oauthRow.appendChild(badge);
-  if (anthropic.oauth.connected) {
-    oauthRow.appendChild(el("button", { class: "danger", text: "Disconnect", onclick: () => reloadAfter(api("/admin/api/oauth/disconnect", { method: "POST" }), "OAuth disconnected") }));
-  } else {
-    oauthRow.appendChild(el("button", { class: "primary", text: "Connect via OAuth", onclick: startOAuthFlow }));
-  }
-  section.appendChild(oauthRow);
-  section.appendChild(el("div", { id: "oauth-flow-area" }));
-
-  section.appendChild(el("hr", { class: "sep" }));
-
-  const keyRow = el("div", { class: "row" });
-  keyRow.appendChild(el("label", { text: "API key" }));
-  const keyInput = el("input", { type: "password", placeholder: anthropic.apiKeyMasked || "sk-ant-..." });
-  keyRow.appendChild(keyInput);
-  keyRow.appendChild(el("button", { class: "primary", text: "Save", onclick: () => {
-    if (!keyInput.value) return showToast("Enter a key first", true);
-    reloadAfter(api("/admin/api/anthropic-key", { method: "PUT", body: { apiKey: keyInput.value } }), "API key saved");
-  }}));
-  if (anthropic.apiKeySource !== "none") {
-    keyRow.appendChild(el("button", { text: "Clear", onclick: () => reloadAfter(api("/admin/api/anthropic-key", { method: "PUT", body: { apiKey: null } }), "API key cleared") }));
-  }
-  section.appendChild(keyRow);
-  const sourceNote = anthropic.apiKeySource === "env" ? "using ANTHROPIC_API_KEY from the environment" :
-    anthropic.apiKeySource === "file" ? `configured (${anthropic.apiKeyMasked})` : "not configured -- used only as a fallback if OAuth is unavailable";
-  section.appendChild(el("p", { class: "small", text: sourceNote }));
-
-  return section;
 }
 
 async function startOAuthFlow() {
@@ -507,7 +462,44 @@ function enterEditRow(row, name, prov) {
 function renderProvidersPanel() {
   const section = el("section", { class: "panel" });
   section.appendChild(el("h2", { text: "Model providers" }));
-  section.appendChild(el("p", { class: "desc", text: "Any provider speaking the OpenAI chat-completions format: Ollama, OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter, or a custom endpoint. Each provider can serve multiple models sharing the same base URL, API key, and rate limit." }));
+  section.appendChild(el("p", { class: "desc", text: "Anthropic (Claude) is built-in with OAuth support. OpenAI-compatible providers — Ollama, OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter — share a standard API pattern. Each provider can serve multiple models." }));
+
+  // --- Anthropic section (embedded inside Model providers panel) ---
+  const { anthropic } = state;
+  const anthSection = el("div", { style: "background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;" });
+  anthSection.appendChild(el("strong", { style: "font-size: 13px;", text: "Anthropic (Claude)" }));
+
+  // OAuth row
+  const oauthRow = el("div", { class: "row", style: "margin-bottom: 6px;" });
+  const oauthBadge = anthropic.oauth.connected
+    ? el("span", { class: "badge ok", style: "font-size: 11px;", text: `OAuth: ${anthropic.oauth.source === "claude-code" ? "Claude Code session" : "Custos login"}` })
+    : el("span", { class: "badge off", style: "font-size: 11px;", text: "OAuth: Not connected" });
+  oauthRow.appendChild(oauthBadge);
+  if (anthropic.oauth.connected) {
+    oauthRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px; color: var(--danger);", text: "Disconnect OAuth", onclick: () => reloadAfter(api("/admin/api/oauth/disconnect", { method: "POST" }), "OAuth disconnected") }));
+  } else {
+    oauthRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Connect OAuth", onclick: startOAuthFlow }));
+  }
+  anthSection.appendChild(oauthRow);
+  anthSection.appendChild(el("div", { id: "oauth-flow-area", style: "margin-top: 4px;" }));
+
+  // API key row
+  const anthKeyRow = el("div", { class: "row", style: "margin-bottom: 0;" });
+  const anthKeyInput = el("input", { type: "password", style: "flex: 0 0 200px; font-size: 12px; padding: 4px 7px;", placeholder: anthropic.apiKeyMasked || "Fallback API key (sk-ant-...)" });
+  anthKeyRow.appendChild(el("span", { style: "font-size: 12px; color: var(--muted); min-width: 50px;", text: "API key" }));
+  anthKeyRow.appendChild(anthKeyInput);
+  anthKeyRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", class: "primary", text: "Save", onclick: () => {
+    if (!anthKeyInput.value) return showToast("Enter a key first", true);
+    reloadAfter(api("/admin/api/anthropic-key", { method: "PUT", body: { apiKey: anthKeyInput.value } }), "API key saved");
+  }}));
+  if (anthropic.apiKeySource !== "none") {
+    anthKeyRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Clear", onclick: () => reloadAfter(api("/admin/api/anthropic-key", { method: "PUT", body: { apiKey: null } }), "API key cleared") }));
+  }
+  anthSection.appendChild(anthKeyRow);
+  const sourceNote = anthropic.apiKeySource === "env" ? "using ANTHROPIC_API_KEY from the environment — OAuth is tried first" :
+    anthropic.apiKeySource === "file" ? `configured (${anthropic.apiKeyMasked})` : "not configured — used as fallback when OAuth is unavailable";
+  anthSection.appendChild(el("p", { style: "font-size: 11px; color: var(--muted); margin: 2px 0 0;", text: sourceNote }));
+  section.appendChild(anthSection);
 
   const table = el("table");
   table.appendChild(el("tr", {}, [
