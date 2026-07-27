@@ -713,6 +713,7 @@ function renderProjectsPanel() {
   section.appendChild(el("h2", { text: "Projects" }));
   section.appendChild(el("p", { class: "desc", text: "Each project is a workspace folder. Chats run \"claude\" in a real terminal inside this container, scoped to that folder, and stream over WebSocket -- steer them from your phone, another computer, or the Custos desktop app. A chat's connect link is a bearer credential: anyone with it can type into that session. Don't share it, and don't expose this port past a network you trust." }));
 
+  // New project button
   section.appendChild(el("div", { class: "row" }, [
     el("button", { class: "primary", text: "New project", onclick: async () => {
       const name = prompt("Project name:");
@@ -724,13 +725,159 @@ function renderProjectsPanel() {
   const projects = state.projects || [];
   if (projects.length === 0) {
     section.appendChild(el("p", { class: "small", text: "No projects yet." }));
+  } else {
+    const table = el("table", { style: "table-layout: fixed;" });
+    const colgroup = el("colgroup", {}, [
+      el("col", { style: "width: 28%;" }),
+      el("col", { style: "width: 26%;" }),
+      el("col", { style: "width: 46%;" }),
+    ]);
+    table.appendChild(colgroup);
+
+    // Compact header
+    const thead = el("thead", {});
+    thead.appendChild(el("tr", {}, [
+      el("th", { text: "Project" }),
+      el("th", { text: "Budget" }),
+      el("th", { text: "Agents · Controls" }),
+    ]));
+    table.appendChild(thead);
+
+    const tbody = el("tbody", {});
+
+    for (const project of projects) {
+      const tr = el("tr", {});
+      const id = project.id;
+
+      // --- Column 1: Name + workspace + chat toggle ---
+      const nameCell = el("td", { style: "vertical-align: top;" });
+      nameCell.appendChild(el("strong", { text: project.name }));
+      nameCell.appendChild(el("br"));
+      nameCell.appendChild(el("span", { class: "small", text: project.workspaceDir }));
+
+      const chats = project.chats || [];
+      const chatCount = chats.length;
+      const chatToggle = el("span", {
+        class: "small",
+        style: "cursor: pointer; color: var(--accent); margin-left: 4px;",
+        text: chatCount === 0 ? "(no chats)" : `▼ ${chatCount} chat${chatCount !== 1 ? "s" : ""}`,
+        onclick: (ev) => {
+          ev.stopPropagation();
+          const detailRow = tr.nextElementSibling;
+          if (detailRow && detailRow.classList.contains("chat-detail")) {
+            const hidden = detailRow.style.display === "none";
+            detailRow.style.display = hidden ? "" : "none";
+            chatToggle.textContent = hidden
+              ? `▲ ${chatCount} chat${chatCount !== 1 ? "s" : ""}`
+              : `▼ ${chatCount} chat${chatCount !== 1 ? "s" : ""}`;
+          }
+        },
+      });
+      if (chatCount > 0) {
+        nameCell.appendChild(chatToggle);
+      }
+      tr.appendChild(nameCell);
+
+      // --- Column 2: Budget bar (compact inline) ---
+      const budgetCell = el("td", { style: "vertical-align: middle;" });
+      const budget = project.budget;
+      if (budget && budget.monthlyUsd != null) {
+        const limit = budget.monthlyUsd;
+        const spent = project.spentUsd ?? 0;
+        const pct = Math.min(100, Math.round((spent / limit) * 100));
+        let cls = "ok";
+        if (pct >= 90) cls = "danger";
+        else if (pct >= 70) cls = "warn";
+        const now = new Date();
+        const resetDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+        const resetStr = resetDate.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+
+        budgetCell.appendChild(el("div", { style: "display: flex; align-items: center; gap: 6px;" }, [
+          el("span", { class: "budget-label", text: `$${spent.toFixed(0)}` }),
+          el("div", { style: "flex: 1; background: var(--bg); border-radius: 999px; height: 6px; overflow: hidden; min-width: 60px;" }, [
+            el("div", { class: `budget-bar-fill ${cls}`, style: `width: ${Math.max(2, pct)}%; height: 100%; border-radius: 999px;` }),
+          ]),
+          el("span", { class: "budget-label", text: `$${limit.toFixed(0)}` }),
+          el("span", { class: "small", text: `↻${resetStr}` }),
+        ]));
+      } else {
+        budgetCell.appendChild(el("span", { class: "small", text: "—" }));
+      }
+      tr.appendChild(budgetCell);
+
+      // --- Column 3: Agent badges + action buttons ---
+      const controlsCell = el("td", { style: "vertical-align: middle;" });
+
+      // Agent roster (compact inline badges)
+      const roster = project.agents || [];
+      const roleLabels = { "product-owner": "PO", "engineering-manager": "EM", engineer: "Eng", qa: "QA", devops: "DevOps" };
+      const roleOrder = ["product-owner", "engineering-manager", "engineer", "qa", "devops"];
+      const byRole = new Map(roster.filter((a) => roleOrder.includes(a.role)).map((a) => [a.role, a]));
+      const shown = roleOrder.map((r) => byRole.get(r)).filter(Boolean);
+
+      if (shown.length || project.pmLastRunAt) {
+        const badgesRow = el("div", { style: "display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; align-items: center;" });
+        for (const agent of shown) {
+          // Compact badge: just providerKey/model, no role label (shown by position)
+          badgesRow.appendChild(el("span", { class: `badge ${agent.role === "engineer" ? "warn" : "ok"}`, style: "font-size: 10px; padding: 1px 5px;", text: `${roleLabels[agent.role]}:${agent.model.includes("/") ? agent.model.split("/").pop() : agent.model}` }));
+        }
+        if (project.pmLastRunAt) {
+          const pmDate = new Date(project.pmLastRunAt);
+          badgesRow.appendChild(el("span", { class: "small", style: "font-size: 10px;", text: `${pmDate.toLocaleDateString()} ${pmDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` }));
+        }
+        controlsCell.appendChild(badgesRow);
+      }
+
+      // Action buttons row
+      const actions = el("div", { style: "display: flex; flex-wrap: wrap; gap: 4px; align-items: center;" });
+      actions.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Chat", onclick: () => reloadAfter(
+        api(`/admin/api/projects/${project.id}/chats`, { method: "POST", body: {} }), "Chat started"
+      )}));
+      actions.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Rename", onclick: () => {
+        const name = prompt("Project name:", project.name);
+        if (!name || !name.trim() || name.trim() === project.name) return;
+        reloadAfter(api(`/admin/api/projects/${project.id}`, { method: "PATCH", body: { name: name.trim() } }), "Renamed");
+      }}));
+      if (project.paused) {
+        actions.appendChild(el("button", { class: "primary", style: "font-size: 11px; padding: 3px 8px;", text: "Resume", onclick: () => reloadAfter(
+          api(`/admin/api/projects/${project.id}/resume`, { method: "POST" }), "Project resumed"
+        )}));
+      } else {
+        actions.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Pause", onclick: () => reloadAfter(
+          api(`/admin/api/projects/${project.id}/pause`, { method: "POST" }), "Project paused"
+        )}));
+      }
+      actions.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Re-assign", onclick: () => reloadAfter(
+        api(`/admin/api/projects/${project.id}/reassign-models`, { method: "POST" }), "Project Manager re-assigning models"
+      )}));
+      actions.appendChild(el("button", { class: "danger", style: "font-size: 11px; padding: 3px 8px;", text: "Delete", onclick: () => {
+        if (!confirm(`Delete "${project.name}"? This stops and removes all its chats -- the workspace folder and its files are left untouched.`)) return;
+        reloadAfter(api(`/admin/api/projects/${project.id}`, { method: "DELETE" }), "Project deleted");
+      }}));
+      controlsCell.appendChild(actions);
+
+      tr.appendChild(controlsCell);
+      tbody.appendChild(tr);
+
+      // Expandable chat detail row (hidden by default)
+      if (chatCount > 0) {
+        const detailTr = el("tr", { class: "chat-detail", style: "display: none;" });
+        const detailTd = el("td", { colspan: "3", style: "padding: 0; border: none;" });
+        const chatWrap = el("div", { style: "margin: 0 0 8px 0; display: flex; flex-direction: column; gap: 4px;" });
+        for (const chat of chats) {
+          chatWrap.appendChild(renderChat(chat));
+        }
+        detailTd.appendChild(chatWrap);
+        detailTr.appendChild(detailTd);
+        tbody.appendChild(detailTr);
+      }
+    }
+
+    table.appendChild(tbody);
+    section.appendChild(table);
   }
 
-  for (const project of projects) {
-    section.appendChild(el("hr", { class: "sep" }));
-    section.appendChild(renderProject(project));
-  }
-
+  // Recent conversations section
   const conversations = state.recentConversations || [];
   if (conversations.length > 0 && projects.length > 0) {
     section.appendChild(el("hr", { class: "sep" }));
@@ -753,130 +900,24 @@ function renderProjectsPanel() {
   return section;
 }
 
-function renderBudgetBar(project) {
-  const budget = project.budget;
-  if (!budget || budget.monthlyUsd == null) return null; // Unlimited — no bar needed.
-
-  const limit = budget.monthlyUsd;
-  const spent = project.spentUsd ?? 0;
-  const pct = Math.min(100, Math.round((spent / limit) * 100));
-
-  // Determine the bar colour and label style.
-  let cls = "ok";
-  if (pct >= 90) cls = "danger";
-  else if (pct >= 70) cls = "warn";
-
-  // Compute the monthly reset date (1st of next month).
-  const now = new Date();
-  const resetDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-  const resetStr = resetDate.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-
-  const container = el("div", { style: "display: flex; align-items: center; gap: 10px; margin: 8px 0;" });
-  container.appendChild(el("span", { class: "budget-label", text: `$${spent.toFixed(2)}` }));
-
-  const barOuter = el("div", { class: "budget-bar" });
-  const barFill = el("div", { class: `budget-bar-fill ${cls}`, style: `width: ${Math.max(2, pct)}%;` });
-  barOuter.appendChild(barFill);
-  container.appendChild(barOuter);
-
-  container.appendChild(el("span", { class: "budget-label", text: `$${limit.toFixed(2)}` }));
-  container.appendChild(el("span", { class: "small", text: `resets ${resetStr}` }));
-
-  return container;
-}
-
-function renderProject(project) {
-  const wrap = el("div", {});
-  wrap.appendChild(el("div", { class: "row" }, [
-    el("strong", { text: project.name }),
-    el("span", { class: "small", text: project.workspaceDir }),
-  ]));
-
-  // Budget bar (only when a monthly cap is configured).
-  const budgetBar = renderBudgetBar(project);
-  if (budgetBar) wrap.appendChild(budgetBar);
-
-  // Agent roster — shows provider/model per role, PM timestamp, and a
-  // re-assign button so operators can see at a glance whether a recent
-  // provider edit or budget cap change needs a fresh assignment pass.
-  const roster = project.agents || [];
-  const roleLabels = { "product-owner": "PO", "engineering-manager": "EM", engineer: "Eng", qa: "QA", devops: "DevOps", "project-manager": "PM" };
-  const roleOrder = ["product-owner", "engineering-manager", "engineer", "qa", "devops"];
-  // Only show the built-in roles the PM assigns, excluding the PM itself and steering.
-  // Use roleOrder to guarantee deterministic display: PO, EM, Eng, QA, DevOps.
-  const byRole = new Map(roster.filter((a) => roleOrder.includes(a.role)).map((a) => [a.role, a]));
-  const shown = roleOrder.map((r) => byRole.get(r)).filter(Boolean);
-  if (shown.length) {
-    const rosterRow = el("div", { class: "row", style: "flex-wrap: wrap; gap: 4px 8px;" });
-    for (const agent of shown) {
-      rosterRow.appendChild(el("span", { class: `badge ${agent.role === "engineer" ? "warn" : "ok"}`, text: `${roleLabels[agent.role] || agent.role}: ${agent.providerKey}/${agent.model}` }));
-    }
-    // PM last-run timestamp (only shown if the PM has ever run).
-    if (project.pmLastRunAt) {
-      const pmDate = new Date(project.pmLastRunAt);
-      rosterRow.appendChild(el("span", { class: "small", text: `PM assigned ${pmDate.toLocaleDateString()} ${pmDate.toLocaleTimeString()}` }));
-    }
-    wrap.appendChild(rosterRow);
-  }
-
-  wrap.appendChild(el("div", { class: "row" }, [
-    el("button", { text: "New chat", onclick: () => reloadAfter(
-      api(`/admin/api/projects/${project.id}/chats`, { method: "POST", body: {} }), "Chat started"
-    )}),
-    el("button", { text: "Rename", onclick: () => {
-      const name = prompt("Project name:", project.name);
-      if (!name || !name.trim() || name.trim() === project.name) return;
-      reloadAfter(api(`/admin/api/projects/${project.id}`, { method: "PATCH", body: { name: name.trim() } }), "Renamed");
-    }}),
-    el("span", { style: "flex: 1;" }), // spacer
-    project.paused
-      ? el("button", { class: "primary", text: "Resume", onclick: () => reloadAfter(
-          api(`/admin/api/projects/${project.id}/resume`, { method: "POST" }), "Project resumed"
-        )})
-      : el("button", { text: "Pause", onclick: () => reloadAfter(
-          api(`/admin/api/projects/${project.id}/pause`, { method: "POST" }), "Project paused"
-        )}),
-    el("button", { text: "Re-assign models", onclick: () => reloadAfter(
-      api(`/admin/api/projects/${project.id}/reassign-models`, { method: "POST" }), "Project Manager re-assigning models"
-    )}),
-    el("button", { class: "danger", text: "Delete project", onclick: () => {
-      if (!confirm(`Delete "${project.name}"? This stops and removes all its chats -- the workspace folder and its files are left untouched.`)) return;
-      reloadAfter(api(`/admin/api/projects/${project.id}`, { method: "DELETE" }), "Project deleted");
-    }}),
-  ]));
-
-  const chats = project.chats || [];
-  if (chats.length === 0) {
-    wrap.appendChild(el("p", { class: "small", text: "No chats yet." }));
-  } else {
-    const list = el("div", { class: "priority-list" });
-    for (const chat of chats) {
-      list.appendChild(renderChat(chat));
-    }
-    wrap.appendChild(list);
-  }
-  return wrap;
-}
-
 function renderChat(chat) {
-  const row = el("div", { class: "priority-item" });
-  row.appendChild(el("span", { class: "small", text: chat.title }));
-  row.appendChild(el("span", { class: `badge ${chat.active ? "ok" : "off"}`, text: chat.active ? `Active -- ${chat.connectedClients} connected` : "Stopped" }));
+  const row = el("div", { style: "display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;" });
+  row.appendChild(el("span", { style: "font-size: 12px; min-width: 80px;", text: chat.title }));
+  row.appendChild(el("span", { class: `badge ${chat.active ? "ok" : "off"}`, style: "font-size: 10px; padding: 1px 6px;", text: chat.active ? `Active` : "Stopped" }));
 
   if (chat.active) {
-    const urlInput = el("input", { type: "text", value: chat.connectUrl });
-    urlInput.readOnly = true;
+    const urlInput = el("input", { type: "text", style: "flex: 1; font-size: 11px; padding: 3px 6px; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 4px;", value: chat.connectUrl, readonly: "readonly" });
     row.appendChild(urlInput);
-    row.appendChild(el("button", { text: "Copy link", onclick: () => { navigator.clipboard.writeText(chat.connectUrl); showToast("Copied"); } }));
-    row.appendChild(el("button", { text: "Open", onclick: () => window.open(chat.connectUrl, "_blank") }));
-    row.appendChild(el("button", { class: "danger", text: "Stop", onclick: () => reloadAfter(
+    row.appendChild(el("button", { style: "font-size: 11px; padding: 2px 6px;", text: "Copy", onclick: () => { navigator.clipboard.writeText(chat.connectUrl); showToast("Copied"); } }));
+    row.appendChild(el("button", { style: "font-size: 11px; padding: 2px 6px;", text: "Open", onclick: () => window.open(chat.connectUrl, "_blank") }));
+    row.appendChild(el("button", { style: "font-size: 11px; padding: 2px 6px; color: var(--danger);", text: "Stop", onclick: () => reloadAfter(
       api(`/admin/api/chats/${chat.id}/stop`, { method: "POST" }), "Chat stopped"
     )}));
   } else {
-    row.appendChild(el("button", { class: "primary", text: "Reopen", onclick: () => reloadAfter(
+    row.appendChild(el("button", { class: "primary", style: "font-size: 11px; padding: 2px 6px;", text: "Reopen", onclick: () => reloadAfter(
       api(`/admin/api/chats/${chat.id}/reopen`, { method: "POST" }), "Chat reopened"
     )}));
-    row.appendChild(el("button", { class: "danger", text: "Delete", onclick: () => {
+    row.appendChild(el("button", { style: "font-size: 11px; padding: 2px 6px; color: var(--danger);", text: "Delete", onclick: () => {
       if (!confirm(`Delete chat "${chat.title}"?`)) return;
       reloadAfter(api(`/admin/api/chats/${chat.id}`, { method: "DELETE" }), "Chat deleted");
     }}));
