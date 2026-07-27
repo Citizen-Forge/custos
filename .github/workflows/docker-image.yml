@@ -21,14 +21,12 @@
 # cache writes.
 #
 # First-time setup on a fresh repo:
-#   1. After the first push runs successfully, the package is created
-#      PRIVATE on ghcr.io by default. Go to GitHub -> Packages ->
-#      ghcr.io/citizen-forge/custos -> Package settings -> Change
-#      visibility -> Public, so the free unlimited-storage tier
-#      applies. Subsequent pushes inherit the package-level setting.
-#   2. Tags visible after first push: `:latest`, `:main`, `:sha-<short>`.
-#      On Unraid, `docker pull ghcr.io/citizen-forge/custos:main` is
-#      the rolling channel that this workflow updates on every push.
+#   Step 6 below auto-flips the ghcr.io package to public after the
+#   first successful push, so `:main`, `:latest`, and `:sha-<short>`
+#   resolve without a `docker login ghcr.io` on consumers. The auto-flip
+#   discovers whether the repo lives under a User or Organization and
+#   hits the correct end of the `users`/`orgs` PATCH endpoint; subsequent
+#   pushes no-op against the now-public package.
 #
 # Data preservation guarantee for the running deployment: the workflow
 # only REPLACES the image; the user's docker-compose.yml keeps the
@@ -66,8 +64,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The first push (140a92e) failed inside this step's BuildKit
+      # bootstrap with `Get "https://registry-1.docker.io/v2/":
+      # context deadline exceeded` -- GHA runners occasionally can't
+      # reach Docker Hub's CDN from their outbound NAT range. mirror.gcr.io
+      # is Google's anonymous mirror of the full Docker Hub catalog
+      # (mirror.gcr.io/library/node, etc.) so every `FROM node:22-slim`
+      # and `moby/buildkit` pull routes through it instead. Free, no
+      # auth, no quota for our purposes.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          config-inline: |
+            [registry."docker.io"]
+              mirrors = ["https://mirror.gcr.io"] # ci: route Docker Hub pulls through Google's anonymous mirror
 
       # Fork PRs reach this step with secrets.GITHUB_TOKEN populated
       # as an empty object. Skipping on pull_request events avoids a
@@ -128,3 +138,18 @@ jobs:
           # Provenance attestation (SLSA in-toto). ~Free; downstream
           # verifiers can attest the image came from this repo + SHA.
           provenance: true
+
+      # ghcr.io packages default to PRIVATE on first push, which would
+      # break the Unraid pull-on-update flow (anonymous pulls get 401).
+      # Discover whether the repo owner is a User or Organization so the
+      # PATCH hits `/users/{owner}/...` vs `/orgs/{owner}/...` correctly;
+      # hardcoding `/users/` 404s permanently against org-owned repos.
+      # The `packages: write` permission above is what authorizes the
+      # PATCH against the default `GITHUB_TOKEN` -- no PAT required.
+      - name: Ensure package is public
+        if: github.event_name == 'push'
+        run: |
+          owner_path=$(gh repo view "${{ github.repository }}" --json owner \
+            --jq -r '.owner.type | ascii_downcase')s
+          gh api -X PATCH "/${owner_path}/${{ github.repository_owner }}/packages/container/${{ github.event.repository.name }}" \
+            -f visibility=public
