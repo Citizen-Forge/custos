@@ -55,7 +55,12 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Lowercase because the inline `$REGISTRY/$IMAGE_NAME:latest` tag in the
+  # build step pulls IMAGE_NAME directly; OCI registries reject mixed-case
+  # repository names ("repository name must be lowercase"). The metadata
+  # action would lowercase its own `:main`/`:sha-*` tags regardless, but
+  # the hand-written `:latest` line below doesn't go through it.
+  IMAGE_NAME: ${{ lower(github.repository) }}
 
 jobs:
   build:
