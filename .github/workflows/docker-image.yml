@@ -21,12 +21,17 @@
 # cache writes.
 #
 # First-time setup on a fresh repo:
-#   Step 6 below auto-flips the ghcr.io package to public after the
-#   first successful push, so `:main`, `:latest`, and `:sha-<short>`
-#   resolve without a `docker login ghcr.io` on consumers. The auto-flip
-#   discovers whether the repo lives under a User or Organization and
-#   hits the correct end of the `users`/`orgs` PATCH endpoint; subsequent
-#   pushes no-op against the now-public package.
+#   ghcr.io packages default to PRIVATE on first push, which would
+#   `401 Unauthorized` an anonymous `docker pull` from Unraid. The
+#   auto-flip step that used to live here was removed because the
+#   default `GITHUB_TOKEN`'s `packages: write` scope cannot PATCH
+#   package visibility per GitHub's docs -- only a PAT with admin
+#   scope can, which is not worth wiring for a one-time setup. The
+#   user (repo owner) should flip the package to public once via
+#   github.com -> Packages -> ghcr.io/<owner>/<repo> -> Package
+#   settings -> Change visibility -> Public. After that, every
+#   subsequent push rolls the `:main` tag and Unraid's `docker
+#   compose pull` reaches it without auth.
 #
 # Data preservation guarantee for the running deployment: the workflow
 # only REPLACES the image; the user's docker-compose.yml keeps the
@@ -154,26 +159,3 @@ jobs:
           # Provenance attestation (SLSA in-toto). ~Free; downstream
           # verifiers can attest the image came from this repo + SHA.
           provenance: true
-
-      # ghcr.io packages default to PRIVATE on first push, which would
-      # break the Unraid pull-on-update flow (anonymous pulls get 401).
-      # The visible API path differs by owner type: GET on /users/{owner}/...
-      # returns 200 if the package is owned by a User, 404 if it's an Org
-      # (and vice versa for /orgs/...); the PATCH must hit whichever path
-      # matches. Probe both and surface a clear `::error::` if neither
-      # responds -- that way a token-scope regression or platform change
-      # gets a directed diagnostic instead of a quiet red build. PATCH is
-      # idempotent on visibility, so repeat runs are no-ops.
-      - name: Ensure package is public
-        if: github.event_name == 'push'
-        run: |
-          pkg="${{ github.event.repository.name }}"
-          owner="${{ github.repository_owner }}"
-          if gh api "users/${owner}/packages/container/${pkg}" >/dev/null 2>&1; then
-            gh api -X PATCH "users/${owner}/packages/container/${pkg}" -f visibility=public
-          elif gh api "orgs/${owner}/packages/container/${pkg}" >/dev/null 2>&1; then
-            gh api -X PATCH "orgs/${owner}/packages/container/${pkg}" -f visibility=public
-          else
-            echo "::error::ghcr.io packages API did not respond to users/${owner} or orgs/${owner} for container/${pkg}"
-            exit 1
-          fi
