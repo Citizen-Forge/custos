@@ -54,24 +54,44 @@ export RUNNER_ALLOW_RUNASROOT=1
 mkdir -p "$RUNNER_DIR"
 cd "$RUNNER_DIR"
 
-# 1. Acquire tarball (only if not extracted). --skip-validation of the
-#    sha256 happens here, not in workflow .yml -- actions/runner publishes
-#    an adjacent .sha256 file alongside every tarball, and we trust the
-#    GitHub artifact for that pair.
+# 1. Acquire tarball (only if not extracted).
+#
+#    Order of resolution:
+#      a. /tmp/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz -- present
+#         when an external copy was scp'd over (matters when the host's
+#         egress to release-assets.githubusercontent.com is blocked).
+#      b. The github.com releases page directly, with -L follow-redirect.
+#         The signed JWT in the redirect target is valid for ~1h; if the
+#         token has aged out, retry the bootstrap.
+#
+#    Verification level: HTTPS between the runner host and
+#    github.com/release-assets. actions/runner does NOT publish
+#    `.sha256` files alongside tarballs on the releases page, so the
+#    checksum step earlier versions of this script used was always
+#    going to 404 -- removed in this revision.
 TARBALL="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
-if [ ! -x ./run.sh ]; then
-  echo "==> Downloading actions/runner v${RUNNER_VERSION}"
-  curl -fsSL -o "$TARBALL" \
-    "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${TARBALL}"
-  curl -fsSL -o "${TARBALL}.sha256" \
-    "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${TARBALL}.sha256"
-  if ! grep -F "${TARBALL}" "${TARBALL}.sha256" | sha256sum -c - >/dev/null; then
-    echo "Checksum verification failed -- refusing to extract." >&2
-    rm -f "$TARBALL" "${TARBALL}.sha256"
-    exit 1
+LOCAL_TARBALL="/tmp/${TARBALL}"
+if [ ! -e ./run.sh ]; then
+  if [ -f "$LOCAL_TARBALL" ]; then
+    echo "==> Using pre-staged tarball at $LOCAL_TARBALL"
+    cp "$LOCAL_TARBALL" "$TARBALL"
+  else
+    echo "==> Downloading actions/runner v${RUNNER_VERSION}"
+    echo "    (If this 404s, scp the tarball from the repo owner's laptop:"
+    echo "     scp actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz root@Tower:/tmp/)"
+    if ! curl -fsSL -o "$TARBALL" \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${TARBALL}"; then
+      echo "Error: could not fetch ${TARBALL} and no pre-staged copy at ${LOCAL_TARBALL}."
+      echo "       Manually place the tarball at ${LOCAL_TARBALL} and re-run, OR confirm egress to"
+      echo "       https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/ is reachable."
+      exit 1
+    fi
   fi
   tar xzf "$TARBALL"
-  rm -f "$TARBALL" "${TARBALL}.sha256"
+  # Defensive: ensure run.sh/config.sh/svc.sh are executable after
+  # extract, regardless of what mode bits the upstream tar shipped.
+  chmod +x ./run.sh ./config.sh ./svc.sh
+  rm -f "$TARBALL"
 fi
 
 # 2. (Re-)configure. --unattended + --replace means re-running this
