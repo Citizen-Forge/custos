@@ -304,6 +304,28 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
     return { ok: true };
   });
 
+  /** Proxied health check: fires a server-side request to the provider's
+   * /models endpoint with the configured API key, so the browser doesn't
+   * need raw access to stored credentials. Returns the HTTP status on
+   * success or the error message on failure. */
+  app.post("/admin/api/providers/:name/probe", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const provider = runtime.config.providers?.[name];
+    if (!provider) { reply.code(404); return { error: `provider "${name}" not found` }; }
+    try {
+      const headers: Record<string, string> = {};
+      if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
+      const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/models`, {
+        headers,
+        signal: AbortSignal.timeout(8_000),
+      });
+      return { ok: true, status: res.status, statusText: res.statusText };
+    } catch (err) {
+      reply.code(502);
+      return { ok: false, error: (err as Error).message };
+    }
+  });
+
   /** Toggle a single model's enabled state without opening the edit form. */
   app.patch("/admin/api/providers/:name/models/:model", async (req, reply) => {
     const { name, model: modelName } = req.params as { name: string; model: string };

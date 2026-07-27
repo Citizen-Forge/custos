@@ -563,12 +563,16 @@ function renderProvidersPanel() {
           btn.disabled = true;
           btn.textContent = "↻";
           try {
-            const res = await fetch(prov.baseUrl.replace(/\/+$/, "") + "/models", {
-              signal: AbortSignal.timeout(5000),
-            });
-            btn.textContent = "✓";
-            btn.style.color = "var(--ok)";
-            btn.title = `HTTP ${res.status}`;
+            const result = await api(`/admin/api/providers/${encodeURIComponent(name)}/probe`, { method: "POST" });
+            if (result.ok) {
+              btn.textContent = "✓";
+              btn.style.color = "var(--ok)";
+              btn.title = `HTTP ${result.status}${result.statusText ? ` — ${result.statusText}` : ""}`;
+            } else {
+              btn.textContent = "✕";
+              btn.style.color = "var(--danger)";
+              btn.title = result.error || "Probe failed";
+            }
           } catch (err) {
             btn.textContent = "✕";
             btn.style.color = "var(--danger)";
