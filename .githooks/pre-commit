@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+// Bridge to the pre-commit body in scripts/pre-commit.mjs.
+//
+// Activated via `git config core.hooksPath .githooks` once per
+// clone. The body uses ESM (`scripts/pre-commit.mjs`), this file
+// is treated as CJS by Node (no extension, no neighbouring
+// package.json declaring `type: "module"`). CJS can't do
+// top-level `await import`, so we wrap in an async IIFE.
+//
+// The body calls `process.exit()` on failure, so reaching the
+// end of the IIFE means everything passed; the try/catch is only
+// for unexpected import/parse errors (e.g. a malformed mjs file).
+
+(async () => {
+  try {
+    await import("../scripts/pre-commit.mjs");
+  } catch (err) {
+    console.error("[pre-commit] bridge failed to import body:", err);
+    process.exit(1);
+  }
+})();
