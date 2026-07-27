@@ -4,6 +4,7 @@ import SteeringTab from './SteeringTab'
 import RoadmapTab from './RoadmapTab'
 import BoardTab from './BoardTab'
 import DevOpsTab from './DevOpsTab'
+import TeamTab from './TeamTab'
 import KillSwitch from './KillSwitch'
 import type { PromptRequest } from './PromptModal'
 
@@ -11,6 +12,7 @@ const TABS = [
   { id: 'steering', label: 'Steering Co' },
   { id: 'roadmap', label: 'Product Roadmap' },
   { id: 'board', label: 'Board' },
+  { id: 'team', label: 'Team' },
   { id: 'devops', label: 'DevOps' }
 ] as const
 
@@ -88,6 +90,11 @@ export default function ProjectView({ project, askText }: ProjectViewProps): Rea
         {tab === 'board' && (
           <div className="project-pane visible">
             <BoardTab project={project} revision={revision} onChanged={bump} askText={askText} />
+          </div>
+        )}
+        {tab === 'team' && (
+          <div className="project-pane visible">
+            <TeamTab project={project} revision={revision} onChanged={bump} />
           </div>
         )}
         {tab === 'devops' && (
