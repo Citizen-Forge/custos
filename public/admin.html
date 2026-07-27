@@ -576,7 +576,7 @@ function renderProvidersPanel() {
           } catch (err) {
             btn.textContent = "✕";
             btn.style.color = "var(--danger)";
-            btn.title = (err as Error).message;
+            btn.title = err.message;
           }
           setTimeout(() => {
             btn.disabled = false;
