@@ -297,7 +297,7 @@ function render() {
   app.innerHTML = "";
   app.appendChild(renderAnthropicPanel());
   app.appendChild(renderProvidersPanel());
-  app.appendChild(renderComplexityPanel());
+
   app.appendChild(renderProjectsPanel());
   app.appendChild(renderSecurityPanel());
 }
@@ -702,78 +702,6 @@ function renderProvidersPanel() {
       api("/admin/api/embedding-provider", { method: "PUT", body: { baseUrl: embUrl.value, model: embModel.value } }), "Embedding provider saved"
     )}),
   ]));
-
-  return section;
-}
-
-// Shared helper: renders a drag-to-reorder priority list. Used by the
-// complexity routing panel below. Originally lived under the now-removed
-// Task routing section; kept here because the complexity panel still
-// needs it.
-function renderPriorityEditor(entries, providerNames, onSave) {
-  const wrap = el("div");
-  let current = entries.map((e) => ({ ...e }));
-
-  function renumber() {
-    current = current.map((e, i) => ({ ...e, priority: i + 1 }));
-  }
-
-  function redraw() {
-    list.innerHTML = "";
-    current.forEach((entry, i) => {
-      const select = el("select", { onchange: (ev) => { current[i].provider = ev.target.value; } });
-      for (const name of providerNames) {
-        const opt = el("option", { value: name, text: name });
-        if (name === entry.provider) opt.setAttribute("selected", "selected");
-        select.appendChild(opt);
-      }
-      const item = el("div", { class: "priority-item" }, [
-        el("span", { class: "num", text: String(i + 1) }),
-        select,
-        el("button", { text: "↑", onclick: () => { if (i > 0) { [current[i - 1], current[i]] = [current[i], current[i - 1]]; renumber(); redraw(); } } }),
-        el("button", { text: "↓", onclick: () => { if (i < current.length - 1) { [current[i + 1], current[i]] = [current[i], current[i + 1]]; renumber(); redraw(); } } }),
-        el("button", { class: "danger", text: "Remove", onclick: () => { current.splice(i, 1); renumber(); redraw(); } }),
-      ]);
-      list.appendChild(item);
-    });
-  }
-
-  const list = el("div", { class: "priority-list" });
-  const controls = el("div", { class: "row" }, [
-    el("button", { text: "+ Add fallback", onclick: () => { current.push({ provider: providerNames[0], priority: current.length + 1 }); redraw(); } }),
-    el("button", { class: "primary", text: "Save", onclick: () => onSave(current) }),
-  ]);
-  wrap.appendChild(list);
-  wrap.appendChild(controls);
-  redraw();
-  return wrap;
-}
-
-// -- Complexity routing --------------------------------------------------
-
-function renderComplexityPanel() {
-  const { complexityRouting } = state;
-  const section = el("section", { class: "panel" });
-  section.appendChild(el("h2", { text: "Per-turn complexity routing" }));
-  section.appendChild(el("p", { class: "desc", text: "Classifies each fresh human message (not tool-loop hops) as low/medium/high complexity and routes it to a different tier of models. Adds one extra classifier call before every human turn." }));
-
-  const toggleRow = el("div", { class: "row" });
-  const badge = complexityRouting.enabled ? el("span", { class: "badge ok", text: "Enabled" }) : el("span", { class: "badge off", text: "Disabled" });
-  toggleRow.appendChild(badge);
-  toggleRow.appendChild(el("button", { text: complexityRouting.enabled ? "Disable" : "Enable", onclick: () =>
-    reloadAfter(api("/admin/api/complexity-routing", { method: "PUT", body: { enabled: !complexityRouting.enabled, tiers: complexityRouting.tiers } }), "Saved")
-  }));
-  section.appendChild(toggleRow);
-
-  for (const [tier, entries] of Object.entries(complexityRouting.tiers)) {
-    const block = el("div", { class: "task-block" });
-    block.appendChild(el("h3", { text: tier.charAt(0).toUpperCase() + tier.slice(1) + " complexity" }));
-    block.appendChild(renderPriorityEditor(entries, state.providerNames, (updated) => {
-      const nextTiers = { ...complexityRouting.tiers, [tier]: updated };
-      reloadAfter(api("/admin/api/complexity-routing", { method: "PUT", body: { enabled: complexityRouting.enabled, tiers: nextTiers } }), "Saved");
-    }));
-    section.appendChild(block);
-  }
 
   return section;
 }
