@@ -1,63 +1,73 @@
-// Per-provider concurrency limiter.
+// Per-provider priority-aware concurrency limiter.
 //
-// Decorator over an existing Provider that FIFO-queues requests above
-// the configured slot limit and releases a slot whenever the inner call
-// settles -- success or failure. Wrapping the provider (rather than
-// adding the limit inside ProviderRouter) keeps the routing policy in
-// router.ts and the concurrency policy in this file cleanly separated:
-// every call site of `provider.complete()` -- the router, direct
-// invocations, future ones -- gets the same throttle without each
-// caller having to remember.
+// Decorator over an existing Provider that throttles requests to a
+// configurable `maxConcurrent` slot count. When the cap is reached,
+// additional requests get queued, drained in this order inside the
+// throttle:
+//
+//   1. Wait until a stale background slot is available (older than
+//      `priorityAgedMs`). Drain ONE background request before any
+//      newer background or interactive requests run. This prevents a
+//      sustained interactive stream from starving background forever.
+//   2. Otherwise drain interactive before background.
+//
+// Within each sub-queue, FIFO order is preserved so identical-priority
+// requests resolve in the order they were submitted.
+//
+// Wrapping the provider (rather than adding the limit inside
+// ProviderRouter) keeps the routing policy in router.ts and the
+// concurrency policy in this file cleanly separated: every call site
+// of `provider.complete()` -- the router, direct invocations, future
+// ones -- gets the same throttle without each caller having to
+// remember.
 //
 // AbortSignal-aware by design:
-//   * A queued entry's signal aborting removes the entry from the queue
-//     without consuming a slot. Aborting should never spend capacity the
-//     caller no longer wants.
+//   * A queued entry's signal aborting removes the entry from the
+//     queue (interactive or background) without consuming a slot.
+//     Aborting should never spend capacity the caller no longer wants.
 //   * An in-flight entry's signal aborting passes through to the inner
 //     provider's fetch abort handling. The slot still releases on
 //     inner.complete settling, via try/finally.
 //
 // Provider-awareness doesn't need special code here: each
-// ThrottledProvider instance has its own slot counter and its own queue,
-// so a saturated Ollama doesn't hold up a free Anthropic. The router
-// iterates its priority list; if ollama's queue is full, the call waits
-// inside the ThrottledProvider for ollama, not at the gateway level.
-// When ollama is unavailable (server down) the router falls through to
-// the next priority entry as it does today.
+// ThrottledProvider instance has its own slot counter and its own
+// queues, so a saturated Ollama doesn't hold up a free Anthropic.
 
-import type { Provider, CompleteOptions, ProviderResponse } from "./types.js";
+import type { Provider, CompleteOptions, ProviderResponse, Priority } from "./types.js";
 import type { AnthropicMessagesRequest } from "../types.js";
 
-/** Runtime "is this an Error" guard. Acts as a type guard so a TS2358
- * (`unknown instanceof Error`) site can be replaced with `isError(v)`
- * and narrow correctly. Direct `unknown instanceof Error` is rejected
- * by tsc; narrowing to `object` first is enough to satisfy TS2358
- * (which permits `any`, `object`, or a type parameter on the LHS). */
+/** Default age at which a still-queued background request is treated as
+ * equivalent to interactive for one slot. Five seconds is short enough
+ * that a stalled curator doesn't fall behind multiple turns of chat
+ * traffic, and long enough that hobbyist chat bursts don't preempt
+ * well-formed background work. Pass `priorityAgedMs: 0` to disable. */
+const DEFAULT_AGED_MS = 5_000;
+
 function isError(v: unknown): v is Error {
   return typeof v === "object" && v !== null && v instanceof Error;
 }
 
-/** Combine two AbortSignals into one that aborts when either does.
- * `initializeFallback` fires synchronously if the primary is already
- * aborted at construction time, mirroring the behavior the consumer
- * would expect from a normal AbortSignal. */
 function combineSignals(primary: AbortSignal | undefined, fallback: AbortSignal): AbortSignal {
   if (!primary) return fallback;
   // If primary is already aborted, the combined signal should be too.
+  // AbortSignal listeners do NOT replay retroactively, so any listener
+  // we'd attach below would silently never fire -- the caller has to
+  // observe the signal as already aborted.
   if (primary.aborted) {
-    // Reuse the fallback's abort semantics without firing a listener
-    // on the primary (which would no-op anyway since it's already
-    // aborted). We could create a fresh controller and abort it, but
-    // returning `primary` is equivalent for this caller -- the
-    // downstream fetch on `combined` sees an aborted signal.
     return primary;
+  }
+  // Same retroactive-listener trap applies symmetrically to fallback:
+  // abortAll() can synchronously abort an internalController pushed
+  // for a queued entry BEFORE runWithSlotAsync resumes and reaches
+  // this function. Without the early-return, the listener we'd attach
+  // would silently never fire, leaving the inner Promise pending.
+  if (fallback.aborted) {
+    return fallback;
   }
   const controller = new AbortController();
   const onAbort = (): void => controller.abort();
   primary.addEventListener("abort", onAbort, { once: true });
   fallback.addEventListener("abort", onAbort, { once: true });
-  // Detach on settle so listeners don't leak past combined's lifetime.
-  // combineSignals is called once per runWithSlot so this is small.
   controller.signal.addEventListener("abort", () => {
     primary.removeEventListener("abort", onAbort);
     fallback.removeEventListener("abort", onAbort);
@@ -67,10 +77,13 @@ function combineSignals(primary: AbortSignal | undefined, fallback: AbortSignal)
 
 export interface ThrottleOptions {
   /** Max in-flight requests this provider will handle simultaneously.
-   * 1 forces strict serial (useful for single-shot local models); unset
-   * on the wrapped inner (via the wrapper not being constructed at
-   * all) means unbounded. */
+   * 1 forces strict serial (useful for single-shot local models). */
   maxConcurrent: number;
+  /** Wall-clock ms after which a still-queued background request is
+   * promoted to "fairly-due" and jumps ahead of fresh interactive
+   * requests in the next pump() pass. Default 5000. Set to 0 to
+   * disable aging (strict, never-aging priority). */
+  priorityAgedMs?: number;
 }
 
 interface PendingEntry {
@@ -79,18 +92,25 @@ interface PendingEntry {
   signal: AbortSignal | undefined;
   onAbort: (() => void) | undefined;
   aborted: boolean;
+  priority: Priority;
+  /** Wall-clock ms from `Date.now()` at queue-push time. Used by
+   * pump() to detect aged background entries. */
+  queuedAt: number;
 }
 
 export class ThrottledProvider implements Provider {
   readonly name: string;
   private readonly inner: Provider;
   private readonly slots: number;
-  private readonly pending: PendingEntry[] = [];
-  /** One AbortController per in-flight call. Each entry in `pending` is
-   * a queued (yet-to-start) submission, so it doesn't have an entry here
-   * yet -- only after pump() promotes it. abortAll() iterates these and
-   * signals each inner fetch to abort; the slot releases when the inner
-   * promise settles. */
+  private readonly agedMs: number;
+  /** Sub-queues keyed by priority. Pump() drains interactive first,
+   * unless a stale background entry is at the head of the background
+   * queue (the anti-starvation aging). */
+  private readonly interactivePending: PendingEntry[] = [];
+  private readonly backgroundPending: PendingEntry[] = [];
+  /** One AbortController per in-flight call. abortAll() iterates these
+   * and signals each inner fetch to abort; the slot releases when the
+   * inner promise settles. */
   private readonly inFlightControllers: AbortController[] = [];
   private inFlight = 0;
 
@@ -98,19 +118,30 @@ export class ThrottledProvider implements Provider {
     if (!Number.isInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
       throw new Error(`ThrottledProvider: maxConcurrent must be a positive integer, got ${options.maxConcurrent}`);
     }
+    if (options.priorityAgedMs !== undefined && (!Number.isFinite(options.priorityAgedMs) || options.priorityAgedMs < 0)) {
+      throw new Error(`ThrottledProvider: priorityAgedMs must be a non-negative number, got ${options.priorityAgedMs}`);
+    }
     this.inner = inner;
     this.name = inner.name;
     this.slots = options.maxConcurrent;
+    this.agedMs = options.priorityAgedMs ?? DEFAULT_AGED_MS;
   }
 
-  /** Slots currently occupied. Exposed for tests and for future metrics. */
+  /** Slots currently occupied. */
   get active(): number {
     return this.inFlight;
   }
 
-  /** Requests waiting for a slot. Exposed for tests and for future metrics. */
+  /** Total queued requests across both priority buckets. */
   get queued(): number {
-    return this.pending.length;
+    return this.interactivePending.length + this.backgroundPending.length;
+  }
+
+  /** Total queued for a specific priority bucket. Useful for metrics
+   * and for tests that want to assert a specific bucket's depth
+   * without conflating the two. */
+  queuedFor(priority: Priority): number {
+    return priority === "interactive" ? this.interactivePending.length : this.backgroundPending.length;
   }
 
   complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
@@ -119,59 +150,63 @@ export class ThrottledProvider implements Provider {
 
   private runWithSlot(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
     // Synchronous wrapper before any await: allocate the internal
-    // controller and register it so abortAll() -- which Runtime.reload
-    // invokes synchronously and which the abortAll tests call from the
-    // same sync frame as t.complete() -- can find this controller even
-    // when no microtask has flushed yet. Doing the push inside the async
-    // body introduced a race: by the time abortAll iterated, the
-    // post-await microtask hadn't run, so inFlightControllers was still
-    // empty and the inner fetches kept running.
+    // controller and register it so abortAll() can find this controller
+    // even when no microtask has flushed yet.
     const callerSignal = options?.signal;
+    const priority: Priority = options?.priority ?? "interactive";
     const internalController = new AbortController();
     this.inFlightControllers.push(internalController);
-    return this.runWithSlotAsync(request, options, callerSignal, internalController);
+    return this.runWithSlotAsync(request, options, callerSignal, priority, internalController);
   }
 
   private async runWithSlotAsync(
     request: AnthropicMessagesRequest,
     options: CompleteOptions | undefined,
     callerSignal: AbortSignal | undefined,
+    priority: Priority,
     internalController: AbortController,
   ): Promise<ProviderResponse> {
-    await this.acquireSlot(callerSignal);
-    // combineSignals is OR over caller + internal signals: either
-    // aborting cancels the inner fetch.
+    await this.acquireSlot(callerSignal, priority);
     const combined = combineSignals(callerSignal, internalController.signal);
     try {
-      return await this.inner.complete(request, { ...options, signal: combined });
+      // Forward priority so downstream re-entry (e.g. a ThrottledProvider
+      // wrapping another ThrottledProvider) preserves the bucket. In
+      // practice the inner is an OpenAI/Anthropic provider directly,
+      // so this is a no-op for the wired-up shape, but the pattern is
+      // safe even if the wrapping depth grows.
+      return await this.inner.complete(request, { ...options, signal: combined, priority });
     } finally {
-      // Slot releases on success AND failure -- a throttled provider
-      // should never deadlock because of an inner rejection.
       const i = this.inFlightControllers.indexOf(internalController);
       if (i !== -1) this.inFlightControllers.splice(i, 1);
       this.releaseSlot();
     }
   }
 
-  private acquireSlot(signal: AbortSignal | undefined): Promise<void> {
+  private acquireSlot(signal: AbortSignal | undefined, priority: Priority): Promise<void> {
     if (this.inFlight < this.slots) {
       this.inFlight++;
       return Promise.resolve();
     }
     return new Promise<void>((resolve, reject) => {
-      const entry: PendingEntry = { resolve, reject, signal, onAbort: undefined, aborted: false };
-      this.pending.push(entry);
+      const queue = priority === "interactive" ? this.interactivePending : this.backgroundPending;
+      const entry: PendingEntry = {
+        resolve,
+        reject,
+        signal,
+        onAbort: undefined,
+        aborted: false,
+        priority,
+        queuedAt: Date.now(),
+      };
+      queue.push(entry);
       if (!signal) return;
-      // Attach an abort listener that removes the entry from the queue
-      // without consuming a slot. The listener is later detached in
-      // `pump()` once the entry actually starts running, at which point
-      // the signal is forwarded to the inner provider's fetch and its
-      // semantics become the inner provider's responsibility.
+      // Attach an abort listener that removes the entry from its
+      // bucket without consuming a slot.
       const onAbort = (): void => {
         if (entry.aborted) return;
         entry.aborted = true;
-        const i = this.pending.indexOf(entry);
-        if (i !== -1) this.pending.splice(i, 1);
+        const i = queue.indexOf(entry);
+        if (i !== -1) queue.splice(i, 1);
         const reason: unknown = signal.reason;
         if (isError(reason)) reject(reason);
         else if (typeof reason === "string") reject(new Error(reason));
@@ -189,42 +224,54 @@ export class ThrottledProvider implements Provider {
   }
 
   /** Drops every queued entry (rejecting its promise) and aborts every
-   * in-flight inner call so it settles promptly. Used by Runtime.reload
-   * so a config edit doesn't leave the old throttle quietly continuing
-   * to draw upstream capacity on a fresh ThrottledProvider that's
-   * already switched shape underneath it.
-   *
-   * After abortAll the throttle is empty: active=0, queued=0, no
-   * listeners attached. It's safe (but pointless) to keep using; the
-   * canonical caller drops the instance afterwards. */
+   * in-flight inner call so it settles promptly. Used by Runtime.reload.
+   * Iterates both sub-queues so a partially-emptied relaunch doesn't
+   * trap an interactive in a queue whose listener was already rejected. */
   abortAll(reason: string | Error = "throttle reset"): void {
     const err = reason instanceof Error ? reason : new Error(reason);
-    for (const entry of this.pending) {
-      entry.aborted = true;
-      if (entry.signal && entry.onAbort) entry.signal.removeEventListener("abort", entry.onAbort);
-      entry.reject(err);
+    for (const queue of [this.interactivePending, this.backgroundPending]) {
+      for (const entry of queue) {
+        entry.aborted = true;
+        if (entry.signal && entry.onAbort) entry.signal.removeEventListener("abort", entry.onAbort);
+        entry.reject(err);
+      }
+      queue.length = 0;
     }
-    this.pending.length = 0;
     for (const ctrl of this.inFlightControllers) ctrl.abort();
   }
 
   private pump(): void {
-    while (this.inFlight < this.slots && this.pending.length > 0) {
-      const next = this.pending.shift()!;
-      // Race window: the queue had a never-aborted entry at push time,
-      // but its abort fired before pump() reached it. Skip -- the abort
-      // listener already rejected its promise and removed it from the
-      // list, so we shouldn't reach here, but guard anyway.
+    while (this.inFlight < this.slots) {
+      const next = this.pickNext();
+      if (!next) break;
+      // Race window: the abort listener rejected the promise and
+      // spliced it from its sub-queue already; pickNext() should
+      // not return such an entry, but guard anyway because abort
+      // timing is microtask-ordering dependent.
       if (next.aborted) continue;
-      // Detach the abort listener: this entry is now in-flight and the
-      // signal is forwarded to the inner provider. The inner provider
-      // (e.g. fetch with the signal passed in `options.signal`) handles
-      // its own cancellation from here on.
       if (next.signal && next.onAbort) {
         next.signal.removeEventListener("abort", next.onAbort);
       }
       this.inFlight++;
       next.resolve();
     }
+  }
+
+  /** Pick the next queued entry to start. Returns undefined when both
+   * sub-queues are empty.
+   *
+   * Aging logic: if the head of the background queue has been waiting
+   * longer than `agedMs`, this single pass prefers it over any fresh
+   * interactive requests. We deliberately do NOT also demote every
+   * background, just the head -- a queued chain of aged backgrounds
+   * still drains FIFO within their bucket. */
+  private pickNext(): PendingEntry | undefined {
+    if (this.agedMs > 0 && this.backgroundPending.length > 0) {
+      const head = this.backgroundPending[0];
+      if (head.queuedAt + this.agedMs <= Date.now()) {
+        return this.backgroundPending.shift();
+      }
+    }
+    return this.interactivePending.shift() ?? this.backgroundPending.shift();
   }
 }

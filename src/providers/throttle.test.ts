@@ -70,6 +70,32 @@ function makeSequencedProvider(
   return { provider, callOrder, startOrder };
 }
 
+// Same shape as makeSequencedProvider but the caller passes priority-bearing
+// options into each `complete()` invocation, and the returned `invocations`
+// array records the priority seen at each invocation. The ID counter still
+// goes up at invocation time (not at submission time), so the SLOTS in
+// `invocations` correspond to invocation order -- not submission order. The
+// priority tag at each slot is what the priority tests assert on, since
+// that's what distinguishes interactive vs background routing.
+function makeSequencedPriorityProvider(
+  resolutions: Array<{ delayMs: number }>,
+): { provider: Provider; invocations: string[] } {
+  let idx = 0;
+  const invocations: string[] = [];
+  const provider: Provider = {
+    name: "sequenced-priority",
+    complete: (_req, options) => {
+      invocations.push(options?.priority ?? "default");
+      const myId = idx++;
+      const spec = resolutions[myId] ?? { delayMs: 0 };
+      return new Promise<ProviderResponse>((resolve) => {
+        setTimeout(() => resolve(OK_RESPONSE), spec.delayMs);
+      });
+    },
+  };
+  return { provider, invocations };
+}
+
 describe("ThrottledProvider", () => {
   it("queues submissions so only maxConcurrent run at a time", async () => {
     const inner = makeBlockingProvider();
@@ -327,5 +353,165 @@ describe("ThrottledProvider", () => {
     // The in-flight call's inner completes asynchronously through
     // its signal-aware path (makeBlockingProvider honors abort).
     p.catch(() => {});
+  });
+
+  // -- Priority queue ----------------------------------------------------
+
+  it("priority queue: backgrounds drain FIFO within their bucket", async () => {
+    // All three submissions are background. With one slot and no
+    // interactive traffic, every invocation's priority tag is the
+    // same. Bucket-level FIFO is pinned via deeper-tail assertions
+    // elsewhere; here we lock the bucket assignment.
+    const { provider, invocations } = makeSequencedPriorityProvider([
+      { delayMs: 5 },
+      { delayMs: 5 },
+      { delayMs: 5 },
+    ]);
+    const t = new ThrottledProvider(provider, { maxConcurrent: 1 });
+    const ps = Array.from({ length: 3 }, () => t.complete(ZERO_REQ, { priority: "background" }));
+    await Promise.all(ps);
+    assert.deepEqual(invocations, ["background", "background", "background"], "every invocation was a background");
+  });
+
+  it("priority queue: interactive preempts background when a slot frees", async () => {
+    // Submit order: bg, bg, int. With one slot and the priority queue,
+    // the order in which invocation priority tags appear should be:
+    // bg (in-flight), interactive (jumps ahead of the queued bg),
+    // bg (last). If the throttle were just FIFO we'd see
+    // ["background", "background", "interactive"] instead.
+    const { provider, invocations } = makeSequencedPriorityProvider([
+      { delayMs: 20 },
+      { delayMs: 20 },
+      { delayMs: 20 },
+    ]);
+    const t = new ThrottledProvider(provider, { maxConcurrent: 1 });
+    const bg1 = t.complete(ZERO_REQ, { priority: "background" });
+    const bg2 = t.complete(ZERO_REQ, { priority: "background" });
+    const int1 = t.complete(ZERO_REQ, { priority: "interactive" });
+
+    assert.equal(t.active, 1, "bg1 takes the slot");
+    assert.equal(t.queuedFor("background"), 1, "bg2 sits in the background bucket");
+    assert.equal(t.queuedFor("interactive"), 1, "int1 sits in the interactive bucket");
+
+    await Promise.all([bg1, bg2, int1]);
+    assert.deepEqual(invocations, ["background", "interactive", "background"], "interactive jumped ahead of the queued background");
+  });
+
+  it("anti-starvation: aged background preempts fresh interactive", async () => {
+    // bg1 takes slot with a long-enough delay (70ms) that bg2 ages
+    // past agedMs (50ms) while bg1 is running. All three are submitted
+    // in the same tick so both bg2 and int1 sit queued. When bg1's
+    // slot frees, the aged-head check in pickNext() routes bg2 ahead
+    // of the fresh interactive.
+    const { provider, invocations } = makeSequencedPriorityProvider([
+      { delayMs: 70 }, // bg1 (long enough that bg2 ages past agedMs)
+      { delayMs: 5 },  // bg2 (after aging promotion)
+      { delayMs: 5 },  // int1 (last)
+    ]);
+    const t = new ThrottledProvider(provider, { maxConcurrent: 1, priorityAgedMs: 50 });
+    const bg1 = t.complete(ZERO_REQ, { priority: "background" });
+    const bg2 = t.complete(ZERO_REQ, { priority: "background" });
+    const int1 = t.complete(ZERO_REQ, { priority: "interactive" });
+
+    await Promise.all([bg1, bg2, int1]);
+    assert.deepEqual(
+      invocations,
+      ["background", "background", "interactive"],
+      "bg2 (head-aged over the threshold) preempted the fresh interactive",
+    );
+  });
+
+  it("anti-starvation disabled (priorityAgedMs: 0): interactive always wins", async () => {
+    // Same shape as the prior test, but aging is OFF. Even though
+    // bg2 sat queued for ~70ms, the strict-priority pump still picks
+    // the fresh interactive first. bg2 only runs once int1 finishes.
+    const { provider, invocations } = makeSequencedPriorityProvider([
+      { delayMs: 70 },
+      { delayMs: 5 },
+      { delayMs: 5 },
+    ]);
+    const t = new ThrottledProvider(provider, { maxConcurrent: 1, priorityAgedMs: 0 });
+    const bg1 = t.complete(ZERO_REQ, { priority: "background" });
+    const bg2 = t.complete(ZERO_REQ, { priority: "background" });
+    const int1 = t.complete(ZERO_REQ, { priority: "interactive" });
+
+    await Promise.all([bg1, bg2, int1]);
+    assert.deepEqual(invocations, ["background", "interactive", "background"], "interactive wins despite the aged bg");
+  });
+
+  it("default priority (no options.priority) lands in the interactive bucket", async () => {
+    // Existing call sites that predate the priority option shouldn't
+    // accidentally start spilling into the background bucket. The
+    // default is "interactive" so the historical behaviour holds.
+    const inner = makeBlockingProvider();
+    const t = new ThrottledProvider(inner, { maxConcurrent: 1 });
+    const c1 = new AbortController();
+    const c2 = new AbortController();
+    const a = t.complete(ZERO_REQ, { signal: c1.signal });
+    assert.equal(t.active, 1, "first call took the slot");
+    const b = t.complete(ZERO_REQ, { signal: c2.signal });
+    assert.equal(t.queuedFor("interactive"), 1, "no-priority default call queued as interactive");
+    assert.equal(t.queuedFor("background"), 0, "default does NOT spill into background");
+    c1.abort();
+    c2.abort();
+    await Promise.allSettled([a, b]);
+  });
+
+  it("aborting a queued interactive does not disturb queued background entries", async () => {
+    // One in-flight + a queued interactive + a queued background. The
+    // queued interactive is aborted -- the background entry should
+    // stay put and the active slot count should remain unchanged.
+    const inner = makeBlockingProvider();
+    const t = new ThrottledProvider(inner, { maxConcurrent: 1 });
+    const cInflight = new AbortController();
+    const cInteractive = new AbortController();
+    const cBackground = new AbortController();
+    const inflight = t.complete(ZERO_REQ, { priority: "interactive", signal: cInflight.signal });
+    const qInteractive = t.complete(ZERO_REQ, { priority: "interactive", signal: cInteractive.signal });
+    const qBackground = t.complete(ZERO_REQ, { priority: "background", signal: cBackground.signal });
+
+    assert.equal(t.active, 1);
+    assert.equal(t.queuedFor("interactive"), 1);
+    assert.equal(t.queuedFor("background"), 1);
+
+    cInteractive.abort();
+    await assert.rejects(qInteractive, (err: unknown) => err instanceof Error);
+    assert.equal(t.queuedFor("interactive"), 0, "aborted interactive removed from interactive bucket");
+    assert.equal(t.queuedFor("background"), 1, "queued background untouched by the interactive abort");
+    assert.equal(t.active, 1, "no slot consumed by the aborted queued interactive");
+
+    // Cleanup the orphan promises so the test doesn't leak.
+    cInflight.abort();
+    cBackground.abort();
+    inflight.catch(() => {});
+    qBackground.catch(() => {});
+  });
+
+  it("abortAll with mixed interactive + background entries empties both buckets", async () => {
+    // The full-abortAll path was previously exercised only with all
+    // submissions in the default-interactive bucket. Pin it now with
+    // a mix: 2 in-flight + 3 interactives queued + 2 backgrounds
+    // queued. abortAll must finish with all promises rejected, both
+    // sub-queues empty, and every in-flight inner aborted.
+    const inner = makeBlockingProvider();
+    const t = new ThrottledProvider(inner, { maxConcurrent: 2 });
+    const inflightSignals = Array.from({ length: 2 }, () => new AbortController());
+    const qInteractiveSignals = Array.from({ length: 3 }, () => new AbortController());
+    const qBackgroundSignals = Array.from({ length: 2 }, () => new AbortController());
+    const ps = [
+      ...inflightSignals.map((c) => t.complete(ZERO_REQ, { priority: "interactive", signal: c.signal })),
+      ...qInteractiveSignals.map((c) => t.complete(ZERO_REQ, { priority: "interactive", signal: c.signal })),
+      ...qBackgroundSignals.map((c) => t.complete(ZERO_REQ, { priority: "background", signal: c.signal })),
+    ];
+    assert.equal(t.active, 2, "two slots occupied");
+    assert.equal(t.queuedFor("interactive"), 3, "three interactives queued");
+    assert.equal(t.queuedFor("background"), 2, "two backgrounds queued");
+
+    t.abortAll("runtime reload");
+
+    await Promise.all(ps.map((p) => assert.rejects(p, (err: unknown) => err instanceof Error)));
+    assert.equal(t.active, 0, "abortAll aborted in-flight inner fetches; slots released");
+    assert.equal(t.queuedFor("interactive"), 0, "abortAll cleared interactive queue");
+    assert.equal(t.queuedFor("background"), 0, "abortAll cleared background queue");
   });
 });

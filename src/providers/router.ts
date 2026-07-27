@@ -1,9 +1,28 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type TaskKind } from "../types.js";
-import type { CompleteOptions, Provider, ProviderResponse } from "./types.js";
+import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { GatewayConfig, ProviderEntry } from "../config.js";
 import type { SpendTracker } from "./spend-tracker.js";
 
 const DEFAULT_COOLDOWN_MS = 60_000;
+
+/** Maps task kind to throttle priority. The interactive set covers the
+ * paths where a user is mid-turn waiting: chat traffic (general), plus
+ * the per-turn classifiers that gate routing before the chat gets a
+ * reply. Memory curation is the only background kind today -- a chat
+ * in progress shouldn't have to wait behind a curator's queued
+ * request on a single-slot locally-hosted Ollama. The mapping is kept
+ * in one place rather than threading the priority through every callsite
+ * so a future task kind has to be deliberately classified. */
+function priorityForTask(task: TaskKind): Priority {
+  switch (task) {
+    case "memoryCurator":
+      return "background";
+    case "general":
+    case "permissionClassifier":
+    case "complexityClassifier":
+      return "interactive";
+  }
+}
 
 export interface RoutedResponse extends ProviderResponse {
   /** Which named instance actually served this request -- may differ from
@@ -52,9 +71,13 @@ export class ProviderRouter {
     this.listener = listener;
   }
 
-  /** Looks up a fixed task's configured priority list. */
+  /** Looks up a fixed task's configured priority list. The task-derived
+   * throttle priority is the default; an explicit `options.priority` wins
+   * (rare -- direct callers might want to send a synthetic request as
+   * background without reverse-engineering the task kind). */
   async complete(task: TaskKind, request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<RoutedResponse> {
-    return this.completeWithEntries(this.config.tasks[task], request, options, `task "${task}"`);
+    const merged: CompleteOptions = { priority: priorityForTask(task), ...options };
+    return this.completeWithEntries(this.config.tasks[task], request, merged, `task "${task}"`);
   }
 
   /** Runs the same priority/failover logic against an explicit entry list
