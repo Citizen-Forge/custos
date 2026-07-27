@@ -157,15 +157,23 @@ jobs:
 
       # ghcr.io packages default to PRIVATE on first push, which would
       # break the Unraid pull-on-update flow (anonymous pulls get 401).
-      # Discover whether the repo owner is a User or Organization so the
-      # PATCH hits `/users/{owner}/...` vs `/orgs/{owner}/...` correctly;
-      # hardcoding `/users/` 404s permanently against org-owned repos.
-      # The `packages: write` permission above is what authorizes the
-      # PATCH against the default `GITHUB_TOKEN` -- no PAT required.
+      # The visible API path differs by owner type: GET on /users/{owner}/...
+      # returns 200 if the package is owned by a User, 404 if it's an Org
+      # (and vice versa for /orgs/...); the PATCH must hit whichever path
+      # matches. Probe both and surface a clear `::error::` if neither
+      # responds -- that way a token-scope regression or platform change
+      # gets a directed diagnostic instead of a quiet red build. PATCH is
+      # idempotent on visibility, so repeat runs are no-ops.
       - name: Ensure package is public
         if: github.event_name == 'push'
         run: |
-          owner_path=$(gh repo view "${{ github.repository }}" --json owner \
-            --jq -r '.owner.type | ascii_downcase')s
-          gh api -X PATCH "/${owner_path}/${{ github.repository_owner }}/packages/container/${{ github.event.repository.name }}" \
-            -f visibility=public
+          pkg="${{ github.event.repository.name }}"
+          owner="${{ github.repository_owner }}"
+          if gh api "users/${owner}/packages/container/${pkg}" >/dev/null 2>&1; then
+            gh api -X PATCH "users/${owner}/packages/container/${pkg}" -f visibility=public
+          elif gh api "orgs/${owner}/packages/container/${pkg}" >/dev/null 2>&1; then
+            gh api -X PATCH "orgs/${owner}/packages/container/${pkg}" -f visibility=public
+          else
+            echo "::error::ghcr.io packages API did not respond to users/${owner} or orgs/${owner} for container/${pkg}"
+            exit 1
+          fi
