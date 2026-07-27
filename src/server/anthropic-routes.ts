@@ -2,8 +2,8 @@ import type { FastifyInstance } from "fastify";
 import type { Runtime } from "../runtime.js";
 import { getApiKeySource } from "../config.js";
 import { startOAuthFlow, exchangeCode, type OAuthMode } from "../auth/oauth.js";
-import { getOAuthStatus, saveTokens, clearTokens } from "../auth/credentials.js";
 import { OAuthFlowTracker } from "../auth/oauth-flow-tracker.js";
+import { getValidAccessToken, getOAuthStatus, saveTokens, clearTokens } from "../auth/credentials.js";
 import { maskApiKey, updateConfig } from "./admin-shared.js";
 
 export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime): void {
@@ -77,5 +77,42 @@ export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime):
   app.post("/admin/api/oauth/disconnect", async () => {
     await clearTokens();
     return { ok: true, oauth: await getOAuthStatus() };
+  });
+
+  app.post("/admin/api/anthropic/probe", async () => {
+    const accessToken = await getValidAccessToken().catch(() => null);
+    const apiKey = runtime.config?.anthropic?.apiKey;
+
+    if (!accessToken && !apiKey) {
+      return { ok: false, error: "No OAuth session and no API key configured" };
+    }
+
+    const authHeaders: Record<string, string> = {};
+    if (accessToken) {
+      authHeaders.authorization = `Bearer ${accessToken}`;
+      authHeaders["anthropic-beta"] = "oauth-2025-04-20";
+    } else if (apiKey) {
+      authHeaders["x-api-key"] = apiKey;
+    }
+
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        signal: AbortSignal.timeout(10000),
+        headers: {
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+          ...authHeaders,
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+      return { ok: true, status: res.status, statusText: res.statusText };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
   });
 }

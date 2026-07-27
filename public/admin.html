@@ -484,6 +484,34 @@ function renderProvidersPanel() {
   } else {
     oauthRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Connect OAuth", onclick: () => startOAuthFlow($("#oauth-flow-area")) }));
   }
+  // Probe button — test Anthropic connectivity with the configured auth.
+  const anthProbeBtn = el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Test", onclick: async () => {
+    anthProbeBtn.disabled = true;
+    anthProbeBtn.textContent = "↻";
+    try {
+      const result = await api("/admin/api/anthropic/probe", { method: "POST" });
+      if (result.ok) {
+        anthProbeBtn.textContent = "✓";
+        anthProbeBtn.style.color = "var(--ok)";
+        anthProbeBtn.title = `HTTP ${result.status}${result.statusText ? ` — ${result.statusText}` : ""}`;
+      } else {
+        anthProbeBtn.textContent = "✕";
+        anthProbeBtn.style.color = "var(--danger)";
+        anthProbeBtn.title = result.error || "Probe failed";
+      }
+    } catch (err) {
+      anthProbeBtn.textContent = "✕";
+      anthProbeBtn.style.color = "var(--danger)";
+      anthProbeBtn.title = err.message;
+    }
+    setTimeout(() => {
+      anthProbeBtn.disabled = false;
+      anthProbeBtn.textContent = "Test";
+      anthProbeBtn.style.color = "";
+      anthProbeBtn.title = "";
+    }, 3000);
+  }});
+  oauthRow.appendChild(anthProbeBtn);
   anthSection.appendChild(oauthRow);
   anthSection.appendChild(el("div", { id: "oauth-flow-area", style: "margin-top: 4px;" }));
 
