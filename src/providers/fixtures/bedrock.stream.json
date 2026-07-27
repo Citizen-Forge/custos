@@ -1,0 +1,49 @@
+{
+  "vendor": "bedrock",
+  "model": "bedrock/anthropic.claude-3-haiku",
+  "namespace": "bedrock",
+  "expectedOn": "tool_use",
+  "chunks": [
+    {
+      "id": "chunk-bed-stream-1",
+      "choices": [
+        {
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "id": "call_bed_stream_1",
+                "function": { "name": "search", "arguments": "" },
+                "extra_content": {
+                  "bedrock": {
+                    "trace_id": "trace-bed-stream-1",
+                    "performanceConfig": { "latencyOptimized": true }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "chunk-bed-stream-2",
+      "choices": [
+        {
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "function": { "arguments": "{\"q\":\"x\"}" }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "chunk-bed-stream-3",
+      "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
+    }
+  ]
+}

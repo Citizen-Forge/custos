@@ -1,0 +1,42 @@
+{
+  "vendor": "raw_openai",
+  "model": "gpt-4o",
+  "namespace": null,
+  "chunks": [
+    {
+      "id": "chunk-raw-stream-1",
+      "choices": [
+        {
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "id": "call_raw_stream_1",
+                "function": { "name": "search", "arguments": "" }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "chunk-raw-stream-2",
+      "choices": [
+        {
+          "delta": {
+            "tool_calls": [
+              {
+                "index": 0,
+                "function": { "arguments": "{\"q\":\"x\"}" }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "chunk-raw-stream-3",
+      "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
+    }
+  ]
+}

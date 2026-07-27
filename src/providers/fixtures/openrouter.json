@@ -1,0 +1,29 @@
+{
+  "vendor": "openrouter",
+  "model": "openrouter/anthropic/claude-3.5-sonnet",
+  "namespace": "openrouter",
+  "expectedOn": "text",
+  "reroute": "gemini-3-thinking",
+  "upstream": {
+    "id": "msg-or-1",
+    "model": "openrouter/anthropic/claude-3.5-sonnet",
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "message": {
+          "content": "I'd recommend checking the second source first.",
+          "extra_content": {
+            "openrouter": {
+              "provider_specific_fields": { "reasoning": "per-call fallback reasoning" }
+            }
+          }
+        }
+      }
+    ],
+    "provider_specific_fields": {
+      "openrouter": {
+        "provider_specific_fields": { "reasoning": "root-level reasoning hint" }
+      }
+    }
+  }
+}

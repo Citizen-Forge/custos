@@ -1,5 +1,5 @@
-import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
-import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason } from "./openai-translate.js";
+import { ProviderUnavailableError, type AnthropicMessagesRequest, type VendorMetadata } from "../types.js";
+import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf } from "./openai-translate.js";
 import type { CompleteOptions, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
 
@@ -20,6 +20,26 @@ export interface OpenAICompatibleInstanceConfig {
   pricing?: PricingConfig;
   /** Omit for unlimited. Requires `pricing` to actually take effect. */
   budget?: BudgetConfig;
+  /** Max concurrent requests this instance will handle. Setting 1 forces
+   * strict serial -- the canonical case is a local Ollama on consumer
+   * hardware where two simultaneous requests don't get done any faster
+   * and may thrash VRAM. The runtime wraps this instance in a
+   * ThrottledProvider; further requests queue FIFO until a slot frees,
+   * and a busy local does not block a free Anthropic upstream because
+   * each provider has its own queue. Unset means unlimited -- the
+   * gateway imposes no additional wait on upstreams that can take the
+   * full request rate. */
+  maxConcurrent?: number;
+  /** When true, late vendor metadata (arriving after
+   * `content_block_start` has fired) is emitted inline as a custom
+   * `content_block_delta` with `delta.type === "vendor_metadata_delta"`.
+   * Default is false: strict Anthropic SDK parsers surface
+   * "unknown event" warnings on unrecognized delta types, so this
+   * stays opt-in. Turn the flag on for instances whose downstream
+   * client knows to honor the carrier and merge it onto the
+   * still-open tool_use block. See types.ts VendorMetadataDeltaEvent
+   * for the wire shape pinned by the streaming tests. */
+  emitLateMetadataDelta?: boolean;
 }
 
 /**
@@ -63,7 +83,11 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     if (openaiRequest.stream) {
-      return { status: 200, headers: new Headers({ "content-type": "text/event-stream" }), body: translateStream(res, request.model) };
+      return {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: translateStream(res, request.model, this.config.emitLateMetadataDelta ?? false),
+      };
     }
 
     const openaiJson = await res.json();
@@ -79,8 +103,21 @@ export class OpenAICompatibleProvider implements Provider {
  * parallel tool calls in one turn, so this doesn't attempt to multiplex
  * multiple concurrent content blocks. Only verified live against Ollama;
  * other providers' streaming quirks (if any) aren't individually checked.
+ *
+ * `emitLateMetadataDelta` lifts the late-vendor-metadata limitation:
+ * when an upstream chunk's tool_call OR message-level extra_content
+ * arrives AFTER `content_block_start` has already fired (so it can no
+ * longer be hoisted into the block), and this flag is true, the
+ * translator emits an inline `content_block_delta` with
+ * `delta.type === "vendor_metadata_delta"` carrying just that
+ * chunk's payload at the same `index` as the open tool_use block.
+ * Default is false -- opt-in. See types.ts VendorMetadataDeltaEvent
+ * for the wire shape.
+ *
+ * Exported so streaming can be exercised via a synthesized `Response`
+ * in the test suite without going through network I/O.
  */
-function translateStream(openaiRes: Response, model: string): ReadableStream<Uint8Array> {
+export function translateStream(openaiRes: Response, model: string, emitLateMetadataDelta = false): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const reader = openaiRes.body!.getReader();
@@ -90,6 +127,20 @@ function translateStream(openaiRes: Response, model: string): ReadableStream<Uin
   let toolBlockOpen = false;
   let buffer = "";
   let closed = false;
+  // Vendor metadata arrives alongside tool_call deltas (or message-level
+  // alongside the same chunk). We have to capture it and inject it into
+  // the next tool_use content_block_start, because once Anthropic's
+  // `content_block_start` has fired there's no slot on the subsequent
+  // deltas to patch a metadata field back into the content_block.
+  //
+  // This is a per-vendor-agnostic carrier: whatever shape the upstream
+  // puts under `extra_content` (Gemini nests under `.google`, other
+  // vendors may use top-level keys) is forwarded verbatim to
+  // `content_block.provider_metadata`. Late vendor metadata (those
+  // arriving *after* content_block_start has fired) are dropped -- a
+  // documented limitation rather than a synthetic event the client
+  // would have to learn about.
+  const pendingToolMetadata: Record<number, VendorMetadata> = {};
 
   const sse = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
@@ -130,7 +181,21 @@ function translateStream(openaiRes: Response, model: string): ReadableStream<Uin
         const chunk = JSON.parse(payload) as {
           id: string;
           choices: {
-            delta: { content?: string; tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[] };
+            delta: {
+              content?: string;
+              tool_calls?: {
+                index: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+                /** Vendor-specific per-tool-call metadata. Forwarded as-is
+                 * to the Anthropic content_block.provider_metadata. */
+                extra_content?: Record<string, unknown>;
+              }[];
+              /** Vendor-specific per-message metadata. Used as a fallback
+               * if a tool_call delta in the same chunk has no per-call
+               * metadata of its own. */
+              extra_content?: Record<string, unknown>;
+            };
             finish_reason?: string | null;
           }[];
         };
@@ -159,21 +224,77 @@ function translateStream(openaiRes: Response, model: string): ReadableStream<Uin
 
         if (delta?.tool_calls?.length) {
           const call = delta.tool_calls[0];
+          // Hoist any vendor metadata that arrived *in this chunk* for
+          // this tool_call index into the pending bucket so the
+          // content_block_start below can include it. Per-tool-call
+          // wins; fall back to the message-level delta if the upstream
+          // emits vendor metadata only once at the message level
+          // alongside the first tool_call delta. Both shapes go through
+          // the same validation as the non-streaming translator
+          // (`vendorMetadataOf`) so the streaming carrier is no looser
+          // than the non-streaming one.
+          const callMeta = vendorMetadataOf(call.extra_content);
+          const deltaMeta = vendorMetadataOf(delta.extra_content);
+          const newMeta = callMeta ?? deltaMeta ?? undefined;
+
+          if (newMeta) {
+            if (!toolBlockOpen) {
+              // Pre-start hoist: slot the metadata onto the next
+              // content_block_start. (Same path this code already
+              // took before the late-metadata flag existed; kept so
+              // the gated-off behavior is bit-identical.)
+              pendingToolMetadata[call.index] = newMeta;
+            } else if (emitLateMetadataDelta) {
+              // Late arrival: content_block_start has already fired,
+              // so there's nowhere to hoist onto the block itself.
+              // Emit an inline `vendor_metadata_delta` carrying
+              // *just* this chunk's payload -- not a full re-emit
+              // of the original hoist, which would be redundant for
+              // a client that already saw it on content_block_start.
+              // index matches the content_block_start so a custom
+              // client merges it onto the right tool_use block.
+              controller.enqueue(
+                encoder.encode(
+                  sse("content_block_delta", {
+                    type: "content_block_delta",
+                    index: call.index,
+                    delta: {
+                      type: "vendor_metadata_delta",
+                      provider_metadata: newMeta,
+                    },
+                  }),
+                ),
+              );
+            }
+            // else (toolBlockOpen && !emitLateMetadataDelta): the
+            // existing documented-limitation path -- late metadata
+            // is dropped. The streaming test
+            // "drops late vendor metadata ... (documented
+            // limitation)" pins this contract.
+          }
+
           if (!toolBlockOpen) {
             toolBlockOpen = true;
+            const meta = pendingToolMetadata[call.index];
+            const contentBlock: Record<string, unknown> = {
+              type: "tool_use",
+              id: call.id ?? "",
+              name: call.function?.name ?? "",
+            };
+            if (meta) contentBlock.provider_metadata = meta;
             controller.enqueue(
               encoder.encode(
                 sse("content_block_start", {
                   type: "content_block_start",
-                  index: 0,
-                  content_block: { type: "tool_use", id: call.id ?? "", name: call.function?.name ?? "" },
+                  index: call.index,
+                  content_block: contentBlock,
                 }),
               ),
             );
           }
           if (call.function?.arguments) {
             controller.enqueue(
-              encoder.encode(sse("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: call.function.arguments } })),
+              encoder.encode(sse("content_block_delta", { type: "content_block_delta", index: call.index, delta: { type: "input_json_delta", partial_json: call.function.arguments } })),
             );
           }
         }

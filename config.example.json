@@ -2,11 +2,13 @@
   "openaiCompatibleInstances": {
     "ollama": {
       "baseUrl": "http://localhost:11434/v1",
-      "model": "qwen2.5:14b-instruct-q4_K_M"
+      "model": "qwen2.5:14b-instruct-q4_K_M",
+      "maxConcurrent": 1
     },
     "ollama-fast": {
       "baseUrl": "http://localhost:11434/v1",
-      "model": "qwen2.5:3b-instruct"
+      "model": "qwen2.5:3b-instruct",
+      "maxConcurrent": 1
     },
     "openai": {
       "baseUrl": "https://api.openai.com/v1",

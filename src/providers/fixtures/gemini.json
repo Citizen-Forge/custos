@@ -1,0 +1,27 @@
+{
+  "vendor": "gemini",
+  "model": "gemini-3-thinking",
+  "namespace": "google",
+  "expectedOn": "tool_use",
+  "upstream": {
+    "id": "msg-gemini-1",
+    "model": "gemini-3-thinking",
+    "choices": [
+      {
+        "finish_reason": "tool_calls",
+        "message": {
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_gemini_1",
+              "type": "function",
+              "function": { "name": "search", "arguments": "{\"q\":\"weather\"}" },
+              "extra_content": { "google": { "thought_signature": "SIG-GEMINI-1" } }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": { "prompt_tokens": 12, "completion_tokens": 8 }
+  }
+}

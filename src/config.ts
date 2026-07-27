@@ -9,6 +9,16 @@ export interface ProviderEntry {
   priority: number;
 }
 
+export interface AnthropicConfig {
+  apiKey?: string;
+  /** Max concurrent requests the Anthropic provider will issue.
+   * Unset means unlimited -- Anthropic's API tolerates parallel requests
+   * and the gateway imposes no additional limit by default. Setting
+   * this is rarely needed; think of it as a safety knob, not a tuning
+   * surface. */
+  maxConcurrent?: number;
+}
+
 export interface EmbeddingProviderConfig {
   /** Ollama's *native* API root (no "/v1" suffix) -- embeddings use
    * Ollama's own /api/embeddings, not the OpenAI-compat chat path, so
@@ -27,7 +37,7 @@ export interface ComplexityRoutingConfig {
 }
 
 export interface GatewayConfig {
-  anthropic?: { apiKey?: string };
+  anthropic?: AnthropicConfig;
   /** Named instances of any OpenAI-chat-completions-compatible provider --
    * Ollama, OpenAI, DeepSeek, Gemini, Groq, Mistral, xAI, OpenRouter, etc.
    * Named (not typed by brand) so different tasks can use different
@@ -54,8 +64,11 @@ const CONFIG_PATH = process.env.GATEWAY_CONFIG_PATH ?? "data/config.json";
 
 const DEFAULT_CONFIG: GatewayConfig = {
   openaiCompatibleInstances: {
-    ollama: { baseUrl: `${OLLAMA_HOST}/v1`, model: "qwen2.5:14b-instruct-q4_K_M" },
-    "ollama-fast": { baseUrl: `${OLLAMA_HOST}/v1`, model: "qwen2.5:3b-instruct" },
+    // Ollama on consumer hardware can't usefully process two inference
+    // jobs at once; concurrency 1 queues further requests at the gateway
+    // instead of letting them pile up on the host.
+    ollama: { baseUrl: `${OLLAMA_HOST}/v1`, model: "qwen2.5:14b-instruct-q4_K_M", maxConcurrent: 1 },
+    "ollama-fast": { baseUrl: `${OLLAMA_HOST}/v1`, model: "qwen2.5:3b-instruct", maxConcurrent: 1 },
   },
   embeddingProvider: { baseUrl: OLLAMA_HOST, model: "nomic-embed-text" },
   tasks: {

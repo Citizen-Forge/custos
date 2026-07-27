@@ -1,0 +1,31 @@
+{
+  "vendor": "bedrock",
+  "model": "bedrock/anthropic.claude-3-haiku",
+  "namespace": "bedrock",
+  "expectedOn": "tool_use",
+  "upstream": {
+    "id": "msg-bedrock-1",
+    "model": "bedrock/anthropic.claude-3-haiku",
+    "choices": [
+      {
+        "finish_reason": "tool_calls",
+        "message": {
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_bedrock_1",
+              "type": "function",
+              "function": { "name": "search", "arguments": "{\"q\":\"x\"}" },
+              "extra_content": {
+                "bedrock": {
+                  "trace_id": "trace-bedrock-1",
+                  "performanceConfig": { "latencyOptimized": true }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

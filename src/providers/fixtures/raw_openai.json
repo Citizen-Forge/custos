@@ -1,0 +1,25 @@
+{
+  "vendor": "raw_openai",
+  "model": "gpt-4o",
+  "namespace": null,
+  "upstream": {
+    "id": "msg-raw-1",
+    "model": "gpt-4o",
+    "choices": [
+      {
+        "finish_reason": "tool_calls",
+        "message": {
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_raw_1",
+              "type": "function",
+              "function": { "name": "search", "arguments": "{\"q\":\"weather\"}" }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": { "prompt_tokens": 7, "completion_tokens": 4 }
+  }
+}
