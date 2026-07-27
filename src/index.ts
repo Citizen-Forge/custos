@@ -20,6 +20,7 @@ import { RemoteSessionManager } from "./remote/session-manager.js";
 import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
 import { StatsMonitor, DEFAULT_ALERT_RULES } from "./runtime-stats.js";
+import { registerMetricsRoute } from "./server/metrics.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const QDRANT_URL = process.env.QDRANT_URL ?? "http://localhost:6333";
@@ -94,6 +95,7 @@ async function main() {
   registerPmRoutes(app, runtime, orchestrator);
   registerPmEventRoutes(app, orchestrator);
   registerUiRoutes(app);
+  registerMetricsRoute(app, runtime);
 
   // Periodic stats monitor: polls Runtime.stats() and emits sustained-
   // threshold alerts. Interval defaults to 30s; tune via
