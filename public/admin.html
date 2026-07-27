@@ -276,6 +276,7 @@ async function loadState() {
     project.subscriptionUsd = settingsResp.subscriptionUsd ?? 0;
     project.agents = settingsResp.agents ?? [];
     project.pmLastRunAt = settingsResp.settings.pmLastRunAt ?? null;
+    project.paused = settingsResp.settings.paused ?? false;
   }
   state.recentConversations = (await api("/admin/api/remote/conversations")).conversations;
   render();
@@ -911,9 +912,6 @@ function renderProject(project) {
       const pmDate = new Date(project.pmLastRunAt);
       rosterRow.appendChild(el("span", { class: "small", text: `PM assigned ${pmDate.toLocaleDateString()} ${pmDate.toLocaleTimeString()}` }));
     }
-    rosterRow.appendChild(el("button", { text: "Re-assign", onclick: () => reloadAfter(
-      api(`/admin/api/projects/${project.id}/reassign-models`, { method: "POST" }), "Project Manager re-assigning models"
-    )}));
     wrap.appendChild(rosterRow);
   }
 
@@ -926,6 +924,17 @@ function renderProject(project) {
       if (!name || !name.trim() || name.trim() === project.name) return;
       reloadAfter(api(`/admin/api/projects/${project.id}`, { method: "PATCH", body: { name: name.trim() } }), "Renamed");
     }}),
+    el("span", { style: "flex: 1;" }), // spacer
+    project.paused
+      ? el("button", { class: "primary", text: "Resume", onclick: () => reloadAfter(
+          api(`/admin/api/projects/${project.id}/resume`, { method: "POST" }), "Project resumed"
+        )})
+      : el("button", { text: "Pause", onclick: () => reloadAfter(
+          api(`/admin/api/projects/${project.id}/pause`, { method: "POST" }), "Project paused"
+        )}),
+    el("button", { text: "Re-assign models", onclick: () => reloadAfter(
+      api(`/admin/api/projects/${project.id}/reassign-models`, { method: "POST" }), "Project Manager re-assigning models"
+    )}),
     el("button", { class: "danger", text: "Delete project", onclick: () => {
       if (!confirm(`Delete "${project.name}"? This stops and removes all its chats -- the workspace folder and its files are left untouched.`)) return;
       reloadAfter(api(`/admin/api/projects/${project.id}`, { method: "DELETE" }), "Project deleted");
