@@ -558,6 +558,29 @@ function renderProvidersPanel() {
       el("td", { text: rpmText }),
       el("td", { text: priorityText }),
       el("td", {}, [
+        el("button", { style: "font-size: 11px; padding: 3px 6px;", text: "Test", onclick: async (ev) => {
+          const btn = ev.currentTarget;
+          btn.disabled = true;
+          btn.textContent = "↻";
+          try {
+            const res = await fetch(prov.baseUrl.replace(/\/+$/, "") + "/models", {
+              signal: AbortSignal.timeout(5000),
+            });
+            btn.textContent = "✓";
+            btn.style.color = "var(--ok)";
+            btn.title = `HTTP ${res.status}`;
+          } catch (err) {
+            btn.textContent = "✕";
+            btn.style.color = "var(--danger)";
+            btn.title = (err as Error).message;
+          }
+          setTimeout(() => {
+            btn.disabled = false;
+            btn.textContent = "Test";
+            btn.style.color = "";
+            btn.title = "";
+          }, 3000);
+        }}),
         el("button", { text: "Edit", onclick: () => enterEditRow(dataRow, name, prov) }),
         el("button", { text: "Delete", class: "danger", onclick: () => reloadAfter(
           api(`/admin/api/providers/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
