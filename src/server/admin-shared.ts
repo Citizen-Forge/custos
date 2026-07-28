@@ -29,12 +29,14 @@ export function maskApiKey(key: string): string {
 }
 
 export function findInstanceUsages(config: GatewayConfig, name: string): string[] {
+  // Only walk `config.tasks` -- per-turn complexity routing was deprecated
+  // with the pivot and is no longer mutable through the admin UI, so any
+  // tier reference a provider ends up holding is unrecoverable user state
+  // (not a real consumer). Walking it here locked deletes in a way a user
+  // could not satisfy.
   const usages: string[] = [];
   for (const [taskKind, entries] of Object.entries(config.tasks)) {
     if (entries.some((e) => e.provider === name)) usages.push(`task:${taskKind}`);
-  }
-  for (const [tier, entries] of Object.entries(config.complexityRouting.tiers)) {
-    if (entries.some((e) => e.provider === name)) usages.push(`complexityTier:${tier}`);
   }
   return usages;
 }

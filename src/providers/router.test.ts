@@ -64,14 +64,6 @@ function buildRouter(
       complexityClassifier: [{ provider: "inst", priority: 1 }],
       ...tasks,
     },
-    complexityRouting: {
-      enabled: false,
-      tiers: {
-        low: [{ provider: "inst", priority: 1 }],
-        medium: [{ provider: "inst", priority: 1 }],
-        high: [{ provider: "inst", priority: 1 }],
-      },
-    },
   };
   const recorded = Object.fromEntries(
     Object.keys(providers).map((k) => [k, { provider: providers[k], invocations: (providers[k] as unknown as { invocations: string[] }).invocations ?? [] }]),
@@ -193,10 +185,6 @@ describe("ProviderRouter priority resolution", () => {
         permissionClassifier: [],
         memoryCurator: [],
         complexityClassifier: [],
-      },
-      complexityRouting: {
-        enabled: false,
-        tiers: { low: [], medium: [], high: [] },
       },
     };
     const router = new ProviderRouter({ a, b }, config, makeAlwaysWithinBudget());

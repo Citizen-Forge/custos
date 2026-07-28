@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { TaskKind, ComplexityTier } from "./types.js";
+import type { TaskKind } from "./types.js";
 import type { OpenAICompatibleInstanceConfig } from "./providers/openai-compatible.js";
 import type { Priority } from "./providers/types.js";
 import type { PricingConfig } from "./providers/spend-tracker.js";
@@ -32,14 +32,6 @@ export interface EmbeddingProviderConfig {
    * entry even when it happens to point at the same server. */
   baseUrl: string;
   model: string;
-}
-
-export interface ComplexityRoutingConfig {
-  /** Off by default -- adds a classifier round-trip before every fresh
-   * human turn and can change which model handles a conversation
-   * mid-stream, so it's opt-in rather than a surprise behavior change. */
-  enabled: boolean;
-  tiers: Record<ComplexityTier, ProviderEntry[]>;
 }
 
 /** How using a provider is paid for. Determines what "unavailable" means
@@ -96,7 +88,6 @@ export interface GatewayConfig {
   openaiCompatibleInstances: Record<string, OpenAICompatibleInstanceConfig>;
   embeddingProvider: EmbeddingProviderConfig;
   tasks: Record<TaskKind, ProviderEntry[]>;
-  complexityRouting: ComplexityRoutingConfig;
   /** Shared secret Claude Code sends back as `x-api-key` (the same header
    * it already sends for real Anthropic API-key auth -- Custos ignores the
    * value for upstream purposes since it does its own provider auth
@@ -146,23 +137,6 @@ const DEFAULT_CONFIG: GatewayConfig = {
       { provider: "ollama-fast", priority: 1 },
       { provider: "anthropic", priority: 2 },
     ],
-  },
-  complexityRouting: {
-    enabled: false,
-    tiers: {
-      low: [
-        { provider: "ollama-fast", priority: 1 },
-        { provider: "anthropic", priority: 2 },
-      ],
-      medium: [
-        { provider: "ollama", priority: 1 },
-        { provider: "anthropic", priority: 2 },
-      ],
-      high: [
-        { provider: "anthropic", priority: 1 },
-        { provider: "ollama", priority: 2 },
-      ],
-    },
   },
 };
 
@@ -215,11 +189,6 @@ export async function loadConfig(): Promise<GatewayConfig> {
     openaiCompatibleInstances: { ...DEFAULT_CONFIG.openaiCompatibleInstances, ...fileConfig.openaiCompatibleInstances },
     embeddingProvider: { ...DEFAULT_CONFIG.embeddingProvider, ...fileConfig.embeddingProvider },
     tasks: { ...DEFAULT_CONFIG.tasks, ...fileConfig.tasks },
-    complexityRouting: {
-      ...DEFAULT_CONFIG.complexityRouting,
-      ...fileConfig.complexityRouting,
-      tiers: { ...DEFAULT_CONFIG.complexityRouting.tiers, ...fileConfig.complexityRouting?.tiers },
-    },
   };
 
   // If the file config has the new providers shape, use it directly.

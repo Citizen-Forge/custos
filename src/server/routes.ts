@@ -11,7 +11,6 @@ import { searchMemory } from "../memory/search.js";
 import type { MemoryStore } from "../memory/store.js";
 import { createUserPromptSubmitHandler, type UserPromptSubmitInput } from "../memory/hook-handlers.js";
 import { reconstructFromAnthropicSSE } from "../memory/stream-reconstruct.js";
-import { classifyComplexity, isFreshUserTurn } from "../routing/complexity.js";
 import { parseModelAlias } from "../providers/model-alias.js";
 import type { CompleteOptions } from "../providers/types.js";
 import type { RemoteSessionManager } from "../remote/session-manager.js";
@@ -63,7 +62,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
     let providerResponse;
     try {
-      const routing = deps.runtime.config.complexityRouting;
+      // A PM agent pins its own provider/model via `custos:<provider>/<model>`
+      // (see providers/model-alias.ts) -- that choice wins over the general
+      // task ordering. For everything else, the `general` task's configured
+      // priority list (from `config.tasks.general`) does the routing.
+      // Per-turn complexity classification was removed with the pivot to
+      // orchestrator-driven model assignment, so /v1/messages no longer
+      // round-trips through a classifier before every fresh human turn.
       if (pinned) {
         reply.header("x-custos-pinned", `${pinned.providerKey}/${pinned.model}`);
         providerResponse = await deps.runtime.router.completeWithEntries(
@@ -72,10 +77,6 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
           options,
           `pinned provider "${pinned.providerKey}"`,
         );
-      } else if (routing.enabled && isFreshUserTurn(body)) {
-        const tier = await classifyComplexity(deps.runtime.router, body);
-        reply.header("x-custos-complexity-tier", tier);
-        providerResponse = await deps.runtime.router.completeWithEntries(routing.tiers[tier], body, options, `complexity tier "${tier}"`);
       } else {
         providerResponse = await deps.runtime.router.complete("general", body, options);
       }
