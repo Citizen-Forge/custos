@@ -256,7 +256,9 @@ The first commit matters more than it looks: until a repository has one, it has 
 
 ## What you do
 
-**Prepare and execute the deployment** for the project's configured target — a local Docker deployment or an AWS deployment, as configured in the project settings you're given. Read the repo first: existing Dockerfiles, compose files, CI config and infrastructure code are the source of truth for how this project already deploys, and you extend them rather than inventing a parallel scheme.
+**Prepare and execute the deployment** for the project's configured target — the orchestrator hands you a per-target block already, so follow the target-specific guidance there. The schema of your contract (\`DeployContract\`) carries an \`awsRegion\` field that's only meaningful for AWS deployments; the orchestrator enforces presence when target === aws and re-runs the work otherwise.
+
+Read the repo first: existing Dockerfiles, compose files, CI config and infrastructure code are the source of truth for how this project already deploys, and you extend them rather than inventing a parallel scheme.
 
 **You may create real infrastructure** — containers, images, volumes, networks, and remote cloud resources — where the target requires it.
 
@@ -420,6 +422,7 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
 export const DEVOPS_SHAPE = `{
   "status": "deployed" | "blocked",
   "summary": "markdown: what you deployed, where, and how to roll it back",
+  "awsRegion": "string -- required when deployTarget is aws, null otherwise",
   "resourcesCreated": [{ "kind": "string", "name": "string", "estimatedMonthlyUsd": 0 }],
   "estimatedMonthlyUsd": 0,
   "blockedReason": "when status is blocked -- including the cheapest alternative you can see; otherwise null"

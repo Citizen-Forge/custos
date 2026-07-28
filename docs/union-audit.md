@@ -176,30 +176,25 @@ distinguishable in both the work-item and agent surfaces.**
 
 | Member | W | R | Verdict |
 |---|---|---|---|
-| `none` | ✓ `defaultProjectSettings: deployTarget: "none"` (`types.ts:256`); UI-exposed as the default selection | ✓ `orchestrator.ts:176/973` `!== "none"` and `=== "none"` skip-paths | live — this is the only member the runtime distinguishes |
-| `docker-local` | — | ✗ no runtime `=== "docker-local"` narrow anywhere | schema-inert — setable through admin UI but runtime treats `docker-local` and `aws` identically |
-| `aws` | — | ✗ no runtime `=== "aws"` narrow anywhere | schema-inert |
+| `none` | ✓ `defaultProjectSettings: deployTarget: "none"` (`types.ts:256`); UI-exposed as the default selection | ✓ `orchestrator.ts:176/973` `!== "none"` and `=== "none"` skip-paths | live |
+| `docker-local` | ✓ injected into `deploymentTargetSection` (`orchestrator.ts`) — the runtime switch injects compose-file-specific guidance into the devops agent's prompt | ✓ `case "docker-local":` in `deploymentTargetSection`; runtime branch on each value rather than string-templating | live |
+| `aws` | ✓ injected into `deploymentTargetSection` (`orchestrator.ts`) — same per-target branch as docker-local, with aws-region-specific sub-prompt | ✓ `case "aws":` in `deploymentTargetSection`; post-result runtime enforcement `if (ctx.settings.deployTarget === "aws" && !contract.awsRegion` in `runDevops` | live |
 
-**Union status: `none` is the only runtime-distinguished member. The
-non-`none` values are differentiated only through the devops agent's
-prompt content:** `src/orchestrator.ts:978` literally templates the value
-into the devops agent's deployment prompt as
-`\`## Deployment target: ${ctx.settings.deployTarget}\`` and the devops
-prompt at `prompts.ts:259` says
-*"Prepare and execute the deployment for the project's configured target —
-a local Docker deployment or an AWS deployment, as configured in the
-project settings you're given."* The human-in-the-loop (devops agent)
-makes the per-target decision based on the templated string; the gateway
-itself makes no per-target code branch.
+**Union status: fully live.** Each member has a runtime fork — the gate
+that lets the deploy proceed differs per target through
+`deploymentTargetSection` and the AWS contract requires
+`awsRegion` as an audit trail. The devops agent's prompt content is now
+target-specific, not generic.
 
-**This is real but not a drop candidate.** Removing `docker-local` and
-`aws` from the union would forfeit the schema's documented deployment
-footprint. The right *follow-on* (not this audit's job) is to surface
-per-target runtime support: a `target === "aws"` could expand the
-secret/Vault loads, the devops prompt could include AWS-specific
-sub-prompts, and the devops contract could require an `awsRegion` field
-when target === "aws". Each of those is a real user feature, not
-schema cleanup.
+The orchestrator's `deploymentTargetSection(target, deployConfig)`
+helper is what unblocked the audit: each per-target branch is a real
+code path keyed on the union value, not a templated string. The AWS
+post-result enforcement (`!== aws with empty awsRegion ⟶ blocked`) is
+the runtime narrow the audit was looking for. `DevopsContract`
+(`contracts.ts:80`) gained an optional `awsRegion?: string | null`
+field that is required-when-AWS at runtime but kept loose on the type
+because the LLM contract is loose by design; the runtime enforcement
+is what makes it required.
 
 ### `ModelRecord.requestsPerHour` ambiguity — DROPPED in follow-up commit
 
@@ -258,9 +253,15 @@ The two prior tightenings follow the same shape:
 cleared paths are exactly what this audit will need for any future
 drop. **Today** the audit found zero dead candidates — every union
 member is reachable from runtime code either directly or as a default
-provenance marker. The shape of any future drop is therefore a
-**schema-inert → live migration** (the `DeployTarget` case) rather
-than a `live → dead` removal.
+provenance marker. The shape of any future drop would still need a
+schema-inert → live migration pattern, but the
+`DeployTarget.docker-local`/`DeployTarget.aws` row of this audit is
+already resolved — both members have explicit runtime branches in
+`deploymentTargetSection` and (for AWS) the `awsRegion` contract
+enforcement. The "next schema-inert finding" template is committed
+to the codebase now: when the audit names a schema-inert union
+member, the fix is to give it a runtime fork keyed on the value,
+update the audit doc + test together, and document the rationale.
 
 ## Summary
 
@@ -274,7 +275,7 @@ than a `live → dead` removal.
 | `WorkItemType` | 3 | 3 | 0 |
 | `BOARD_STATUSES` | 5 | 5 | 0 |
 | `Complexity` | 3 | 3 | 0 |
-| `DeployTarget` | 3 | 1 (none) | 2 schema-inert (docker-local, aws) |
+| `DeployTarget` | 3 | 3 | 0 |
 | `ModelRecord.requestsPerHour` | (single nullable field) | 0 | 1 orphaned |
 | `Emitterable` body kind | n/a | n/a | term not found |
 

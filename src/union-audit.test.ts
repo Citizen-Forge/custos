@@ -27,7 +27,7 @@ const CASES: readonly UnionCase[] = [
   { union: "WorkItemType", declared: "src/pm/types.ts", members: ["epic", "story", "bug"] },
   { union: "BOARD_STATUSES", declared: "src/pm/types.ts", members: ["backlog", "ready", "in_progress", "qa", "complete"] },
   { union: "Complexity", declared: "src/pm/types.ts", members: ["low", "medium", "high"] },
-  { union: "DeployTarget", declared: "src/pm/types.ts", members: ["none", "docker-local", "aws"], schemaInert: ["docker-local", "aws"] },
+  { union: "DeployTarget", declared: "src/pm/types.ts", members: ["none", "docker-local", "aws"] },
   { union: "Billing", declared: "src/pm/model-registry.ts", members: ["subscription", "metered", "free"] },
 ];
 

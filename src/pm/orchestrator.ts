@@ -14,7 +14,7 @@ import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-reg
 import { hasGitCredentials, listSecrets } from "./vault.js";
 import { ASSIGN_MODELS_SHAPE, ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
 import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
-import type { AgentDef, AgentRole, ProjectSettings, WorkItem } from "./types.js";
+import type { AgentDef, AgentRole, DeployTarget, ProjectSettings, WorkItem } from "./types.js";
 
 const TICK_MS = Number(process.env.CUSTOS_ORCHESTRATOR_TICK_MS ?? 20_000);
 
@@ -977,6 +977,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         "",
         `## Deployment target: ${ctx.settings.deployTarget}`,
         "",
+        deploymentTargetSection(ctx.settings.deployTarget, ctx.settings.deployConfig),
+        "",
         Object.entries(ctx.settings.deployConfig).map(([key, value]) => `- ${key}: ${value}`).join("\n") || "_No target-specific settings configured._",
         "",
         ctx.settings.budget.infraMonthlyUsd !== null
@@ -1007,13 +1009,55 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       const contract = result.parsed;
       await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
+      // AWS deployments must report the region the resources actually landed
+      // in -- the devops gate, not a prompt nicety. The orchestrator is the
+      // only place that can enforce this because the LLM-side `awsRegion`
+      // field is loose by design.
+      if (ctx.settings.deployTarget === "aws" && (!contract.awsRegion || contract.awsRegion.trim() === "")) {
+        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `DevOps deployment missing awsRegion: required when deployTarget is aws.`);
+        this.emit("activity", projectId, `DevOps deployment missing awsRegion on "${item.title}". Use the project's deployConfig.awsRegion or report it in the contract.`);
+        return;
+      }
       if (contract.status !== "deployed") {
         this.emit("activity", projectId, `DevOps is blocked on "${item.title}": ${contract.blockedReason ?? "no reason given"}`);
         return;
       }
       await board.updateWorkItem(workItemId, { labels: [...item.labels, DEPLOYED_LABEL] });
-      this.emit("activity", projectId, `DevOps deployed "${item.title}"${contract.estimatedMonthlyUsd ? ` (~$${contract.estimatedMonthlyUsd}/mo)` : ""}.`);
+      this.emit("activity", projectId, `DevOps deployed "${item.title}"${contract.estimatedMonthlyUsd ? ` (~$${contract.estimatedMonthlyUsd}/mo)` : ""}${contract.awsRegion ? ` in ${contract.awsRegion}` : ""}.`);
     });
+  }
+}
+
+/** Per-target guidance injected into the devops agent's prompt. The audit
+ * at docs/union-audit.md treats this as the runtime fork that proves
+ * `DeployTarget.docker-local` and `DeployTarget.aws` are no longer
+ * schema-inert -- the orchestrator narrows on each value rather than
+ * string-templating the deployTarget into a generic block. */
+function deploymentTargetSection(target: DeployTarget, deployConfig: Record<string, string>): string {
+  switch (target) {
+    case "docker-local":
+      return [
+        "### Compose-file target",
+        "",
+        `Compose file: \`${deployConfig.composePath ?? "./docker-compose.yml"}\``,
+        "Bring up: `docker compose up -d`",
+        "Verify: `docker compose ps`",
+        "",
+        "Use the existing compose file in source as the source of truth. Note healthcheck states and service connectivity in your summary. Tail logs before declaring deployed.",
+      ].join("\n");
+    case "aws":
+      return [
+        "### AWS target",
+        "",
+        `Region: \`${deployConfig.awsRegion ?? "(missing — your contract will be blocked)"}\``,
+        `Credentials profile (env-resolved): \`${deployConfig.awsProfile ?? "default"}\``,
+        "",
+        "Read the existing repo's infrastructure code first — Dockerfile, compose, .aws/, terraform/, CloudFormation — and extend it rather than introducing a parallel scheme. Resource limits and idle behaviour come from the conventions in that code.",
+        "",
+        "Your contract REQUIRES `awsRegion` -- it is the audit trail showing where the resources actually landed. If you cannot determine it from `deployConfig.awsRegion` or the repo's existing infra code, set `status: \"blocked\"` with `blockedReason: \"missing awsRegion\"`.",
+      ].join("\n");
+    case "none":
+      return "_No deployment target configured._";
   }
 }
 

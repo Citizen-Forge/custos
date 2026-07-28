@@ -96,6 +96,13 @@ export interface DevopsContract extends WithFacts {
   resourcesCreated?: Array<{ kind?: string; name?: string; estimatedMonthlyUsd?: number }>;
   estimatedMonthlyUsd?: number;
   blockedReason?: string | null;
+  /** AWS region the resources actually landed in. Required when the
+   * project's `deployTarget` is `"aws"`; the orchestrator treats an empty
+   * or absent value as a deployment-time error and forces a re-run. Null
+   * for non-AWS deployments. Kept optional on the type because the LLM
+   * contract is loose by design -- the runtime enforcement is what makes
+   * it required. */
+  awsRegion?: string | null;
 }
 
 export interface ProjectManagerContract extends WithFacts {
