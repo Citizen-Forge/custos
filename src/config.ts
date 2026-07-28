@@ -178,8 +178,69 @@ function migrateInstanceToProvider(name: string, instance: OpenAICompatibleInsta
   };
 }
 
+/** Folds the legacy `openaiCompatibleInstances` shape into the canonical
+ * `providers` shape, in-place on `fileConfig`. Runs BEFORE pruneStaleFields
+ * so the prune can drop the legacy field without losing user data: legacy
+ * entries that haven't been migrated to the new shape are migrated here,
+ * the in-memory `fileConfig.providers` carries them through the merge,
+ * and the prune then zeros the legacy field on disk-equivalent for the
+ * rest of the load. */
+function migrateLegacyShape(fileConfig: Partial<GatewayConfig>): void {
+  if (fileConfig.providers || !fileConfig.openaiCompatibleInstances) return;
+  const migrated: Record<string, ProviderDef> = {};
+  for (const [name, instance] of Object.entries(fileConfig.openaiCompatibleInstances)) {
+    migrated[name] = migrateInstanceToProvider(name, instance);
+  }
+  fileConfig.providers = migrated;
+}
+
+/** Strips documented-deprecated fields from a freshly-read `fileConfig`
+ * before the merge step so they never reach the in-memory `GatewayConfig`.
+ * Today `saveConfig` already drops `openaiCompatibleInstances` on write,
+ * but a file that has never been saved through the new admin UI keeps
+ * that field plus any other now-defunct entries indefinitely. Pruning at
+ * read means the on-disk file converges to canonical shape on every
+ * restart, and a future deprecation is a one-line addition here.
+ *
+ * PRUNED:
+ *   - `complexityRouting` — schema dropped in 5643718; no runtime caller;
+ *     no admin UI mutates it. Hard drop.
+ *   - `openaiCompatibleInstances` — superseded by `providers.<name>`.
+ *     `migrateLegacyShape` above folds legacy entries into `providers`
+ *     before this drop, so user data is preserved through the prune.
+ *
+ * KEPT (intentionally not pruned, with a documented path to future-proofing):
+ *   - `clientApiKey` — `client-auth-guard.ts` reads it and fails closed on
+ *     missing (every /v1/messages 401s). `headless-settings.ts` uses it for
+ *     hook `x-api-key`, and `turn-runner.ts` propagates it as ANTHROPIC_API_KEY
+ *     to spawned claude subprocesses. There is no `CUSTOS_CLIENT_API_KEY`
+ *     env var fallback, so a future prune is a real migration -- needs an
+ *     alternate auth path first.
+ *   - `tasks.complexityClassifier` (nested under `tasks`) — unreachable in
+ *     the runtime since 5643718 but still under the operator's control via
+ *     `PUT /admin/api/tasks/complexityClassifier`. The validation gate that
+ *     read it was lifted in b751308; auto-pruning here would silently delete
+ *     user-set data, so the conservative call is to leave dormant entries
+ *     intact until the TaskKind itself drops from the union.
+ */
+function pruneStaleFields(fileConfig: Partial<GatewayConfig>): void {
+  // JSON.parse can include fields the GatewayConfig type doesn't list
+  // (most commonly: previously-deprecated shapes whose schema entries
+  // were dropped, e.g. complexityRouting after 5643718). Cast to a
+  // record so we can still sweep those keys without TS2339.
+  const stale = fileConfig as Partial<GatewayConfig> & Record<string, unknown>;
+  delete stale.complexityRouting;
+  delete stale.openaiCompatibleInstances;
+}
+
 export async function loadConfig(): Promise<GatewayConfig> {
   const fileConfig = await readFileConfig();
+  // Order matters: migrate legacy entries into canonical `providers`
+  // BEFORE dropping the legacy field, so the prune doesn't lose user
+  // data. Both helpers are no-ops on already-canonical files so the cost
+  // is negligible on every restart, not just on migration events.
+  migrateLegacyShape(fileConfig);
+  pruneStaleFields(fileConfig);
 
   // Merge the default config with the file config.
   const merged: GatewayConfig = {
@@ -191,26 +252,9 @@ export async function loadConfig(): Promise<GatewayConfig> {
     tasks: { ...DEFAULT_CONFIG.tasks, ...fileConfig.tasks },
   };
 
-  // If the file config has the new providers shape, use it directly.
-  // Otherwise, migrate from the old openaiCompatibleInstances shape.
-  if (fileConfig.providers) {
-    merged.providers = {
-      ...DEFAULT_CONFIG.providers,
-      ...fileConfig.providers,
-    };
-  } else {
-    // Migrate: merge default providers with migrated old instances.
-    const migrated: Record<string, ProviderDef> = {};
-    // Start with defaults
-    for (const [name, instance] of Object.entries(DEFAULT_CONFIG.providers ?? {})) {
-      migrated[name] = { ...instance, models: [...instance.models] };
-    }
-    // Overlay migrated old instances (including file-merged ones)
-    for (const [name, instance] of Object.entries(merged.openaiCompatibleInstances)) {
-      migrated[name] = migrateInstanceToProvider(name, instance);
-    }
-    merged.providers = migrated;
-  }
+  // fileConfig.providers is populated either by user-set or by
+  // migrateLegacyShape above. Defaults overlay on top.
+  merged.providers = { ...DEFAULT_CONFIG.providers, ...(fileConfig.providers ?? {}) };
 
   if (!merged.anthropic?.apiKey && process.env.ANTHROPIC_API_KEY) {
     merged.anthropic = { ...merged.anthropic, apiKey: process.env.ANTHROPIC_API_KEY };
