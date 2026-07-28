@@ -297,6 +297,14 @@ async function loadState() {
       el.title = `Deployed commit: ${v.commit}`;
     }
   }).catch(() => {/* version endpoint is informational only */});
+  // Global services (memory curator, permission classifier, embeddings)
+  // share their own panel. Pre-load so render() can show them without
+  // a follow-up fetch.
+  try {
+    state.globalAgents = (await api("/admin/api/global-agents")).agents || [];
+  } catch {
+    state.globalAgents = [];
+  }
   state.projects = (await api("/admin/api/projects")).projects;
   for (const project of state.projects) {
     // Chats are lazy-loaded on first click of the chat toggle — no pre-fetch.
@@ -327,6 +335,7 @@ function render() {
   const app = $("#app");
   app.innerHTML = "";
   app.appendChild(renderProvidersPanel());
+  app.appendChild(renderGlobalServicesPanel(state.providers));
   app.appendChild(renderProjectsPanel());
   app.appendChild(renderSecurityPanel());
 }
@@ -865,18 +874,104 @@ function renderProvidersPanel() {
   section.appendChild(row4);
   section.appendChild(row5);
 
-  section.appendChild(el("hr", { class: "sep" }));
-  section.appendChild(el("p", { class: "small", text: `Embeddings (used for memory search) come from Ollama's native API, currently ${state.embeddingProvider.baseUrl} / ${state.embeddingProvider.model}` }));
-  const embUrl = el("input", { type: "text", placeholder: "http://host:11434 (no /v1)", value: state.embeddingProvider.baseUrl });
-  const embModel = el("input", { type: "text", placeholder: "embedding model", value: state.embeddingProvider.model });
-  section.appendChild(el("div", { class: "row" }, [
-    embUrl, embModel,
-    el("button", { class: "primary", text: "Save", onclick: () => reloadAfter(
-      api("/admin/api/embedding-provider", { method: "PUT", body: { baseUrl: embUrl.value, model: embModel.value } }), "Embedding provider saved"
-    )}),
+  return section;
+}
+
+// -- Global services (memory curator, permission classifier, embeddings) --
+//
+// Each global service is an AgentDef with kind="global" and a built-in
+// systemRole. The same provider dropdown used for project agents shows
+// up here so the model/provider choice is answered from one place. The
+// embeddings row has one extra `embeddingBaseUrl` field — Ollama exposes
+// /api/embeddings on a different path than the OpenAI-compat chat one,
+// and someone pointing a custom Ollama host at the embeddings agent
+// needs that override to surface in the UI.
+function renderGlobalServicesPanel(providers) {
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Global services" }));
+  section.appendChild(el("p", { class: "desc", text: "Project-orthogonal services the gateway runs in the background: memory curator (extracts facts from sessions), permission classifier (gates tool calls), embeddings (powers memory search). " }));
+
+  const agents = (state.globalAgents || []).slice();
+  if (!agents.length) {
+    section.appendChild(el("p", { class: "small", text: "No global agents configured. Restart the gateway to seed the defaults." }));
+    return section;
+  }
+
+  // Stable display order so the curator sits next to its closest consumer
+  // (memory search), and embeddings — which already runs in
+  // /admin/api/state — stays at the bottom by convention.
+  const order = ["memoryCurator", "permissionClassifier", "embeddings"];
+  agents.sort((a, b) => order.indexOf(a.systemRole || "") - order.indexOf(b.systemRole || ""));
+
+  const table = el("table", { class: "providers-table" });
+  table.appendChild(el("colgroup", {}, [
+    el("col", { style: "width: 22%;" }),
+    el("col", { style: "width: 28%;" }),
+    el("col", { style: "width: 22%;" }),
+    el("col", { style: "width: 18%;" }),
+    el("col", { style: "width: 10%;" }),
+  ]));
+  table.appendChild(el("tr", {}, [
+    el("th", { text: "Service" }),
+    el("th", { text: "Provider" }),
+    el("th", { text: "Model" }),
+    el("th", { text: "Endpoint" }),
+    el("th", { text: "Actions" }),
   ]));
 
+  for (const agent of agents) {
+    const providerOptions = ["anthropic", ...Object.keys(providers || {})];
+    const providerSelect = el("select", {});
+    for (const key of providerOptions) {
+      const opt = el("option", { value: key, text: key });
+      if (key === agent.providerKey) opt.setAttribute("selected", "selected");
+      providerSelect.appendChild(opt);
+    }
+    const modelInput = el("input", { type: "text", value: agent.model, placeholder: "model name" });
+    const endpointInput = el("input", {
+      type: "text",
+      value: agent.embeddingBaseUrl || "",
+      placeholder: agent.systemRole === "embeddings" ? "default: derived from provider host" : "(only for embeddings)",
+      disabled: agent.systemRole !== "embeddings" ? "disabled" : undefined,
+    });
+    const saveBtn = el("button", { class: "row-btn primary", text: "Save", onclick: () => {
+      const patch = {
+        providerKey: providerSelect.value,
+        model: modelInput.value,
+        embeddingBaseUrl: agent.systemRole === "embeddings" ? (endpointInput.value || null) : undefined,
+      };
+      reloadAfter(api(`/admin/api/global-agents/${encodeURIComponent(agent.systemRole)}`, {
+        method: "PATCH",
+        body: patch,
+      }), `${labelForRole(agent.systemRole)} updated`);
+    }});
+    const row = el("tr", {}, [
+      el("td", {}, [
+        el("strong", { text: labelForRole(agent.systemRole) }),
+        el("br"),
+        el("span", { class: "small", text: agent.name }),
+      ]),
+      el("td", {}, [providerSelect]),
+      el("td", {}, [modelInput]),
+      el("td", { class: "url-cell" }, [
+        endpointInput,
+      ]),
+      el("td", { class: "actions-cell" }, [saveBtn]),
+    ]);
+    table.appendChild(row);
+  }
+  section.appendChild(table);
+  section.appendChild(el("p", { class: "small", style: "margin-top: 8px;", text: "The endpoint field is only meaningful for embeddings — Ollama exposes them at a different path than /v1/chat/completions, so the runtime either derives the URL from the named provider or uses the explicit host here." }));
   return section;
+}
+
+function labelForRole(systemRole) {
+  switch (systemRole) {
+    case "memoryCurator": return "Memory curator";
+    case "permissionClassifier": return "Permission classifier";
+    case "embeddings": return "Embeddings";
+    default: return systemRole || "(unknown)";
+  }
 }
 
 // -- Projects / remote control ----------------------------------------
