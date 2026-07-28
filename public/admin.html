@@ -98,6 +98,30 @@
   table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .providers-table { table-layout: fixed; border-spacing: 0; }
+  .providers-table td, .providers-table th { vertical-align: middle; }
+  .providers-table .actions-cell { white-space: nowrap; text-align: right; padding-right: 12px; }
+  .providers-table .row-btn { font-size: 11px; padding: 3px 7px; margin-left: 3px; }
+  .providers-table .row-btn:first-child { margin-left: 0; }
+  .providers-table .row-btn.danger { color: var(--danger); }
+  .providers-table .cost-chip {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .providers-table .cost-chip.free { background: rgba(91,217,143,0.15); color: var(--ok); }
+  .providers-table .cost-chip.subscription { background: rgba(91,193,219,0.15); color: var(--accent); }
+  .providers-table .cost-chip.metered { background: rgba(217,193,91,0.15); color: var(--warn); }
+  .providers-table .url-cell { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; word-break: break-all; }
+  .providers-table .muted { color: var(--muted); }
+  .providers-table .provider-name-cell { cursor: pointer; user-select: none; }
+  .providers-table .provider-name-cell > strong { pointer-events: none; }
+  .providers-table .provider-toggle { color: var(--muted); font-size: 10px; flex-shrink: 0; width: 10px; display: inline-block; margin-right: 6px; }
+  .providers-table .model-detail td { padding: 5px 12px 5px 36px; font-size: 12px; background: rgba(255,255,255,0.025); border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .providers-table .separator td { padding: 0; border-bottom: 1px solid var(--border); height: 6px; }
   .priority-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
   .priority-item { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
   .priority-item .num { color: var(--muted); font-variant-numeric: tabular-nums; width: 18px; }
@@ -557,36 +581,53 @@ function renderProvidersPanel() {
 
   section.appendChild(anthSection);
 
-  const table = el("table");
+  const table = el("table", { class: "providers-table" });
+  table.appendChild(el("colgroup", {}, [
+    el("col", { style: "width: 19%;" }),
+    el("col", { style: "width: 23%;" }),
+    el("col", { style: "width: 8%;" }),
+    el("col", { style: "width: 14%;" }),
+    el("col", { style: "width: 8%;" }),
+    el("col", { style: "width: 7%;" }),
+    el("col", { style: "width: 9%;" }),
+    el("col", { style: "width: 12%;" }),
+  ]));
   table.appendChild(el("tr", {}, [
-    el("th", { text: "Provider" }), el("th", { text: "Base URL" }), el("th", { text: "Type" }), el("th", { text: "API key" }), el("th", { text: "Throttle" }), el("th", { text: "RPM" }), el("th", { text: "Priority" }), el("th", { text: "" }),
+    el("th", { text: "Provider" }), el("th", { text: "Base URL" }), el("th", { text: "Cost" }), el("th", { text: "API key" }), el("th", { text: "Throttle" }), el("th", { text: "RPM" }), el("th", { text: "Priority" }), el("th", { text: "Actions" }),
   ]));
   for (const [name, prov] of Object.entries(state.providers)) {
     const throttleText = prov.maxConcurrent == null ? "—" : String(prov.maxConcurrent);
     const rpmText = prov.rpmLimit == null ? "—" : String(prov.rpmLimit);
     const priorityText = prov.priority == null ? "—" : (prov.priority === "interactive" ? "Interactive" : "Background");
-    const costLabel = { free: "Free", subscription: "Sub", metered: "Metered" }[prov.costType] || prov.costType || "?";
+    const costType = prov.costType || "free";
+    const costText = { free: "Free", subscription: "Sub", metered: "Metered" }[costType] || costType;
     const expanded = true; // start expanded
     const dataRow = el("tr", { class: "provider-row" }, [
-      el("td", { style: "cursor: pointer;", onclick: (ev) => {
-        // Toggle visibility of model detail rows beneath this provider.
-        let sib = dataRow.nextElementSibling;
-        while (sib && sib.classList.contains("model-detail")) {
-          const hidden = sib.style.display === "none";
-          sib.style.display = hidden ? "" : "none";
-          sib = sib.nextElementSibling;
-        }
-        const toggle = ev.currentTarget.querySelector(".provider-toggle");
-        if (toggle) toggle.textContent = toggle.textContent === "▾" ? "▸" : "▾";
-      } }),
-      el("td", { text: prov.baseUrl }),
-      el("td", { text: costLabel }),
-      el("td", { text: prov.apiKeyConfigured ? prov.apiKeyMasked : "—" }),
-      el("td", { text: throttleText }),
-      el("td", { text: rpmText }),
-      el("td", { text: priorityText }),
-      el("td", {}, [
-        el("button", { style: "font-size: 11px; padding: 3px 6px;", text: "Test", onclick: async (ev) => {
+      el("td", {
+        class: "provider-name-cell",
+        onclick: () => {
+          // Toggle visibility of model detail rows beneath this provider.
+          let sib = dataRow.nextElementSibling;
+          while (sib && sib.classList.contains("model-detail")) {
+            const hidden = sib.style.display === "none";
+            sib.style.display = hidden ? "" : "none";
+            sib = sib.nextElementSibling;
+          }
+          const toggleSpan = dataRow.querySelector(".provider-toggle");
+          if (toggleSpan) toggleSpan.textContent = toggleSpan.textContent === "▾" ? "▸" : "▾";
+        },
+      }, [
+        el("span", { class: "provider-toggle", text: "▾" }),
+        el("strong", { text: name }),
+      ]),
+      el("td", { class: "url-cell", text: prov.baseUrl }),
+      el("td", {}, [el("span", { class: `cost-chip ${costType}`, text: costText })]),
+      el("td", { class: prov.apiKeyConfigured ? "" : "muted", text: prov.apiKeyConfigured ? prov.apiKeyMasked : "—" }),
+      el("td", { class: prov.maxConcurrent == null ? "muted" : "", text: throttleText }),
+      el("td", { class: prov.rpmLimit == null ? "muted" : "", text: rpmText }),
+      el("td", { class: prov.priority == null ? "muted" : "", text: priorityText }),
+      el("td", { class: "actions-cell" }, [
+        el("button", { class: "row-btn", text: "Test", onclick: async (ev) => {
           const btn = ev.currentTarget;
           btn.disabled = true;
           btn.textContent = "↻";
@@ -613,22 +654,19 @@ function renderProvidersPanel() {
             btn.title = "";
           }, 3000);
         }}),
-        el("button", { text: "Edit", onclick: () => enterEditRow(dataRow, name, prov) }),
-        el("button", { text: "Delete", class: "danger", onclick: () => reloadAfter(
+        el("button", { class: "row-btn", text: "Edit", onclick: () => enterEditRow(dataRow, name, prov) }),
+        el("button", { class: "row-btn danger", text: "Delete", onclick: () => reloadAfter(
           api(`/admin/api/providers/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
         )}),
       ]),
     ]);
-    // Insert toggle icon as the first child of the first cell.
-    dataRow.cells[0].insertBefore(el("span", { class: "provider-toggle", style: "margin-right: 6px;", text: "▾" }), dataRow.cells[0].firstChild);
-    dataRow.cells[0].appendChild(el("strong", { text: name }));
     table.appendChild(dataRow);
 
     // Model sub-rows — visible by default, toggled by clicking the provider name.
     const models = prov.models || [];
     for (const model of models) {
       const modelRow = el("tr", { class: "model-detail" });
-      const modelTd = el("td", { colspan: "8", style: "padding: 2px 8px 2px 28px; font-size: 12px; border-bottom: none;" });
+      const modelTd = el("td", { colspan: "8" });
       // Inline toggle to enable/disable a model without opening the edit form.
       const toggleLabel = el("label", {
         style: "display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; cursor: pointer; font-size: 11px;",
@@ -665,8 +703,8 @@ function renderProvidersPanel() {
       table.appendChild(modelRow);
     }
     // Separator row between providers
-    table.appendChild(el("tr", { class: "model-detail" }, [
-      el("td", { colspan: "8", style: "padding: 0; border-bottom: 1px solid var(--border); height: 0;" }),
+    table.appendChild(el("tr", { class: "separator" }, [
+      el("td", { colspan: "8" }),
     ]));
   }
   section.appendChild(table);
