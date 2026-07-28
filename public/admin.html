@@ -850,6 +850,21 @@ function renderProvidersPanel() {
     presetSelect.appendChild(el("option", { value: preset.id, text: preset.label }));
   }
 
+  // --- Embeddings URL (optional override for the add form) ---
+  // Declared here alongside the other add-form rows because the Save
+  // handler reads `embeddingUrlInput.value` from the same closure. The
+  // Test button lives in the edit form (enterEditRow), which requires
+  // the provider to already be saved before a live probe makes sense.
+  // This input is the post-save equivalent for newly-created providers:
+  // an explicit override for OpenAI-compat /v1/embeddings hosts, plus
+  // any custom embedding service the URL-shape heuristic can't reach.
+  const embeddingUrlInput = el("input", { type: "text", placeholder: "Auto-derived from base URL" });
+  const rowEmbedding = el("div", { class: "row" }, [
+    el("label", { text: "Embeddings URL" }),
+    embeddingUrlInput,
+    el("span", { class: "small", text: "optional — blank = auto-derived (Ollama: /api/embeddings, others: /embeddings at base)" }),
+  ]);
+
   const row0 = el("div", { class: "row" }, [el("label", { text: "Preset" }), presetSelect]);
   const row1 = el("div", { class: "row" }, [nameInput, urlInput]);
   const row2 = el("div", { class: "row" }, [el("label", { text: "Cost" }), costTypeSelect, keyInput]);
