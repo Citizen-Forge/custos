@@ -320,6 +320,28 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
     return { ok: true };
   });
 
+  /** Flips pmConfigured to false so the Project Manager re-evaluates
+   * model assignments on its NEXT tick -- deferring to the existing
+   * tick cadence instead of forcing a synchronous assignment pass.
+   * Distinct from /reassign-models: that endpoint actively runs
+   * assignModels() now (costs one PM call right away); this endpoint
+   * leaves the choice to the orchestrator's normal 20s pass. Use after
+   * editing providers, the project's budget, or the agent model menu
+   * -- anywhere a config change should be picked up but the existing
+   * PM work doesn't need to be re-done right this second. The orchestrator
+   * gate at tickProject() reads !settings.pmConfigured and triggers
+   * assignModels() on its own; no explicit call here. */
+  app.post("/admin/api/projects/:id/reset-pm", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await getProject(id))) return notFound(reply, "project");
+    await updateSettings(id, { pmConfigured: false });
+    // Operator-visible feedback in the activity feed: the reset is
+    // immediate but the actual reassignment happens on the next tick,
+    // so an explicit "reset requested" entry makes the gap visible.
+    orchestrator.emit("activity", id, "Project Manager reset — will re-evaluate on next tick.");
+    return { ok: true };
+  });
+
   // ----------------------------------------------------------- model registry
 
   app.get("/admin/api/models", async () => {

@@ -316,6 +316,7 @@ async function loadState() {
     project.subscriptionUsd = settingsResp.subscriptionUsd ?? 0;
     project.agents = settingsResp.agents ?? [];
     project.pmLastRunAt = settingsResp.settings.pmLastRunAt ?? null;
+    project.pmConfigured = settingsResp.settings.pmConfigured ?? false;
     project.paused = settingsResp.settings.paused ?? false;
   }
   render();
@@ -1190,10 +1191,23 @@ function renderProjectsPanel() {
             text: `${roleLabels[agent.role]}:${agent.model.includes("/") ? agent.model.split("/").pop() : agent.model}`,
           }));
         }
-        if (project.pmLastRunAt) {
-          const pmDate = new Date(project.pmLastRunAt);
-          badgesRow.appendChild(el("span", { class: "small", style: "font-size: 10px;", text: `${pmDate.toLocaleDateString()} ${pmDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` }));
-        }
+      if (project.pmLastRunAt) {
+        const pmDate = new Date(project.pmLastRunAt);
+        // The footer label is the operator-facing hint: "Last PM run: <date>"
+        // is the discoverable thing the original anonymous timestamp
+        // wasn't. The status hint after the date says whether to expect
+        // the PM to do anything more without intervention -- when
+        // pmConfigured is true the assignments are stable until the
+        // operator resets, and after a Reset the next tick will overwrite
+        // both the assignments and pmLastRunAt. The two states are
+        // legitimately different enough that hiding one as the other's
+        // tooltip would be misleading.
+        const stamp = `${pmDate.toLocaleDateString()} ${pmDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+        const hint = project.pmConfigured
+          ? " — assignments are stable until you click Reset PM"
+          : " — will re-run on next tick";
+        badgesRow.appendChild(el("span", { class: "small", style: "font-size: 10px;", title: "Last PM run" + hint, text: `Last PM run: ${stamp}${hint}` }));
+      }
         controlsCell.appendChild(badgesRow);
       }
 
@@ -1216,7 +1230,10 @@ function renderProjectsPanel() {
           api(`/admin/api/projects/${project.id}/pause`, { method: "POST" }), "Project paused"
         )}));
       }
-      actions.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Re-assign", onclick: () => reloadAfter(
+      actions.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Reset PM", title: "Flip pmConfigured to false so the Project Manager re-evaluates on the next tick; doesn't run the PM now", onclick: () => reloadAfter(
+        api(`/admin/api/projects/${project.id}/reset-pm`, { method: "POST" }), "PM reset — will re-run on next tick"
+      )}));
+      actions.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Re-assign", title: "Force the Project Manager to run now and overwrite current assignments", onclick: () => reloadAfter(
         api(`/admin/api/projects/${project.id}/reassign-models`, { method: "POST" }), "Project Manager re-assigning models"
       )}));
       actions.appendChild(el("button", { class: "danger", style: "font-size: 11px; padding: 3px 8px;", text: "Delete", onclick: () => {
