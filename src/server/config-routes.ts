@@ -1,7 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
 import type { Runtime } from "../runtime.js";
 import { getApiKeySource } from "../config.js";
 import { getOAuthStatus } from "../auth/credentials.js";
@@ -37,21 +36,7 @@ export function registerConfigRoutes(app: FastifyInstance, runtime: Runtime): vo
       providers: await describeProviders(runtime),
       embeddingProvider: config.embeddingProvider,
       providerPresets: PROVIDER_PRESETS,
-      clientApiKey: config.clientApiKey ?? null,
     };
-  });
-
-  // -- Client API key (gates /v1/messages, /hooks/*, /memory/search) ------
-
-  app.post("/admin/api/client-key/generate", async () => {
-    const key = `custos-${randomBytes(24).toString("base64url")}`;
-    await updateConfig(runtime, (cfg) => ({ ...cfg, clientApiKey: key }));
-    return { clientApiKey: key };
-  });
-
-  app.post("/admin/api/client-key/clear", async () => {
-    await updateConfig(runtime, (cfg) => ({ ...cfg, clientApiKey: undefined }));
-    return { ok: true };
   });
 
   // -- Runtime stats ------------------------------------------------------

@@ -3,7 +3,6 @@ import * as projects from "../remote/projects.js";
 import * as chats from "../remote/chats.js";
 import { RemoteSessionManager } from "../remote/session-manager.js";
 import { readTranscript } from "../remote/transcript.js";
-import { listConversations, buildResumeSummary } from "../memory/conversations.js";
 import { getSettings, deleteSettings, updateSettings } from "../pm/project-settings.js";
 import { STEERING_PROMPT } from "../pm/prompts.js";
 import { ensureProjectAgents, deleteProjectAgents } from "../pm/agents.js";
@@ -18,10 +17,6 @@ import type { Runtime } from "../runtime.js";
 function publicUrl(): string {
   // `||` not `??` -- see admin-routes.ts's buildSetupInstructions for why.
   return process.env.GATEWAY_PUBLIC_URL || `http://localhost:${process.env.PORT ?? 8787}`;
-}
-
-function resumePrompt(summary: string): string {
-  return `Resuming a previous conversation. Here's a summary of where it left off:\n\n${summary}\n\nPlease continue from here.`;
 }
 
 function connectUrl(token: string, initialMessage?: string): string {
@@ -183,31 +178,17 @@ export function registerProjectRoutes(
 
   app.post("/admin/api/projects/:id/chats", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { title, resumeConversationId, kind } = (req.body ?? {}) as { title?: string; resumeConversationId?: string; kind?: chats.ChatKind };
+    const { title, kind } = (req.body ?? {}) as { title?: string; kind?: chats.ChatKind };
     const project = await projects.getProject(id);
     if (!project) {
       reply.code(404);
       return { error: "project not found" };
     }
 
-    // No process to prime with this as an initial CLI argument anymore --
-    // a chat isn't backed by a persistent process at all now, just a
-    // connectable slot. Returned to the client instead, to send as the
-    // first user_message once it connects.
-    let initialMessage: string | undefined;
-    if (resumeConversationId) {
-      const summary = await buildResumeSummary(runtime.router, resumeConversationId);
-      if (!summary) {
-        reply.code(404);
-        return { error: "that conversation wasn't found (it may be too old -- only the last ~2 weeks are scanned)" };
-      }
-      initialMessage = resumePrompt(summary);
-    }
-
     const chat = await chats.createChat(id, title?.trim() || (kind === "steering" ? "New discussion" : "New chat"), kind ?? "chat");
     try {
       const session = manager.start(chat.id, id, project.workspaceDir, await sessionOptionsFor(chat));
-      return { chat, token: session.token, connectUrl: connectUrl(session.token, initialMessage), initialMessage };
+      return { chat, token: session.token, connectUrl: connectUrl(session.token) };
     } catch (err) {
       await chats.deleteChat(chat.id);
       reply.code(409);
@@ -294,9 +275,5 @@ export function registerProjectRoutes(
       return { error: "chat not found" };
     }
     return { ok: true };
-  });
-
-  app.get("/admin/api/remote/conversations", async () => {
-    return { conversations: await listConversations() };
   });
 }
