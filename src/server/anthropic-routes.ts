@@ -8,6 +8,9 @@ import { maskApiKey, updateConfig } from "./admin-shared.js";
 
 export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime): void {
   const oauthFlows = new OAuthFlowTracker();
+  app.addHook("onClose", async () => {
+    oauthFlows.stop();
+  });
 
   app.put("/admin/api/anthropic", async (req, reply) => {
     const { apiKey, maxConcurrent, rpmLimit } = req.body as { apiKey?: string | null; maxConcurrent?: number | null; rpmLimit?: number | null };
