@@ -142,11 +142,13 @@ export class ProviderStateMap {
   }
 
   /** Record a successful request — clears any active circuit breaker
-   * state for this provider. */
+   * state for this provider (breakerUntil, recent failures, and the
+   * consecutive-open count so the next trip starts at BASE_MS again). */
   recordSuccess(name: string): void {
     const entry = this.state.get(name);
     if (!entry) return;
     entry.breakerUntil = null;
+    this.clearFailures(name);
   }
 
   /** Circuit breaker configuration: 5 failures within a 60s sliding

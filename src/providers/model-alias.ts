@@ -12,11 +12,27 @@
  *
  * The alias is stripped before the request leaves Custos -- upstream only
  * ever sees the real model name.
+ *
+ * A second alias form `custos:fallback/<set-name>` routes through the
+ * GlobalQueue instead of the single-provider router, giving per-request
+ * failover across the fallback set's provider list. This is how the
+ * agent-runner pins agents at spawn time: it resolves the fallback set to
+ * the first available provider at that moment, but if that provider 429s
+ * mid-run, the next request in the same subprocess falls through to the
+ * next entry in the set.
  */
 export interface PinnedRoute {
+  type: "pinned";
   providerKey: string;
   model: string;
 }
+
+export interface FallbackRoute {
+  type: "fallback";
+  fallbackSet: string;
+}
+
+export type ModelAlias = PinnedRoute | FallbackRoute;
 
 const PREFIX = "custos:";
 
@@ -24,13 +40,29 @@ export function formatModelAlias(providerKey: string, model: string): string {
   return `${PREFIX}${providerKey}/${model}`;
 }
 
-export function parseModelAlias(model: string | undefined): PinnedRoute | null {
+/** Format a fallback-set alias — `custos:fallback/<set-name>`. The
+ * agent-runner uses this when the PM assigned a fallback set to the
+ * role (rather than a fixed provider/model). */
+export function formatFallbackAlias(setName: string): string {
+  return `${PREFIX}fallback/${setName}`;
+}
+
+export function parseModelAlias(model: string | undefined): ModelAlias | null {
   if (!model || !model.startsWith(PREFIX)) return null;
   const rest = model.slice(PREFIX.length);
+
+  // custos:fallback/<set-name> — GlobalQueue routing.
+  const FALLBACK_MARKER = "fallback/";
+  if (rest.startsWith(FALLBACK_MARKER)) {
+    const setName = rest.slice(FALLBACK_MARKER.length);
+    if (!setName) return null;
+    return { type: "fallback", fallbackSet: setName };
+  }
+
   // Only the first slash separates provider from model -- model ids
   // legitimately contain slashes (OpenRouter's "anthropic/claude-sonnet-4",
   // Ollama's "library/qwen2.5"), so splitting on all of them would mangle them.
   const slash = rest.indexOf("/");
   if (slash <= 0 || slash === rest.length - 1) return null;
-  return { providerKey: rest.slice(0, slash), model: rest.slice(slash + 1) };
+  return { type: "pinned", providerKey: rest.slice(0, slash), model: rest.slice(slash + 1) };
 }

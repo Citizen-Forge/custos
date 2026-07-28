@@ -48,36 +48,59 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     const rawBeta = req.headers["anthropic-beta"];
     const clientBetaHeader = Array.isArray(rawBeta) ? rawBeta.join(",") : rawBeta;
 
-    // A PM agent pins its own provider and model by asking for
-    // `custos:<provider>/<model>` (see providers/model-alias.ts). That
-    // choice is the engineering manager's cost decision, so it overrides
-    // task and complexity routing outright rather than being one input to
-    // them, and the alias is unwrapped before the request goes upstream.
-    const pinned = parseModelAlias(body.model);
+    // Parse the model alias. Two forms:
+    //   custos:<provider>/<model>    — pinned to one specific provider
+    //   custos:fallback/<set-name>    — routes through the GlobalQueue for
+    //                                   per-request failover across the
+    //                                   fallback set's providers (if Gemini
+    //                                   429s on request #50 in a 500-request
+    //                                   run, request #51 falls through to
+    //                                   Ollama instead of failing).
+    // (see providers/model-alias.ts for the parser).
+    const alias = parseModelAlias(body.model);
     const options: CompleteOptions = { clientBetaHeader };
-    if (pinned) {
-      body.model = pinned.model;
-      options.modelOverride = pinned.model;
+    if (alias?.type === "pinned") {
+      body.model = alias.model;
+      options.modelOverride = alias.model;
     }
 
     let providerResponse;
     try {
-      // A PM agent pins its own provider/model via `custos:<provider>/<model>`
-      // (see providers/model-alias.ts) -- that choice wins over the general
-      // task ordering. For everything else, the `general` task's configured
-      // priority list (from `config.tasks.general`) does the routing.
-      // Per-turn complexity classification was removed with the pivot to
-      // orchestrator-driven model assignment, so /v1/messages no longer
-      // round-trips through a classifier before every fresh human turn.
-      if (pinned) {
-        reply.header("x-custos-pinned", `${pinned.providerKey}/${pinned.model}`);
+      if (alias?.type === "pinned") {
+        // A PM agent pins its own provider/model via `custos:<provider>/<model>`
+        // (see providers/model-alias.ts) -- that choice wins over the general
+        // task ordering. The alias is unwrapped so the upstream only sees the
+        // real model name.
+        reply.header("x-custos-pinned", `${alias.providerKey}/${alias.model}`);
         providerResponse = await deps.runtime.router.completeWithEntries(
-          [{ provider: pinned.providerKey, priority: 1 }],
+          [{ provider: alias.providerKey, priority: 1 }],
           body,
           options,
-          `pinned provider "${pinned.providerKey}"`,
+          `pinned provider "${alias.providerKey}"`,
+        );
+      } else if (alias?.type === "fallback") {
+        // The agent is configured with a fallback set (named list of
+        // provider+model pairs). Route through the GlobalQueue so each
+        // request in this claude subprocess gets per-request failover:
+        // if provider A 429s, the GlobalQueue tries provider B from the
+        // same set before surfacing the error. The model sent to the
+        // upstream is the one from whichever entry matches -- the queue
+        // passes it as modelOverride in CompleteOptions.
+        reply.header("x-custos-fallback", alias.fallbackSet);
+        // Set a sensible default model for the body before routing.
+        // The GlobalQueue will override this via modelOverride if it
+        // dispatches to a different provider, but the body field needs
+        // a real value for the ingestion pipeline and for providers
+        // that don't support modelOverride.
+        body.model = deps.runtime.fallbackDefaultModel(alias.fallbackSet);
+        providerResponse = await deps.runtime.completeWithFallback(
+          alias.fallbackSet,
+          body,
+          options,
         );
       } else {
+        // No alias: use the `general` task's configured priority list
+        // (from `config.tasks.general`).
         providerResponse = await deps.runtime.router.complete("general", body, options);
       }
     } catch (err) {

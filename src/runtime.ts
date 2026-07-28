@@ -71,6 +71,18 @@ export class Runtime {
     this.router?.setAvailabilityListener(listener);
   }
 
+  /** Best-guess default model for a fallback set (first entry's model).
+   *  Used by the /v1/messages handler to set `body.model` before the
+   *  request enters the GlobalQueue. The GlobalQueue may override this
+   *  via `modelOverride` if it dispatches to a different entry, but the
+   *  body field needs at least a sensible value for the ingestion
+   *  pipeline (which reads `body.model` pre-routing) and for providers
+   *  that don't support `modelOverride` (none configured today, but
+   *  defensively). */
+  fallbackDefaultModel(setName: string): string {
+    return this.config.fallbackSets?.[setName]?.providers[0]?.model ?? "unknown";
+  }
+
   /** Complete a request using a fallback set from the agent's config.
    *  Resolves through the GlobalQueue, iterating the fallback set's
    *  providers in order and using the first available one. The model

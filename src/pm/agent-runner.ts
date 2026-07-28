@@ -1,6 +1,6 @@
 import type { Runtime } from "../runtime.js";
 import { runTurn, type TurnEvent } from "../remote/turn-runner.js";
-import { formatModelAlias } from "../providers/model-alias.js";
+import { formatModelAlias, formatFallbackAlias } from "../providers/model-alias.js";
 import { ROLE_PROMPTS } from "./prompts.js";
 import { resolveAgentEnv, redactSecrets } from "./vault.js";
 import * as runs from "./runs.js";
@@ -238,7 +238,13 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       // at the very end costs a line and survives that truncation.
       prompt: `${prompt}\n\n---\n\nRemember: your final message must end with exactly one fenced \`${tag}\` block containing valid JSON, and nothing after it.`,
       appendSystemPrompt: buildSystemPrompt(agent, options.extraSystemPrompt, options.outputContract),
-      model: formatModelAlias(effectiveProviderKey, effectiveModel),
+      // When the PM assigned a fallback set to this role, format the model
+    // as `custos:fallback/<set-name>` so the /v1/messages handler routes
+    // through the GlobalQueue (giving per-request failover). Otherwise use
+    // the pinned form `custos:<provider>/<model>` for direct dispatch.
+    model: agent.fallbackSet
+      ? formatFallbackAlias(agent.fallbackSet)
+      : formatModelAlias(effectiveProviderKey, effectiveModel),
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
       onEvent,

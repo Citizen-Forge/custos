@@ -31,7 +31,8 @@ export class AnthropicProvider implements Provider {
   constructor(private readonly config: AnthropicProviderConfig) {}
 
   async complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
-    const { signal, clientBetaHeader } = options ?? {};
+    const { signal, clientBetaHeader, modelOverride } = options ?? {};
+    if (modelOverride) request.model = modelOverride;
     const accessToken = await getValidAccessToken().catch(() => null);
 
     if (accessToken) {
