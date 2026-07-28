@@ -151,6 +151,11 @@ async function curateBatch(deps: CuratorDeps, file: string, batchText: string): 
     const text = (fact as { text?: unknown })?.text;
     const topic = (fact as { topic?: unknown })?.topic;
     if (typeof text !== "string" || !text.trim()) continue;
+    // No embeddings global agent configured: skip storing this fact
+    // rather than crashing. The admin UI's Global Services panel is the
+    // place to set one up; skipping silently is what makes the gap
+    // visible during the same session the user sees the empty memory store.
+    if (!deps.embedding) continue;
     try {
       const vector = await embed(deps.embedding, text);
       await deps.store.upsert(
@@ -188,7 +193,7 @@ async function saveCursor(cursor: Cursor): Promise<void> {
 export interface CuratorDeps {
   router: ProviderRouter;
   store: MemoryStore;
-  embedding: EmbeddingConfig;
+  embedding: EmbeddingConfig | null;
 }
 
 export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
@@ -231,7 +236,10 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
 
 /** Takes a deps thunk rather than a fixed object so a live config reload
  * (e.g. from the admin UI) is picked up on the next tick instead of
- * requiring a restart. */
+ * requiring a restart. The thunk may resolve to `embedding: null` when
+ * no embeddings global agent has been configured -- the curator still
+ * runs (so its presence is obvious in logs) but skips fact storage
+ * rather than crashing. */
 export function startCurator(getDeps: () => CuratorDeps, intervalMs: number): NodeJS.Timeout {
   return setInterval(() => {
     runCuratorPass(getDeps()).catch((err) => console.error("curator pass failed:", err));

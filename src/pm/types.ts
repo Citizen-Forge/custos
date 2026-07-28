@@ -136,6 +136,15 @@ export interface AgentDef {
    *  runtime that owns the service does, and it looks the agent up by
    *  `systemRole`. */
   systemRole?: GlobalSystemRole;
+  /** Embeddings endpoint base URL, only meaningful when
+   *  `systemRole === "embeddings"`. The Ollama convention strips the
+   *  OpenAI-compat `/v1` from the chat provider's `baseUrl` and exposes
+   *  embeddings at `/api/embeddings`; OpenAI-compat providers keep the
+   *  `/v1` and POST to `/embeddings`. When unset the runtime derives the
+   *  URL from the named providerKey. Set this to override when pointing a
+   *  custom Ollama host or a non-conventional server at the embeddings
+   *  global agent. */
+  embeddingBaseUrl?: string;
   role: AgentRole;
   /** The role-descriptive name, e.g. "Simulation Architect". */
   name: string;

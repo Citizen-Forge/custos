@@ -34,6 +34,13 @@ export interface EmbeddingProviderConfig {
   model: string;
 }
 
+/** @deprecated Embeddings now live on the global agent with
+ *  `systemRole: "embeddings"` (see pm/global-agents.ts). Kept as a
+ *  no-op alias here so older callers keep type-checking; the load path
+ *  drops the field on read through `pruneStaleFields` and runtime
+ *  derives `EmbeddingConfig` from the global agent at every reload. */
+export type EmbeddingConfig = EmbeddingProviderConfig;
+
 /** How using a provider is paid for. Determines what "unavailable" means
  * and what running out looks like:
  *   "free" — no cost, but usually rate-limited (Gemini free tier, Ollama)
@@ -86,7 +93,13 @@ export interface GatewayConfig {
   /** @deprecated Use `providers` instead. Still read during migration so
    * existing configs don't break. */
   openaiCompatibleInstances: Record<string, OpenAICompatibleInstanceConfig>;
-  embeddingProvider: EmbeddingProviderConfig;
+  /** @deprecated Embeddings are owned by the global agent with
+   *  `systemRole: "embeddings"` (pm/global-agents.ts). The field is still
+   *  accepted by the type for backwards compatibility — `pruneStaleFields`
+   *  strips it on read so legacy on-disk configs converge to canonical
+   *  shape at the next restart; `runtime.embedding` is derived from the
+   *  global agent instead of reading this property directly. */
+  embeddingProvider?: EmbeddingProviderConfig;
   tasks: Record<TaskKind, ProviderEntry[]>;
   /** Shared secret Claude Code sends back as `x-api-key` (the same header
    * it already sends for real Anthropic API-key auth -- Custos ignores the
@@ -119,7 +132,6 @@ const DEFAULT_CONFIG: GatewayConfig = {
     },
   },
   openaiCompatibleInstances: {},
-  embeddingProvider: { baseUrl: OLLAMA_HOST, model: "nomic-embed-text" },
   tasks: {
     general: [
       { provider: "anthropic", priority: 1 },
@@ -227,6 +239,14 @@ function pruneStaleFields(fileConfig: Partial<GatewayConfig>): void {
   const stale = fileConfig as Partial<GatewayConfig> & Record<string, unknown>;
   delete stale.complexityRouting;
   delete stale.openaiCompatibleInstances;
+  // Embeddings moved to a global agent (commit 2 of the global-agent
+  // split). The on-disk field stopped being read by runtime after that
+  // commit landed; keeping the type optional lets legacy config.json
+  // files load without TS errors, but the value is dead on disk and a
+  // user who wants to keep their saved embedding config should move
+  // the same model/baseUrl into the embeddings global agent via the
+  // admin UI's Global Services panel.
+  delete stale.embeddingProvider;
   // Same approach for the nested legacy task-kind key -- `fileConfig.tasks`
   // is typed as `Record<TaskKind, …>` and `complexityClassifier` doesn't
   // exist there any more; the cast lets the sweep keep its invariant that
@@ -250,7 +270,6 @@ export async function loadConfig(): Promise<GatewayConfig> {
     ...fileConfig,
     anthropic: { ...DEFAULT_CONFIG.anthropic, ...fileConfig.anthropic },
     openaiCompatibleInstances: { ...DEFAULT_CONFIG.openaiCompatibleInstances, ...fileConfig.openaiCompatibleInstances },
-    embeddingProvider: { ...DEFAULT_CONFIG.embeddingProvider, ...fileConfig.embeddingProvider },
     tasks: { ...DEFAULT_CONFIG.tasks, ...fileConfig.tasks },
   };
 

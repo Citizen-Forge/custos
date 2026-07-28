@@ -202,15 +202,8 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
     }
   });
 
-  // -- Embedding provider ------------------------------------------------
-
-  app.put("/admin/api/embedding-provider", async (req, reply) => {
-    const { baseUrl, model } = req.body as { baseUrl: string; model: string };
-    if (!baseUrl || !model) {
-      reply.code(400);
-      return { error: "baseUrl and model are required" };
-    }
-    await updateConfig(runtime, (cfg) => ({ ...cfg, embeddingProvider: { baseUrl, model } }));
-    return { ok: true };
-  });
+  // Embedding's admin surface lives at /admin/api/global-agents (commit
+  // 3 of the global-agent split). The legacy PUT handler is gone -- the
+  // Global Services panel is the single source of truth for which
+  // model runs embeddings and where its endpoint points.
 }

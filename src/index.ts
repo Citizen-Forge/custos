@@ -32,15 +32,15 @@ async function main() {
   await ensureAdminPassword();
 
   const runtime = new Runtime();
-  await runtime.reload();
-
   // Seed the agents.json collection with one row per built-in global
-  // service (memory curator, permission classifier, embeddings). Runs
-  // after runtime.reload() so the configured providers exist by the
-  // time the global-agent row's providerKey is checked. Idempotent —
-  // hand-tuned entries survive because we only fill rows whose
-  // systemRole is missing.
+  // service before runtime.reload() runs — those rows are what
+  // Runtime.refreshEmbedding() reads to derive the embedding target,
+  // and the curator + classifier handlers read them directly on every
+  // invocation. Order matters: existing installs already have a saved
+  // embeddingProvider that the background migration prunes; the global
+  // agent replaces that, and the runtime picks up the new source here.
   await ensureGlobalAgents();
+  await runtime.reload();
 
   const memoryStore = new MemoryStore(QDRANT_URL, EMBEDDING_VECTOR_SIZE);
 

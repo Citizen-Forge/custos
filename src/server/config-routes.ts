@@ -34,7 +34,12 @@ export function registerConfigRoutes(app: FastifyInstance, runtime: Runtime): vo
         rpmLimit: config.anthropic?.rpmLimit ?? null,
       },
       providers: await describeProviders(runtime),
-      embeddingProvider: config.embeddingProvider,
+      // Embeddings live on the global agent with systemRole "embeddings"
+      // (see /admin/api/global-agents GET). The runtime derives the
+      // host/model at every reload, so the surface for "which model is
+      // used for embeddings" is the Global Services panel, not a top-
+      // level config node. Surfacing the field here would create a
+      // second source of truth the admin UI would have to reconcile.
       providerPresets: PROVIDER_PRESETS,
     };
   });

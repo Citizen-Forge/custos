@@ -6,6 +6,7 @@ import { ThrottledProvider, type ThrottleStats } from "./providers/throttle.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import type { Provider } from "./providers/types.js";
 import type { EmbeddingConfig } from "./memory/embeddings.js";
+import { getGlobalAgent } from "./pm/global-agents.js";
 
 /** Per-provider runtime stats, used by the admin endpoint, the periodic
  * stats logger, and the threshold-alert monitor. Extends ThrottleStats
@@ -39,7 +40,12 @@ export interface RuntimeStats {
 export class Runtime {
   config!: GatewayConfig;
   router!: ProviderRouter;
-  embedding!: EmbeddingConfig;
+  /** Embedding target, now derived from the global embeddings agent
+   *  (systemRole: "embeddings") rather than from a deprecated top-level
+   *  `config.embeddingProvider` field. Null when no embeddings global
+   *  agent is configured -- callers handle that by skipping embedding-
+   *  dependent work rather than crashing. */
+  embedding: EmbeddingConfig | null = null;
   readonly spendTracker = new SpendTracker();
   private availabilityListener: AvailabilityListener | null = null;
   /** ThrottledProviders currently wired into this runtime. On reload we
@@ -174,6 +180,47 @@ export class Runtime {
     // Re-attached on every reload: the router is rebuilt from config, but
     // the model registry that learns from it is long-lived.
     if (this.availabilityListener) this.router.setAvailabilityListener(this.availabilityListener);
-    this.embedding = config.embeddingProvider;
+    // Embeddings derive from the global agent with systemRole
+    // "embeddings" and need to refresh on every config reload — the
+    // agent's `providerKey` could now point at a different configured
+    // provider after the user adds a new one in the admin UI.
+    await this.refreshEmbedding();
+  }
+
+  /** Reads the embeddings global agent and resolves a usable
+   * `EmbeddingConfig` from it. Called from `reload()` automatically
+   * (so a fresh config picks up the embeddings agent the user just
+   * configured) and explicitly from places that mutate the agents
+   * collection directly (the global-agent PUT route when commit 3
+   * lands). Idempotent — safe to call repeatedly. */
+  async refreshEmbedding(): Promise<void> {
+    const agent = await getGlobalAgent("embeddings");
+    if (!agent) {
+      this.embedding = null;
+      return;
+    }
+    const providerDef = this.config.providers?.[agent.providerKey];
+    if (!providerDef) {
+      console.warn(`embeddings global agent references missing provider "${agent.providerKey}"; embedding disabled until a provider exists`);
+      this.embedding = null;
+      return;
+    }
+    // URL derivation:
+    //   1. Explicit `embeddingBaseUrl` on the agent wins — covers custom
+    //      Ollama hosts and providers that don't follow either convention.
+    //   2. "ollama" is its own convention: chat is at /v1/chat/completions
+    //      but embeddings is at /api/embeddings on the bare origin. Detect
+    //      by providerKey so the path is unambiguous and doesn't need the
+    //      chat path's `/v1` strip to be reversed elsewhere.
+    //   3. Anything else follows OpenAI-compat: `{baseUrl}/embeddings`.
+    let baseUrl: string;
+    if (agent.embeddingBaseUrl) {
+      baseUrl = agent.embeddingBaseUrl;
+    } else if (agent.providerKey === "ollama") {
+      baseUrl = providerDef.baseUrl.replace(/\/v1\/?$/, "");
+    } else {
+      baseUrl = providerDef.baseUrl.replace(/\/$/, "");
+    }
+    this.embedding = { baseUrl, model: agent.model };
   }
 }
