@@ -1,5 +1,6 @@
 import { getValidAccessToken } from "../auth/credentials.js";
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
+import { parseRetryAfterMs } from "./retry-header.js";
 import type { CompleteOptions, Provider, ProviderResponse } from "./types.js";
 
 const MESSAGES_URL = "https://api.anthropic.com/v1/messages";
@@ -96,12 +97,12 @@ export class AnthropicProvider implements Provider {
       if (Number.isFinite(resetMs) && resetMs > 0) return resetMs;
     }
 
-    const retryAfterHeader = headers.get("retry-after");
-    if (retryAfterHeader) {
-      const seconds = Number(retryAfterHeader);
-      if (Number.isFinite(seconds)) return seconds * 1000;
-    }
-
-    return undefined;
+    // Fall through to the shared Retry-After parser, which handles
+    // both numeric-seconds and HTTP-date formats and clamps
+    // past-dates to 0. Sharing with the OpenAI-compat provider
+    // keeps the seconds-vs-HTTP-date behaviour consistent: any
+    // future provider that wraps an upstream HTTP API should use
+    // this same helper, not reinvent it.
+    return parseRetryAfterMs(headers);
   }
 }

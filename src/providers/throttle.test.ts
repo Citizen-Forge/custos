@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ThrottledProvider } from "./throttle.js";
 import type { Provider, ProviderResponse } from "./types.js";
-import type { AnthropicMessagesRequest } from "../types.js";
+import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
 
 const ZERO_REQ = {} as AnthropicMessagesRequest;
 const OK_RESPONSE: ProviderResponse = { status: 200, headers: new Headers(), body: null };
@@ -604,6 +604,91 @@ describe("ThrottledProvider", () => {
     const s = t.stats();
     assert.equal(s.rpmLimit, null);
     assert.equal(s.rateTokens, null);
+  });
+
+  // -- Rate-limit token refund on 429 -----------------------------------
+
+  it("rate-limit token is refunded when inner throws ProviderUnavailableError", async () => {
+    // The contract: a call rejected with ProviderUnavailableError did
+    // NOT consume upstream rate-limit quota, so the local token
+    // bucket should refund the token. Otherwise a sustained outage
+    // drains the bucket to zero while upstream recovers; the next
+    // batch of requests stays queued behind an empty bucket even after
+    // the router cooldown expires, and the user sees a long stall
+    // after each recovery.
+    const inner: Provider = {
+      name: "rate-limited",
+      complete: async () => {
+        throw new ProviderUnavailableError("upstream: HTTP 429", 60_000);
+      },
+    };
+    const t = new ThrottledProvider(inner, { maxConcurrent: 5, rpmLimit: 3 });
+
+    // Three sequential calls consume all 3 tokens, then refund on
+    // each rejection leaves the bucket full. Without the refund,
+    // tokens would drop to 0 - the test would fail at the assertion
+    // below.
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(() => t.complete(ZERO_REQ), /HTTP 429/);
+    }
+
+    const s = t.stats();
+    assert.equal(s.rpmLimit, 3);
+    assert.ok(s.rateTokens !== null && s.rateTokens >= 2.99,
+      `token bucket should have been refunded back near full after three 429s, got ${s.rateTokens}`);
+
+    // Sanity: one more 429 should still leave us with ~3 tokens (we
+    // consumed 1 at admission then refunded 1 on rejection).
+    await assert.rejects(() => t.complete(ZERO_REQ), /HTTP 429/);
+    const s2 = t.stats();
+    assert.ok(s2.rateTokens !== null && s2.rateTokens >= 2.99,
+      `token bucket should remain at full after another 429, got ${s2.rateTokens}`);
+  });
+
+  it("rate-limit token is NOT refunded when inner throws a non-rate-limit error", async () => {
+    // Control test: a generic Error (e.g. a malformed-response
+    // rejection from inner.complete that DID hit the wire) is not a
+    // rate-limit signal — the upstream call DID consume whatever
+    // capacity it was probing, so the token stays sunk. Refunding
+    // here would let misbehaving calls drain the bucket without
+    // consequence and double the rate of upstream attempts.
+    let calls = 0;
+    const inner: Provider = {
+      name: "always-bad-response",
+      complete: async () => {
+        calls++;
+        throw new Error("malformed response body");
+      },
+    };
+    const t = new ThrottledProvider(inner, { maxConcurrent: 5, rpmLimit: 3 });
+
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(() => t.complete(ZERO_REQ), /malformed response body/);
+    }
+
+    assert.equal(calls, 3);
+    const s = t.stats();
+    assert.ok(s.rateTokens !== null && s.rateTokens < 0.01,
+      `non-rate-limit errors should keep tokens sunk (drained to ~0), got ${s.rateTokens}`);
+  });
+
+  it("rate-limit token refund is harmless when rpmLimit is unset (no token bucket active)", async () => {
+    // The refund path is gated by rpmLimit !== null; without an
+    // rpmLimit the throttle's rateTokens is unused (always 0 by
+    // construction). The refund branch must not crash on the unused
+    // field, and must not artificially inflate it since the rate
+    // limiter isn't active anyway.
+    const inner: Provider = {
+      name: "rate-limited",
+      complete: async () => {
+        throw new ProviderUnavailableError("upstream: HTTP 429");
+      },
+    };
+    const t = new ThrottledProvider(inner, { maxConcurrent: 1 });
+    await assert.rejects(() => t.complete(ZERO_REQ), /HTTP 429/);
+    const s = t.stats();
+    assert.equal(s.rpmLimit, null, "no rpmLimit configured");
+    assert.equal(s.rateTokens, null, "and no token bucket");
   });
 
   it("abortAll with mixed interactive + background entries empties both buckets", async () => {

@@ -1,5 +1,6 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type VendorMetadata } from "../types.js";
 import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf } from "./openai-translate.js";
+import { parseRetryAfterMs } from "./retry-header.js";
 import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
 
@@ -34,15 +35,15 @@ export interface OpenAICompatibleInstanceConfig {
    * traffic instead of only reacting to 429s. Set to 10 for Gemini Free. */
   rpmLimit?: number;
   /** Per-instance throttle priority override. The router's task-derived
-   * default (chat/perms/complexity classifiers -> "interactive";
-   * memoryCurator -> "background") still applies unless the instance
-   * pins its own. Tag Ollama as "background" so chat traffic to it
-   * doesn't lock out queued background work on its single slot -- the
-   * converse of the priority-queue's anti-starvation default, which
-   * assumes interactive callers should win. Omit for the router default;
-   * the admin UI's Add form defaults to "interactive" for non-Ollama
-   * presets so non-Ollama instances round-trip through the save path
-   * unchanged. Caller-supplied `options.priority` always wins over both. */
+   *  default (chat/perms/complexity classifiers -> "interactive";
+   *  memoryCurator -> "background") still applies unless the instance
+   *  pins its own. Tag Ollama as "background" so chat traffic to it
+   *  doesn't lock out queued background work on its single slot -- the
+   *  converse of the priority-queue's anti-starvation default, which
+   *  assumes interactive callers should win. Omit for the router default;
+   *  the admin UI's Add form defaults to "interactive" for non-Ollama
+   *  presets so non-Ollama instances round-trip through the save path
+   *  unchanged. Caller-supplied `options.priority` always wins over both. */
   priority?: Priority;
   /** When true, late vendor metadata (arriving after
    * `content_block_start` has fired) is emitted inline as a custom
@@ -90,7 +91,21 @@ export class OpenAICompatibleProvider implements Provider {
 
     if (!res.ok) {
       if (res.status === 429 || res.status >= 500) {
-        throw new ProviderUnavailableError(`${this.name}: HTTP ${res.status}`);
+        // Surface the upstream's Retry-After to the router so the
+        // cooldown deadline matches reality. Without this, Gemini
+        // Free-tier quota-exhausted responses (which carry a real
+        // Retry-After value, often 30-300s, sometimes longer for
+        // daily caps) would be silently downgraded to the router's
+        // 60-second default — restarting the cooldown clock on the
+        // next request and perpetuating 429s indefinitely because
+        // the gateway keeps retrying before the upstream's quota
+        // has regenerated. Falling back to undefined (rather than
+        // fabricating a value) leaves the router's default-cooldown
+        // path intact for responses without a Retry-After header.
+        // The parser (src/providers/retry-header.ts) is shared with
+        // Anthropic so seconds-vs-HTTP-date handling stays canonical
+        // across providers.
+        throw new ProviderUnavailableError(`${this.name}: HTTP ${res.status}`, parseRetryAfterMs(res.headers));
       }
       const text = await res.text().catch(() => "");
       return { status: res.status, headers: res.headers, body: new Blob([text]).stream() };

@@ -34,7 +34,7 @@
 // queues, so a saturated Ollama doesn't hold up a free Anthropic.
 
 import type { Provider, CompleteOptions, ProviderResponse, Priority } from "./types.js";
-import type { AnthropicMessagesRequest } from "../types.js";
+import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
 
 /** Default age at which a still-queued background request is treated as
  * equivalent to interactive for one slot. Five seconds is short enough
@@ -265,6 +265,24 @@ export class ThrottledProvider implements Provider {
       // so this is a no-op for the wired-up shape, but the pattern is
       // safe even if the wrapping depth grows.
       return await this.inner.complete(request, { ...options, signal: combined, priority });
+    } catch (err) {
+      // Refund the rate-limit token when the upstream rejected with a
+      // 429 / 503 signal (ProviderUnavailableError). The call did NOT
+      // consume rate-limit quota from the upstream's perspective —
+      // the gateway's local token bucket shouldn't penalize the next
+      // caller by holding capacity for a request the upstream said
+      // didn't count. Without this refund, a sustained outage drains
+      // the bucket to zero while upstream is recovering, so even
+      // after the cooldown expires the next batch of requests stays
+      // queued behind an empty token bucket and the user experiences
+      // a long stall. Other error classes (network errors, 4xx
+      // payload rejections) are NOT refunded: those calls genuinely
+      // hit the wire and invalidated whatever upstream capacity they
+      // were probing.
+      if (err instanceof ProviderUnavailableError && this.rpmLimit !== null) {
+        this.rateTokens = Math.min(this.rpmLimit, this.rateTokens + 1);
+      }
+      throw err;
     } finally {
       const i = this.inFlightControllers.indexOf(internalController);
       if (i !== -1) this.inFlightControllers.splice(i, 1);
