@@ -1,61 +1,31 @@
 {
-  "openaiCompatibleInstances": {
+  "_comment": "Canonical gateway configuration. Copy to data/config.json to provision providers without using the admin UI. Anthropic is wired up separately via OAuth in the admin UI's Anthropic card.",
+  "providers": {
     "ollama": {
       "baseUrl": "http://localhost:11434/v1",
-      "model": "qwen2.5:14b-instruct-q4_K_M",
-      "maxConcurrent": 1
-    },
-    "ollama-fast": {
-      "baseUrl": "http://localhost:11434/v1",
-      "model": "qwen2.5:3b-instruct",
-      "maxConcurrent": 1
+      "costType": "free",
+      "maxConcurrent": 1,
+      "priority": "background",
+      "models": [
+        { "name": "qwen2.5:14b-instruct-q4_K_M", "enabled": true },
+        { "name": "qwen2.5:3b-instruct", "enabled": true }
+      ]
     },
     "openai": {
       "baseUrl": "https://api.openai.com/v1",
-      "model": "gpt-4.1-mini",
       "apiKey": "sk-...",
-      "pricing": { "inputPerMillion": 0.4, "outputPerMillion": 1.6 },
-      "budget": { "limitUsd": 20, "periodDays": 30 }
+      "costType": "metered",
+      "models": [
+        {
+          "name": "gpt-4o-mini",
+          "enabled": true,
+          "pricing": { "inputPerMillion": 0.15, "outputPerMillion": 0.60 }
+        }
+      ]
     }
   },
   "embeddingProvider": {
     "baseUrl": "http://localhost:11434",
     "model": "nomic-embed-text"
-  },
-  "tasks": {
-    "general": [
-      { "provider": "openai", "priority": 1 },
-      { "provider": "anthropic", "priority": 2 },
-      { "provider": "ollama", "priority": 3 }
-    ],
-    "permissionClassifier": [
-      { "provider": "ollama-fast", "priority": 1 },
-      { "provider": "anthropic", "priority": 2 }
-    ],
-    "memoryCurator": [
-      { "provider": "ollama", "priority": 1 },
-      { "provider": "anthropic", "priority": 2 }
-    ],
-    "complexityClassifier": [
-      { "provider": "ollama-fast", "priority": 1 },
-      { "provider": "anthropic", "priority": 2 }
-    ]
-  },
-  "complexityRouting": {
-    "enabled": false,
-    "tiers": {
-      "low": [
-        { "provider": "ollama-fast", "priority": 1 },
-        { "provider": "anthropic", "priority": 2 }
-      ],
-      "medium": [
-        { "provider": "ollama", "priority": 1 },
-        { "provider": "anthropic", "priority": 2 }
-      ],
-      "high": [
-        { "provider": "anthropic", "priority": 1 },
-        { "provider": "ollama", "priority": 2 }
-      ]
-    }
   }
 }

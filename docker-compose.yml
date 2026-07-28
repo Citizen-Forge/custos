@@ -27,12 +27,15 @@ services:
       # as an autonomous agent is concerned. Pointing it at a broad share
       # gives every engineer agent write access to all of it.
       - ${CUSTOS_WORKSPACE:-./workspace}:/workspace
-      # Claude Code's own state: session transcripts, the settings file
-      # Custos writes hooks into, and the credentials it syncs for spawned
-      # sessions. Without this it lives in the container's writable layer
-      # and is destroyed on every rebuild -- which silently breaks `--resume`,
-      # so reopening a chat starts a brand-new conversation instead of
-      # continuing the old one.
+      # Claude Code's backing state for the spawned subprocesses the
+      # orchestrator runs: session transcripts (the data `--resume` reads
+      # from), the settings file Custos writes hook entries into, and the
+      # synced credentials it injects into each one. Without this mount the
+      # state lives in the container's writable layer and is destroyed on
+      # every rebuild -- which silently breaks `--resume`, so reopening a
+      # chat starts a brand-new conversation instead of continuing the old
+      # one. Owned end-to-end by Custos, named after Claude Code only
+      # because that's the upstream tool whose binary reads from it.
       - ./data/claude-home:/root/.claude
     depends_on:
       - qdrant
