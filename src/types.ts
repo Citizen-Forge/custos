@@ -75,7 +75,7 @@ export interface AnthropicErrorBody {
 }
 
 /** Task categories the router assigns provider priority lists to. */
-export type TaskKind = "general" | "permissionClassifier" | "memoryCurator" | "complexityClassifier";
+export type TaskKind = "general" | "permissionClassifier" | "memoryCurator";
 
 /** Raised by a provider when the request should fail over to the next priority. */
 export class ProviderUnavailableError extends Error {

@@ -61,7 +61,6 @@ function buildRouter(
       general: [{ provider: "inst", priority: 1 }],
       permissionClassifier: [{ provider: "inst", priority: 1 }],
       memoryCurator: [{ provider: "inst", priority: 1 }],
-      complexityClassifier: [{ provider: "inst", priority: 1 }],
       ...tasks,
     },
   };
@@ -184,7 +183,6 @@ describe("ProviderRouter priority resolution", () => {
         general: [{ provider: "a", priority: 1 }, { provider: "b", priority: 2 }],
         permissionClassifier: [],
         memoryCurator: [],
-        complexityClassifier: [],
       },
     };
     const router = new ProviderRouter({ a, b }, config, makeAlwaysWithinBudget());

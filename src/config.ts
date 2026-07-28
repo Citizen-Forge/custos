@@ -133,10 +133,6 @@ const DEFAULT_CONFIG: GatewayConfig = {
       { provider: "ollama", priority: 1 },
       { provider: "anthropic", priority: 2 },
     ],
-    complexityClassifier: [
-      { provider: "ollama-fast", priority: 1 },
-      { provider: "anthropic", priority: 2 },
-    ],
   },
 };
 
@@ -208,6 +204,12 @@ function migrateLegacyShape(fileConfig: Partial<GatewayConfig>): void {
  *   - `openaiCompatibleInstances` — superseded by `providers.<name>`.
  *     `migrateLegacyShape` above folds legacy entries into `providers`
  *     before this drop, so user data is preserved through the prune.
+ *   - `tasks.complexityClassifier` (nested under `tasks`) — `TaskKind`
+ *     no longer includes this member (dropped in this commit's type
+ *     tightening), so `PUT /admin/api/tasks/complexityClassifier` now
+ *     hard-400s and no admin path reaches the field. Prior on-disk
+ *     entries silently phase out on the next restart; auto-pruning here
+ *     lines up with the type tightening.
  *
  * KEPT (intentionally not pruned, with a documented path to future-proofing):
  *   - `clientApiKey` — `client-auth-guard.ts` reads it and fails closed on
@@ -216,12 +218,6 @@ function migrateLegacyShape(fileConfig: Partial<GatewayConfig>): void {
  *     to spawned claude subprocesses. There is no `CUSTOS_CLIENT_API_KEY`
  *     env var fallback, so a future prune is a real migration -- needs an
  *     alternate auth path first.
- *   - `tasks.complexityClassifier` (nested under `tasks`) — unreachable in
- *     the runtime since 5643718 but still under the operator's control via
- *     `PUT /admin/api/tasks/complexityClassifier`. The validation gate that
- *     read it was lifted in b751308; auto-pruning here would silently delete
- *     user-set data, so the conservative call is to leave dormant entries
- *     intact until the TaskKind itself drops from the union.
  */
 function pruneStaleFields(fileConfig: Partial<GatewayConfig>): void {
   // JSON.parse can include fields the GatewayConfig type doesn't list
@@ -231,6 +227,12 @@ function pruneStaleFields(fileConfig: Partial<GatewayConfig>): void {
   const stale = fileConfig as Partial<GatewayConfig> & Record<string, unknown>;
   delete stale.complexityRouting;
   delete stale.openaiCompatibleInstances;
+  // Same approach for the nested legacy task-kind key -- `fileConfig.tasks`
+  // is typed as `Record<TaskKind, …>` and `complexityClassifier` doesn't
+  // exist there any more; the cast lets the sweep keep its invariant that
+  // the on-disk file converges to canonical shape.
+  const tasks = fileConfig.tasks as Record<string, unknown> | undefined;
+  delete tasks?.complexityClassifier;
 }
 
 export async function loadConfig(): Promise<GatewayConfig> {

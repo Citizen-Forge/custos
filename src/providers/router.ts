@@ -19,7 +19,6 @@ function priorityForTask(task: TaskKind): Priority {
       return "background";
     case "general":
     case "permissionClassifier":
-    case "complexityClassifier":
       return "interactive";
   }
 }

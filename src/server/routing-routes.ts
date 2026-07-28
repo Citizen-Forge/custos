@@ -12,7 +12,7 @@ import { updateConfig } from "./admin-shared.js";
 // deprecated: per-turn classification no longer exists in /v1/messages,
 // the schema field is gone, and the prior endpoint would 400 on the
 // missing field on save.
-const TASK_KINDS: TaskKind[] = ["general", "permissionClassifier", "memoryCurator", "complexityClassifier"];
+const TASK_KINDS: TaskKind[] = ["general", "permissionClassifier", "memoryCurator"];
 
 export function registerRoutingRoutes(app: FastifyInstance, runtime: Runtime): void {
   app.put("/admin/api/tasks/:taskKind", async (req, reply) => {
