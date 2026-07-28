@@ -4,13 +4,21 @@ import { ROLE_DEFAULT_MODEL } from "./prompts.js";
 import { pickPersonaName } from "./personas.js";
 import type { AgentDef, AgentRole, Complexity, CostProfile } from "./types.js";
 
-const agents = new JsonCollection<AgentDef>(pmPath("agents.json"));
+export const agents = new JsonCollection<AgentDef>(pmPath("agents.json"));
 
 const emptyStats = (): AgentDef["stats"] => ({ assigned: 0, completed: 0, qaRejections: 0, totalCostUsd: 0, avgRunMs: 0 });
+
+/** Records written before the project/global split never carried a `kind`
+ * on disk; backfill it on read so callers always see one of the two values.
+ * Default to "project" because every pre-split record IS a project agent. */
+function backfillKind(agent: AgentDef): AgentDef {
+  return agent.kind ? agent : { ...agent, kind: "project" };
+}
 
 /** Agents created before personas existed have no human name; give them one
  * on read so the board doesn't show a mix of named and unnamed teammates. */
 async function backfillPersona(agent: AgentDef): Promise<AgentDef> {
+  agent = backfillKind(agent);
   if (agent.personaName) return agent;
   const taken = (await agents.list()).map((row) => row.personaName).filter((name): name is string => !!name);
   const personaName = pickPersonaName(taken);
@@ -18,7 +26,14 @@ async function backfillPersona(agent: AgentDef): Promise<AgentDef> {
 }
 
 export async function listAgents(projectId?: string): Promise<AgentDef[]> {
-  const rows = (await agents.list()).filter((row) => !projectId || row.projectId === projectId || row.projectId === null);
+  // Board UX shows only project agents; global agents (memory curator,
+  // permission classifier, embeddings) get their own panel in the admin UI
+  // because the orchestrator doesn't assign them tickets. Mixing them
+  // into the project's agent list would lead a project owner to suspect
+  // the curator is "one of their engineers".
+  const rows = (await agents.list()).filter((row) =>
+    row.kind === "global" ? false : (!projectId || row.projectId === projectId || row.projectId === null),
+  );
   const named: AgentDef[] = [];
   for (const row of rows) named.push(await backfillPersona(row));
   return named;
@@ -36,7 +51,12 @@ export function displayName(agent: AgentDef): string {
 }
 
 export async function findRoleAgent(projectId: string, role: AgentRole): Promise<AgentDef | null> {
-  const rows = await agents.find((row) => row.role === role && row.active && (row.projectId === projectId || row.projectId === null));
+  // Global agents carry a nominal role but never participate in project
+  // assignment — exclude them so the engineering manager can't accidentally
+  // pin tickets to the curator or the permission classifier.
+  const rows = await agents.find((row) =>
+    row.role === role && row.kind !== "global" && row.active && (row.projectId === projectId || row.projectId === null),
+  );
   return rows[0] ?? null;
 }
 
@@ -56,6 +76,10 @@ export interface CreateAgentInput {
   createdBy?: AgentDef["createdBy"];
   personaName?: string;
   costProfile?: CostProfile | null;
+  /** Pass "global" + `systemRole` for project-orthogonal services (memory
+   *  curator, permission classifier, embeddings). Defaults to "project". */
+  kind?: AgentDef["kind"];
+  systemRole?: AgentDef["systemRole"];
 }
 
 export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
@@ -64,6 +88,8 @@ export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
   return agents.insert({
     id: newId(),
     projectId: input.projectId,
+    kind: input.kind ?? "project",
+    systemRole: input.systemRole,
     role: input.role,
     name: input.name,
     personaName: input.personaName ?? pickPersonaName(taken),

@@ -97,6 +97,13 @@ export interface Idea {
 
 export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops" | "project-manager";
 
+/** Built-in service the gateway runs project-orthogonally: memory
+ * curation, permission classification, embeddings, future global hooks.
+ * Each is a global agent — same storage, same shape as project agents —
+ * keyed by `systemRole`. The orchestrator doesn't assign tickets to them;
+ * the runtime calls them directly when the relevant hook fires. */
+export type GlobalSystemRole = "memoryCurator" | "permissionClassifier" | "embeddings";
+
 export interface CostProfile {
   inputPerMTok: number;
   outputPerMTok: number;
@@ -118,6 +125,17 @@ export interface AgentDef {
   id: string;
   /** Null for the built-in roles that are shared across every project. */
   projectId: string | null;
+  /** "project" agents participate in board assignment; "global" agents run
+   *  project-orthogonal services (memory curator, permission classifier,
+   *  embeddings) keyed by `systemRole`. Defaults to "project" via the
+   *  on-read backfill in pm/agents.ts so records written before the
+   *  project-orthogonal split don't need a migration. */
+  kind: "project" | "global";
+  /** Built-in service this global agent runs. Undefined for project agents.
+   *  The orchestrator does not assign tickets to global agents — only the
+   *  runtime that owns the service does, and it looks the agent up by
+   *  `systemRole`. */
+  systemRole?: GlobalSystemRole;
   role: AgentRole;
   /** The role-descriptive name, e.g. "Simulation Architect". */
   name: string;

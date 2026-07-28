@@ -1,4 +1,5 @@
 import type { ProviderRouter } from "../providers/router.js";
+import { getGlobalAgent } from "../pm/global-agents.js";
 
 export type ClassifierDecision = "allow" | "deny" | "ask";
 
@@ -14,17 +15,39 @@ export async function classifyAction(
   toolName: string,
   toolInput: unknown,
 ): Promise<{ decision: ClassifierDecision; reason: string }> {
-  const res = await router.complete("permissionClassifier", {
-    model: "classifier",
-    system: SYSTEM_PROMPT,
-    max_tokens: 200,
-    messages: [
-      {
-        role: "user",
-        content: `Tool: ${toolName}\nInput: ${JSON.stringify(toolInput)}`,
-      },
-    ],
-  });
+  // The classifier's model/provider choice is owned by the global agent
+  // with systemRole === "permissionClassifier" — the same hookup the
+  // memory curator uses. Going through router.completeWithEntries
+  // (instead of bypassing it with a bare provider call) keeps the
+  // classifier on the same throttle/cooldown surface as chat traffic,
+  // so a saturated Ollama-flit instance queues classifier requests
+  // rather than starving them.
+  const agent = await getGlobalAgent("permissionClassifier");
+  if (!agent) {
+    // Bounded approximation of "ask, but explain why we had to" — when
+    // the user hasn't configured a classifier, every tool call becomes
+    // an in-chat approval request, which is the same fail-closed posture
+    // a misconfigured classifier already gets when its response can't
+    // be parsed (see extractDecision below).
+    return { decision: "ask", reason: "no global agent with systemRole \"permissionClassifier\" is configured" };
+  }
+  const res = await router.completeWithEntries(
+    [{ provider: agent.providerKey, priority: 1 }],
+    {
+      model: agent.model,
+      system: SYSTEM_PROMPT,
+      max_tokens: 200,
+      messages: [
+        {
+          role: "user",
+          content: `Tool: ${toolName}\nInput: ${JSON.stringify(toolInput)}`,
+        },
+      ],
+    },
+    { priority: "interactive" },
+    `global agent "${agent.name}" (permissionClassifier)`,
+    "permissionClassifier",
+  );
 
   const text = await new Response(res.body).text();
   let contentText = text;

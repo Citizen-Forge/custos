@@ -56,7 +56,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
 
   app.delete("/admin/api/providers/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const usages = findInstanceUsages(runtime.config, name);
+    const usages = await findInstanceUsages(name);
     if (usages.length > 0) {
       reply.code(409);
       return { error: `"${name}" is still referenced by: ${usages.join(", ")} -- remove those references first` };
@@ -165,7 +165,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
 
   app.delete("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const usages = findInstanceUsages(runtime.config, name);
+    const usages = await findInstanceUsages(name);
     if (usages.length > 0) {
       reply.code(409);
       return { error: `"${name}" is still referenced by: ${usages.join(", ")} -- remove those references first` };

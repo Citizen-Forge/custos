@@ -4,6 +4,7 @@ import type { ProviderRouter } from "../providers/router.js";
 import type { EmbeddingConfig } from "./embeddings.js";
 import { embed } from "./embeddings.js";
 import { MemoryStore } from "./store.js";
+import { getGlobalAgent } from "../pm/global-agents.js";
 
 const SESSIONS_DIR = process.env.GATEWAY_SESSIONS_DIR ?? "data/sessions";
 const CURSOR_PATH = process.env.GATEWAY_CURATOR_CURSOR_PATH ?? "data/curator-cursor.json";
@@ -97,14 +98,38 @@ function chunk(exchanges: string[]): string[] {
   return batches;
 }
 
-/** Extracts and stores facts for one batch. Returns how many were stored. */
+/** Extracts and stores facts for one batch. Returns how many were stored.
+ *
+ * The model's choice is owned by the global agent with
+ * systemRole === "memoryCurator" (see pm/global-agents.ts). Calling the
+ * router with an explicit entries list — built from the global agent's
+ * `providerKey` — is what keeps the curator going through the same
+ * cooldown/throttle machinery a chat turn gets, instead of bypassing it
+ * with a bare provider call. The task kind is still passed so a 429
+ * surfaces to the model registry as a memory-curator cooldown rather than
+ * a generic "no providers" error. */
 async function curateBatch(deps: CuratorDeps, file: string, batchText: string): Promise<number> {
-  const res = await deps.router.complete("memoryCurator", {
-    model: "curator",
-    system: EXTRACTION_SYSTEM_PROMPT,
-    max_tokens: 1000,
-    messages: [{ role: "user", content: batchText }],
-  });
+  const agent = await getGlobalAgent("memoryCurator");
+  if (!agent) {
+    // No global agent configured — skip rather than fabricate a default,
+    // because the user-facing surface for setting one is the Admin UI's
+    // Global Services panel and skipping silently is what makes that
+    // gap visible.
+    console.warn("curator: no global agent with systemRole \"memoryCurator\"; skipping batch");
+    return 0;
+  }
+  const res = await deps.router.completeWithEntries(
+    [{ provider: agent.providerKey, priority: 1 }],
+    {
+      model: agent.model,
+      system: EXTRACTION_SYSTEM_PROMPT,
+      max_tokens: 1000,
+      messages: [{ role: "user", content: batchText }],
+    },
+    { priority: "background" },
+    `global agent "${agent.name}" (memoryCurator)`,
+    "memoryCurator",
+  );
   const responseText = await new Response(res.body).text();
 
   let contentText = responseText;

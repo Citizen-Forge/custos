@@ -19,6 +19,7 @@ import { ensureAdminPassword } from "./auth/admin-session.js";
 import { RemoteSessionManager } from "./remote/session-manager.js";
 import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
+import { ensureGlobalAgents } from "./pm/global-agents.js";
 import { StatsMonitor, DEFAULT_ALERT_RULES } from "./runtime-stats.js";
 import { registerMetricsRoute } from "./server/metrics.js";
 
@@ -32,6 +33,14 @@ async function main() {
 
   const runtime = new Runtime();
   await runtime.reload();
+
+  // Seed the agents.json collection with one row per built-in global
+  // service (memory curator, permission classifier, embeddings). Runs
+  // after runtime.reload() so the configured providers exist by the
+  // time the global-agent row's providerKey is checked. Idempotent —
+  // hand-tuned entries survive because we only fill rows whose
+  // systemRole is missing.
+  await ensureGlobalAgents();
 
   const memoryStore = new MemoryStore(QDRANT_URL, EMBEDDING_VECTOR_SIZE);
 

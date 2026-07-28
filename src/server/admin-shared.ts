@@ -28,25 +28,25 @@ export function maskApiKey(key: string): string {
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
 }
 
-export function findInstanceUsages(config: GatewayConfig, name: string): string[] {
-  // Walk only task kinds the runtime actually invokes. Of the four in
-  // `TaskKind`:
-  //   - general         -- /v1/messages non-pinned path  (live)
-  //   - permissionClassifier -- permissions classifier (live)
-  //   - memoryCurator   -- memory curator ingest        (live)
-  //   - complexityClassifier -- the per-turn classifier; the runtime
-  //     branch that called this was dropped in 5643718 when complexity
-  //     routing left the schema, so no caller invokes
-  //     `router.complete("complexityClassifier", ...)`. An admin path to
-  //     populate it (PUT /admin/api/tasks/complexityClassifier) still
-  //     exists for power users, so the field is reachable from outside
-  //     but unrecoverable from inside the operator flow the admin UI
-  //     exposes -- same shape as the dropped complexityRouting.tiers gate.
-  //     Walking it here would block a delete the user has no UI to clear.
+export async function findInstanceUsages(name: string): Promise<string[]> {
+  // After the project/global split (the global-agents module landing
+  // alongside this commit), the practical reference surface is
+  // agents.json — every agent, project or global, has a `providerKey`
+  // and that's the key we delete against. config.tasks still exists
+  // for backwards compatibility with hand-edited configs, but the
+  // canonical pickers are the agents themselves, so we walk those.
+  //
+  // Lazy-import the PM collection so admin-shared stays free of a
+  // direct PM dependency at load time (admin routes run before any
+  // project agents are listed) and so a future refactor that moves
+  // the collection can update this single import.
+  const { agents } = await import("../pm/agents.js");
+  const rows = await agents.list();
   const usages: string[] = [];
-  for (const [taskKind, entries] of Object.entries(config.tasks)) {
-    if (taskKind === "complexityClassifier") continue;
-    if (entries.some((e) => e.provider === name)) usages.push(`task:${taskKind}`);
+  for (const row of rows) {
+    if (row.providerKey !== name) continue;
+    if (row.kind === "global") usages.push(`global-agent:${row.systemRole ?? row.role} (${row.name})`);
+    else usages.push(`agent:${row.id} ${row.projectId === null ? "shared" : `project ${row.projectId}`}`);
   }
   return usages;
 }
