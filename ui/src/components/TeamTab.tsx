@@ -11,12 +11,10 @@ import Avatar, { agentLabel } from './Avatar'
  */
 export default function TeamTab({
   project,
-  revision,
-  onChanged
+  revision
 }: {
   project: CustosProject
   revision: number
-  onChanged: () => void
 }): React.JSX.Element {
   const call = useCall()
   const [activity, setActivity] = useState<ActivityResponse | null>(null)

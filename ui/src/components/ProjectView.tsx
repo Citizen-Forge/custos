@@ -94,7 +94,7 @@ export default function ProjectView({ project, askText }: ProjectViewProps): Rea
         )}
         {tab === 'team' && (
           <div className="project-pane visible">
-            <TeamTab project={project} revision={revision} onChanged={bump} />
+            <TeamTab project={project} revision={revision} />
           </div>
         )}
         {tab === 'devops' && (
