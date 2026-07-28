@@ -40,6 +40,7 @@ export function registerConfigRoutes(app: FastifyInstance, runtime: Runtime): vo
       // used for embeddings" is the Global Services panel, not a top-
       // level config node. Surfacing the field here would create a
       // second source of truth the admin UI would have to reconcile.
+      fallbackSets: config.fallbackSets ?? {},
       providerPresets: PROVIDER_PRESETS,
     };
   });

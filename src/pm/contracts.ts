@@ -108,8 +108,11 @@ export interface DevopsContract extends WithFacts {
 export interface ProjectManagerContract extends WithFacts {
   assignments?: Array<{
     role: "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops";
-    providerKey: string;
-    model: string;
+    /** Name of the fallback set to assign to this role. Must be one of the
+     * available sets shown in the menu (e.g. "complex", "standard",
+     * "fast"). The PM reads each set's description to decide which is
+     * appropriate for each role. */
+    fallbackSet: string;
     rationale?: string;
   }>;
   notes?: string;

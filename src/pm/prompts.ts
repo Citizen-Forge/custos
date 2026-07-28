@@ -6,6 +6,22 @@ import type { AgentRole } from "./types.js";
  * past, and a weaker model agrees too readily to be useful as a sparring
  * partner. Everything else starts on Sonnet and the engineering manager
  * moves individual engineers up or down from there based on results. */
+/** Fallback set each built-in role starts on. The steering team uses the
+ * strongest available set. Everything else defaults to "complex" and the
+ * Project Manager re-assigns based on budget and availability after the
+ * first tick. */
+export const ROLE_DEFAULT_FALLBACK_SET: Record<AgentRole, string> = {
+  steering: "complex",
+  "product-owner": "complex",
+  "engineering-manager": "complex",
+  engineer: "standard",
+  qa: "standard",
+  devops: "standard",
+  "project-manager": "complex",
+};
+
+/** @deprecated Kept for backward compat — the PM now assigns fallback sets,
+ *  not specific providerKey/model pairs. Use ROLE_DEFAULT_FALLBACK_SET. */
 export const ROLE_DEFAULT_MODEL: Record<AgentRole, [providerKey: string, model: string]> = {
   steering: ["anthropic", "claude-opus-5"],
   "product-owner": ["anthropic", "claude-sonnet-5"],
@@ -362,26 +378,30 @@ export const PROVISION_SHAPE = `{
 
 
 
-export const PROJECT_MANAGER_PROMPT = `You are the Project Manager for this software project. Your job is to decide which provider and model each built-in role should use, given the project's budget and the available providers.
+export const PROJECT_MANAGER_PROMPT = `You are the Project Manager for this software project. Your job is to decide which fallback set each built-in role should use, given the project's budget and the available providers.
 
 You run once when the project is created. After that, the engineering manager handles per-ticket model selection, and you are only called again when the operator asks you to re-evaluate.
 
 ## What you decide
 
-For each role listed below, pick a provider and model from the menu you're given. Consider:
+For each role listed below, pick a **fallback set** from the menu you're given. Each fallback set is a named group of providers in priority order — if the first provider is unavailable (rate-limited, cooling down, exhausted), the GlobalQueue automatically falls through to the next one in the set.
 
-- **Budget**: if the project has a monthly USD cap, reserve high-end metered models for work that genuinely needs them. Free and subscription models should handle the routine load.
-- **Role purpose**: QA and DevOps need reliable, deterministic models that follow instructions closely — they review code and run infrastructure. The Product Owner plans roadmaps and needs broad knowledge and good judgement. The Engineering Manager makes cost-quality decisions about other agents.
-- **Provider cost type**:
-  - **Free** (Ollama, Gemini Free): good for routine work, often rate-limited or slower. Route QA and DevOps here if they're reliable enough for the project.
-  - **Subscription** (Anthropic via OAuth): no per-token cost, strong models. The natural home for the EM, PO, and hard tickets.
-  - **Metered** (OpenAI, Anthropic API key): pay per token. Reserve for high-value work where free models aren't good enough.
+Consider:
+
+- **Budget**: if the project has a monthly USD cap, reserve sets with metered models for roles that genuinely need them. Free and subscription models should handle the routine load.
+- **Role purpose**:
+  - **complex** — Best for complex decision-making, abstract reasoning, and high-stakes work. The first provider is the strongest available.
+  - **standard** — Everyday development tasks and routine work. A capable but cost-effective model.
+  - **fast** — Quick turnarounds, simple tickets, classification. Prefers speed over depth.
+- **Provider cost type** (shown in each set's description):
+  - **Free** (Ollama, Gemini Free): good for routine work, often rate-limited or slower.
+  - **Subscription** (Anthropic via OAuth): no per-token cost, strong models.
+  - **Metered** (OpenAI, Anthropic API key): pay per token.
 - **Capability rating**: models with higher ratings have proven more reliable on this project's codebase.
-- **Availability**: skip models that are currently unavailable (cooldown, exhausted window).
 
 ## Roles to assign
 
-Each role needs a providerKey and model from the menu:
+Each role needs a fallbackSet name from the menu:
 
 1. **product-owner** — plans roadmaps, grooms backlog, writes stories. Needs strong reasoning and broad knowledge.
 2. **engineering-manager** — sizes tickets, assigns engineers, tunes agent prompts. Needs strong judgement.
@@ -391,19 +411,18 @@ Each role needs a providerKey and model from the menu:
 
 ## Rules
 
-- Every role must get a valid providerKey+model from the menu. No empty assignments.
-- Prefer free models for routine work (QA, DevOps) when the project has a budget cap.
-- Keep the EM and PO on the strongest available models — their decisions affect everyone else.
-- If the budget is null (unlimited), you have more freedom to use metered models.
-- If only one provider is configured, assign everything to it and note the risk.`;
+- Every role must get a valid fallbackSet name from the menu. No empty assignments.
+- Prefer \`fast\` or \`standard\` for routine work (QA, DevOps) when the project has a budget cap.
+- Keep the EM and PO on the strongest available set — their decisions affect everyone else.
+- If the budget is null (unlimited), you have more freedom to use the \`complex\` set.
+- If only one fallback set is available, assign everything to it and note the risk.`;
 
 export const ASSIGN_MODELS_SHAPE = `{
   "assignments": [
     {
       "role": "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops",
-      "providerKey": "exactly one of the providerKey values from the menu",
-      "model": "exactly one of the model values from the menu, paired with that providerKey",
-      "rationale": "one line: why this provider/model for this role"
+      "fallbackSet": "exactly one of the fallback set names from the menu",
+      "rationale": "one line: why this fallback set for this role"
     }
   ],
   "notes": "any observations about provider availability, budget constraints, or risks the operator should know"

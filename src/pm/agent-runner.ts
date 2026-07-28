@@ -218,6 +218,15 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     controller.abort();
   }, RUN_TIMEOUT_MS);
 
+  // Resolve the model via the agent's fallback set when one is configured.
+  // The runtime picks the first available provider in the set and acquires
+  // a slot for it (so the run truly reserves capacity). The slot is held
+  // for the entire run and released in the finally block below.
+  const resolved = runtime.resolveFallbackSet(agent);
+  const effectiveProviderKey = resolved?.providerKey ?? agent.providerKey;
+  const effectiveModel = resolved?.model ?? agent.model;
+  const releaseSlot = resolved?.release ?? null;
+
   try {
     await runTurn(runtime, {
       cwd,
@@ -229,7 +238,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       // at the very end costs a line and survives that truncation.
       prompt: `${prompt}\n\n---\n\nRemember: your final message must end with exactly one fenced \`${tag}\` block containing valid JSON, and nothing after it.`,
       appendSystemPrompt: buildSystemPrompt(agent, options.extraSystemPrompt, options.outputContract),
-      model: formatModelAlias(agent.providerKey, agent.model),
+      model: formatModelAlias(effectiveProviderKey, effectiveModel),
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
       onEvent,
@@ -239,6 +248,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     turnError = (err as Error).message;
   } finally {
     clearTimeout(deadline);
+    if (releaseSlot) releaseSlot();
   }
 
   const runMs = Date.now() - startedAt;

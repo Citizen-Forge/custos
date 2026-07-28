@@ -34,6 +34,30 @@ export interface EmbeddingProviderConfig {
   model: string;
 }
 
+/** A named fallback set: an ordered list of providers (with their
+ * selected models) that the GlobalQueue iterates when dispatching a
+ * request. The first available provider in the list serves the request.
+ * If it fails with a ProviderUnavailableError, the queue falls through
+ * to the next provider, and so on. */
+export interface FallbackSetDef {
+  /** Human-readable name for the operator (e.g. "Complex reasoning"). */
+  name: string;
+  /** Description explaining when to use this set, written for the Project
+   * Manager agent so it can decide which set to assign to each role. */
+  description: string;
+  /** Ordered list of providers to try. Each entry references a provider
+   * name in `providers` (the new shape) or `openaiCompatibleInstances`
+   * (legacy). */
+  providers: FallbackProviderEntry[];
+}
+
+export interface FallbackProviderEntry {
+  /** References a key in `providers` or "anthropic". */
+  provider: string;
+  /** The specific model to use from that provider. */
+  model: string;
+}
+
 /** @deprecated Embeddings now live on the global agent with
  *  `systemRole: "embeddings"` (see pm/global-agents.ts). Kept as a
  *  no-op alias here so older callers keep type-checking; the load path
@@ -75,6 +99,21 @@ export interface ProviderDef {
   /** Requests per minute limit. When set, the throttle proactively shapes
    * traffic instead of only reacting to 429s. Set to 10 for Gemini Free. */
   rpmLimit?: number;
+  /** Cooldown duration to apply when the upstream returns a 429/5xx
+   * WITHOUT a usable `Retry-After` header. Without this override, the
+   * router falls back to its global `DEFAULT_COOLDOWN_MS = 60_000`,
+   * which is wrong-shaped for several real providers:
+   *   - Gemini Free quota-exhausted daily caps regenerate on the
+   *     order of minutes, not seconds; the 60s default re-attempts
+   *     mid-cooldown and keeps the gateway stuck in a 429 loop.
+   *   - Ollama on a saturated local box recovers in a few seconds
+   *     once its request queue drains; a 60s default is overkill.
+   * The Anthropic provider does not need this field: it parses its
+   * own Anthropic-specific `anthropic-ratelimit-*-reset` headers,
+   * which carry the real reset time. The fallback only applies when
+   * neither the upstream `Retry-After` nor the Anthropic-specific
+   * headers are present. Unset means use the global 60s default. */
+  cooldownFallbackMs?: number;
   /** Per-instance throttle priority override. */
   priority?: Priority;
   /** Emit late vendor metadata deltas in streaming responses. */
@@ -111,6 +150,21 @@ export interface GatewayConfig {
    *  global agent instead of reading this property directly. */
   embeddingProvider?: EmbeddingProviderConfig;
   tasks: Record<TaskKind, ProviderEntry[]>;
+  /** Ordered fallback sets. A fallback set is a named group of providers
+   * with a description, used by the Project Manager to assign model
+   * capability tiers to agents. When a request arrives with a fallback
+   * set, the GlobalQueue tries each provider in order and falls through
+   * to the next if the current one is unavailable (cooldown, rate limit,
+   * concurrency cap). This replaces the old task-based routing where
+   * each task kind had a hardcoded provider priority list. */
+  /** Ordered fallback sets. A fallback set is a named group of providers
+   * with a description, used by the Project Manager to assign model
+   * capability tiers to agents. When a request arrives with a fallback
+   * set, the GlobalQueue tries each provider in order and falls through
+   * to the next if the current one is unavailable (cooldown, rate limit,
+   * concurrency cap). This replaces the old task-based routing where
+   * each task kind had a hardcoded provider priority list. */
+  fallbackSets?: Record<string, FallbackSetDef>;
   /** Shared secret Claude Code sends back as `x-api-key` (the same header
    * it already sends for real Anthropic API-key auth -- Custos ignores the
    * value for upstream purposes since it does its own provider auth
@@ -133,15 +187,38 @@ const DEFAULT_CONFIG: GatewayConfig = {
       costType: "free",
       models: [{ name: "qwen2.5:14b-instruct-q4_K_M", enabled: true }],
       maxConcurrent: 1,
+      // Ollama on consumer hardware recovers from a saturated request
+      // queue in a few seconds. The 60s global default is overkill
+      // for a transient; 30s keeps the gateway responsive without
+      // hammering a still-recovering local model.
+      cooldownFallbackMs: 30_000,
     },
     "ollama-fast": {
       baseUrl: `${OLLAMA_HOST}/v1`,
       costType: "free",
       models: [{ name: "qwen2.5:3b-instruct", enabled: true }],
       maxConcurrent: 1,
+      cooldownFallbackMs: 30_000,
     },
   },
   openaiCompatibleInstances: {},
+  fallbackSets: {
+    "complex": {
+      name: "Complex reasoning",
+      description: "Best for complex decision-making, abstract reasoning, and high-stakes work where quality matters more than speed",
+      providers: [{ provider: "anthropic", model: "claude-sonnet-5" }, { provider: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" }],
+    },
+    "standard": {
+      name: "Standard work",
+      description: "Everyday development tasks and routine work where a capable but cost-effective model is appropriate",
+      providers: [{ provider: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" }],
+    },
+    "fast": {
+      name: "Fast / light",
+      description: "Quick turnarounds, simple tickets, classification, and other latency-sensitive work where correctness but not depth is needed",
+      providers: [{ provider: "ollama-fast", model: "qwen2.5:3b-instruct" }, { provider: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" }],
+    },
+  },
   tasks: {
     general: [
       { provider: "anthropic", priority: 1 },
@@ -286,6 +363,9 @@ export async function loadConfig(): Promise<GatewayConfig> {
   // fileConfig.providers is populated either by user-set or by
   // migrateLegacyShape above. Defaults overlay on top.
   merged.providers = { ...DEFAULT_CONFIG.providers, ...(fileConfig.providers ?? {}) };
+
+  // Fallback sets merge from defaults with user overrides.
+  merged.fallbackSets = { ...DEFAULT_CONFIG.fallbackSets, ...(fileConfig.fallbackSets ?? {}) };
 
   if (!merged.anthropic?.apiKey && process.env.ANTHROPIC_API_KEY) {
     merged.anthropic = { ...merged.anthropic, apiKey: process.env.ANTHROPIC_API_KEY };

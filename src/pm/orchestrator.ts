@@ -819,11 +819,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const ctx = await this.resolve(projectId, "project-manager");
       if (!ctx) return;
 
-      const menu = agentStore.listProviderOptions(this.runtime.config);
-      const models = await syncFromConfig(
-        this.runtime.config,
-        menu.filter((option) => option.providerKey === "anthropic").map((option) => option.model),
-      );
+      const fallbackSets = this.runtime.config.fallbackSets ?? {};
       const allAgents = await agentStore.listAgents(projectId);
       const roster = allAgents.filter((a) => a.role !== "project-manager" && a.role !== "steering");
 
@@ -832,14 +828,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         "",
         "## Your task",
         "",
-        `This project has a monthly budget of ${ctx.settings.budget.monthlyUsd === null ? "unlimited" : `$${ctx.settings.budget.monthlyUsd}`}. Assign a provider and model to each role below, choosing from the provider menu.`,
+        `This project has a monthly budget of ${ctx.settings.budget.monthlyUsd === null ? "unlimited" : `$${ctx.settings.budget.monthlyUsd}`}. Assign a fallback set to each role below, choosing from the available fallback sets.`,
         "",
         `The following roles need assignments:`,
-        ...roster.map((a) => `- **${a.role}** (currently on ${a.providerKey}/${a.model})`),
+        ...roster.map((a) => `- **${a.role}**${a.fallbackSet ? ` (currently using "${a.fallbackSet}")` : ` (currently on ${a.providerKey}/${a.model})`}`),
         "",
-        "## Provider and model menu",
+        "## Available fallback sets",
         "",
-        renderModelMenu(models),
+        ...Object.entries(fallbackSets).map(([key, def]) =>
+          `- \`${key}\`: **${def.name}** — ${def.description}. Providers: ${def.providers.map((p) => `${p.provider}/${p.model}`).join(" → ")}`
+        ),
         "",
         "## Budget and constraints",
         "",
@@ -847,7 +845,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           ? `Metered spend: $${await this.runtime.spendTracker.getProjectSpend(projectId).catch(() => 0)} of $${ctx.settings.budget.monthlyUsd} used.`
           : "No budget cap — all providers are available.",
         "",
-        "Assign every role. Use the menu's providerKey and model values exactly as shown.",
+        "Assign every role. Use the fallback set names exactly as shown.",
       ].join("\n");
 
       const result = await runAgent<ProjectManagerContract>(this.runtime, {
@@ -870,14 +868,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       // Build a map of current agents by role for quick lookup.
       const agentByRole = new Map(roster.map((a) => [a.role, a]));
-      // Only provider keys that actually exist may be assigned.
-      const knownProviders = new Set(menu.map((option) => option.providerKey));
+      const knownSets = new Set(Object.keys(this.runtime.config.fallbackSets ?? {}));
       let changed = 0;
 
       for (const assignment of result.parsed.assignments) {
-        if (!assignment.role || !assignment.providerKey || !assignment.model) continue;
-        if (!knownProviders.has(assignment.providerKey)) {
-          this.emit("activity", projectId, `PM: skipped "${assignment.role}" — unknown provider "${assignment.providerKey}"`);
+        if (!assignment.role || !assignment.fallbackSet) continue;
+        if (!knownSets.has(assignment.fallbackSet)) {
+          this.emit("activity", projectId, `PM: skipped "${assignment.role}" — unknown fallback set "${assignment.fallbackSet}"`);
           continue;
         }
         const agent = agentByRole.get(assignment.role);
@@ -886,14 +883,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           continue;
         }
         // Only update if the assignment actually changes something.
-        if (agent.providerKey !== assignment.providerKey || agent.model !== assignment.model) {
+        if (agent.fallbackSet !== assignment.fallbackSet) {
           await agentStore.updateAgent(agent.id, {
-            providerKey: assignment.providerKey,
-            model: assignment.model,
+            fallbackSet: assignment.fallbackSet,
           });
           await agentStore.appendAgentNote(
             agent.id,
-            `Project Manager assigned ${assignment.providerKey}/${assignment.model} for ${assignment.role}${assignment.rationale ? `: ${assignment.rationale}` : ""}`,
+            `Project Manager assigned fallback set "${assignment.fallbackSet}" for ${assignment.role}${assignment.rationale ? `: ${assignment.rationale}` : ""}`,
           );
           changed++;
         }
@@ -903,7 +899,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.emit(
         "activity",
         projectId,
-        `Project Manager assigned models to ${changed} role(s): ${result.parsed.assignments.map((a) => `${a.role} → ${a.providerKey}/${a.model}`).join(", ")}`,
+        `Project Manager assigned fallback sets to ${changed} role(s): ${result.parsed.assignments.map((a) => `${a.role} → ${a.fallbackSet}`).join(", ")}`,
       );
     });
   }

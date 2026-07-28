@@ -337,6 +337,7 @@ function render() {
   app.innerHTML = "";
   app.appendChild(renderProvidersPanel());
   app.appendChild(renderGlobalServicesPanel(state.providers));
+  app.appendChild(renderFallbackSetsPanel());
   app.appendChild(renderProjectsPanel());
   app.appendChild(renderSecurityPanel());
 }
@@ -1049,6 +1050,101 @@ function renderGlobalServicesPanel(providers) {
   section.appendChild(table);
   section.appendChild(el("p", { class: "small", style: "margin-top: 8px;", text: "The endpoint field is only meaningful for embeddings — Ollama exposes them at a different path than /v1/chat/completions, so the runtime either derives the URL from the named provider or uses the explicit host here." }));
   return section;
+}
+
+// -- Fallback sets -------------------------------------------------------
+
+function renderFallbackSetsPanel() {
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Fallback sets" }));
+  section.appendChild(el("p", { class: "desc", text: "Named groups of providers the Project Manager assigns to roles. A request with a fallback set tries each provider in order and falls through to the next if the current one is unavailable (cooldown, rate limit, concurrency cap)." }));
+
+  const sets = state.fallbackSets || {};
+  const keys = Object.keys(sets);
+  if (keys.length === 0) {
+    section.appendChild(el("p", { class: "small", text: "No fallback sets configured. The default config has 'complex', 'standard', and 'fast' sets." }));
+  } else {
+    const table = el("table", { style: "width: 100%; border-collapse: collapse;" });
+    table.appendChild(el("colgroup", {}, [
+      el("col", { style: "width: 18%;" }),
+      el("col", { style: "width: 27%;" }),
+      el("col", { style: "width: 45%;" }),
+      el("col", { style: "width: 10%;" }),
+    ]));
+    table.appendChild(el("tr", {}, [
+      el("th", { text: "Name" }),
+      el("th", { text: "Description" }),
+      el("th", { text: "Providers" }),
+      el("th", { text: "Actions" }),
+    ]));
+    for (const [name, set] of Object.entries(sets)) {
+      const providersStr = set.providers ? set.providers.map((p) => `${p.provider}/${p.model}`).join(" → ") : "—";
+      const row = el("tr", {}, [
+        el("td", { style: "font-weight: 600; font-size: 13px;", text: name }),
+        el("td", { class: "small", text: set.description || "" }),
+        el("td", { class: "small", style: "font-family: monospace; font-size: 11px;", text: providersStr }),
+        el("td", { class: "actions-cell" }, [
+          el("button", { class: "row-btn", text: "Edit", onclick: () => enterFallbackSetEditRow(name, set) }),
+          el("button", { class: "row-btn danger", text: "Delete", onclick: () => reloadAfter(
+            api(`/admin/api/fallback-sets/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
+          )}),
+        ]),
+      ]);
+      table.appendChild(row);
+    }
+    section.appendChild(table);
+  }
+
+  // Add form
+  section.appendChild(el("hr", { class: "sep" }));
+  section.appendChild(el("p", { class: "small", text: "Add or update a fallback set" }));
+
+  const setNameInput = el("input", { type: "text", placeholder: "key (e.g. complex)", class: "fs-set-name" });
+  const descInput = el("input", { type: "text", placeholder: "Description shown to the Project Manager", class: "fs-desc" });
+  // Provider chain editor (simplified: comma-separated provider/model pairs)
+  const providersInput = el("input", { type: "text", placeholder: "provider1/model1, provider2/model2 (in priority order)", class: "fs-providers" });
+
+  const row1 = el("div", { class: "row" }, [setNameInput]);
+  const row2 = el("div", { class: "row" }, [descInput]);
+  const row3 = el("div", { class: "row" }, [providersInput]);
+
+  const addBtn = el("button", { class: "primary", text: "Save", onclick: () => {
+    const name = setNameInput.value.trim();
+    const desc = descInput.value.trim();
+    const providersStr = providersInput.value.trim();
+    if (!name || !providersStr) return showToast("Name and at least one provider/model pair are required", true);
+    const pairs = providersStr.split(",").map((s) => s.trim()).filter(Boolean);
+    const providers = [];
+    for (const pair of pairs) {
+      const parts = pair.split("/");
+      if (parts.length < 2) return showToast(`Invalid pair "${pair}" — use format provider/model`, true);
+      providers.push({ provider: parts[0].trim(), model: parts.slice(1).join("/").trim() });
+    }
+    reloadAfter(api(`/admin/api/fallback-sets/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: { description: desc, providers },
+    }), "Fallback set saved");
+  }});
+  section.appendChild(row1);
+  section.appendChild(row2);
+  section.appendChild(row3);
+  section.appendChild(el("div", { class: "row" }, [addBtn]));
+
+  return section;
+}
+
+// Opens the add/edit form with pre-filled values for an existing fallback set.
+function enterFallbackSetEditRow(name, set) {
+  // Scroll the add form into view and pre-fill its inputs.
+  const setNameInput = document.querySelector('.fs-set-name');
+  const descInput = document.querySelector('.fs-desc');
+  const providersInput = document.querySelector('.fs-providers');
+  if (setNameInput && descInput && providersInput) {
+    setNameInput.value = name;
+    descInput.value = set.description || '';
+    providersInput.value = (set.providers || []).map(p => `${p.provider}/${p.model}`).join(', ');
+    setNameInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
 }
 
 function labelForRole(systemRole) {

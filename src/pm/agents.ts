@@ -1,6 +1,6 @@
 import { JsonCollection, newId, pmPath } from "./store.js";
 import type { GatewayConfig } from "../config.js";
-import { ROLE_DEFAULT_MODEL } from "./prompts.js";
+import { ROLE_DEFAULT_FALLBACK_SET } from "./prompts.js";
 import { pickPersonaName } from "./personas.js";
 import type { AgentDef, AgentRole, Complexity, CostProfile } from "./types.js";
 
@@ -76,6 +76,10 @@ export interface CreateAgentInput {
   createdBy?: AgentDef["createdBy"];
   personaName?: string;
   costProfile?: CostProfile | null;
+  /** Fallback set name to use for dispatch. When set, the runtime iterates
+   *  the fallback set's providers in order and uses the first available one.
+   *  Overrides direct providerKey/model dispatch. */
+  fallbackSet?: string;
   /** Pass "global" + `systemRole` for project-orthogonal services (memory
    *  curator, permission classifier, embeddings). Defaults to "project". */
   kind?: AgentDef["kind"];
@@ -95,6 +99,7 @@ export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
     personaName: input.personaName ?? pickPersonaName(taken),
     providerKey: input.providerKey,
     model: input.model,
+    fallbackSet: input.fallbackSet,
     systemPrompt: input.systemPrompt ?? "",
     specialty: input.specialty ?? null,
     createdBy: input.createdBy ?? "human",
@@ -108,7 +113,7 @@ export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
   });
 }
 
-export type AgentPatch = Partial<Pick<AgentDef, "name" | "providerKey" | "model" | "systemPrompt" | "specialty" | "maxComplexity" | "active">>;
+export type AgentPatch = Partial<Pick<AgentDef, "name" | "providerKey" | "model" | "fallbackSet" | "systemPrompt" | "specialty" | "maxComplexity" | "active">>;
 
 export async function updateAgent(id: string, patch: AgentPatch): Promise<AgentDef | null> {
   return agents.update(id, (agent) => {
@@ -232,7 +237,10 @@ export async function ensureProjectAgents(projectId: string): Promise<AgentDef[]
   for (const spec of roles) {
     const existing = await agents.find((row) => row.projectId === projectId && row.role === spec.role);
     if (existing.length) continue;
-    const [providerKey, model] = ROLE_DEFAULT_MODEL[spec.role];
+    const fallbackSet = ROLE_DEFAULT_FALLBACK_SET[spec.role];
+    // Default providerKey/model from the fallback set's first entry.
+    const providerKey = "anthropic";
+    const model = "claude-sonnet-5";
     created.push(
       await createAgent({
         projectId,
@@ -240,6 +248,7 @@ export async function ensureProjectAgents(projectId: string): Promise<AgentDef[]
         name: spec.name,
         providerKey,
         model,
+        fallbackSet,
         maxComplexity: spec.maxComplexity,
         createdBy: "system",
         specialty: spec.role === "engineer" ? "General-purpose implementation work across the stack" : null,
