@@ -1054,6 +1054,166 @@ function renderGlobalServicesPanel(providers) {
 
 // -- Fallback sets -------------------------------------------------------
 
+/** Known provider keys (anthropic + configured providers) */
+function listProviderKeys() {
+  return ['anthropic', ...Object.keys(state.providers || {})];
+}
+
+/** Model names for a given provider key. */
+function modelsForProvider(providerKey) {
+  if (providerKey === 'anthropic') {
+    return ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'];
+  }
+  const prov = state.providers?.[providerKey];
+  if (!prov || !prov.models) return [];
+  return prov.models.map(m => m.name);
+}
+
+/** Build a provider select element. */
+function buildProviderSelect(selected, onchange) {
+  const sel = el('select', { onchange });
+  sel.appendChild(el('option', { value: '', text: '(choose provider)', disabled: true, selected: !selected ? 'selected' : undefined }));
+  for (const key of listProviderKeys()) {
+    const opt = el('option', { value: key, text: key });
+    if (key === selected) opt.setAttribute('selected', 'selected');
+    sel.appendChild(opt);
+  }
+  return sel;
+}
+
+/** Build a model select element for a given provider. */
+function buildModelSelect(providerKey, selected) {
+  const sel = el('select');
+  const models = modelsForProvider(providerKey);
+  if (!models.length) {
+    sel.appendChild(el('option', { value: '', text: '(no models)', disabled: true }));
+  } else {
+    sel.appendChild(el('option', { value: '', text: '(choose model)', disabled: true, selected: !selected ? 'selected' : undefined }));
+    for (const name of models) {
+      const opt = el('option', { value: name, text: name });
+      if (name === selected) opt.setAttribute('selected', 'selected');
+      sel.appendChild(opt);
+    }
+  }
+  return sel;
+}
+
+/** Create a single provider entry row (drag handle + provider select +
+ *  model select + remove button). Returns the row element and a getter
+ *  for reading its current { provider, model } value. */
+function createProviderEntryRow(initialProvider, initialModel, onRemove, onMoveUp, onMoveDown, index) {
+  const row = el('div', {
+    draggable: 'true',
+    style: 'display: flex; align-items: center; gap: 6px; margin-bottom: 6px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;',
+    class: 'fs-entry-row',
+  });
+
+  // Drag handle
+  const handle = el('span', {
+    style: 'cursor: grab; color: var(--muted); font-size: 16px; line-height: 1; user-select: none; flex-shrink: 0;',
+    text: '⠿',
+    title: 'Drag to reorder',
+  });
+  row.appendChild(handle);
+
+  // Drag events
+  row.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', '');
+    row.classList.add('dragging');
+    row.style.opacity = '0.5';
+  });
+  row.addEventListener('dragend', () => {
+    row.classList.remove('dragging');
+    row.style.opacity = '';
+  });
+  row.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const container = row.parentElement;
+    if (!container) return;
+    const dragEl = container.querySelector('.dragging');
+    if (!dragEl || dragEl === row) return;
+    const rect = row.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    if (e.clientY < midY) {
+      container.insertBefore(dragEl, row);
+    } else {
+      container.insertBefore(dragEl, row.nextSibling);
+    }
+  });
+  row.addEventListener('drop', (e) => {
+    e.preventDefault();
+    // Re-index all rows after the drop.
+    const container = row.parentElement;
+    if (container) reindexRows(container);
+  });
+
+  // Provider select
+  const providerSelect = buildProviderSelect(initialProvider, () => {
+    // Rebuild model select when provider changes.
+    const newProvider = providerSelect.value;
+    const newModelSelect = buildModelSelect(newProvider, '');
+    modelSelect.parentNode.replaceChild(newModelSelect, modelSelect);
+    modelSelect = newModelSelect;
+  });
+  providerSelect.style.flex = '0 0 140px';
+  row.appendChild(providerSelect);
+
+  // Model select
+  let modelSelect = buildModelSelect(initialProvider || 'anthropic', initialModel);
+  modelSelect.style.flex = '0 0 180px';
+  row.appendChild(modelSelect);
+
+  // Up button
+  const upBtn = el('button', {
+    style: 'font-size: 11px; padding: 2px 6px; line-height: 1;',
+    text: '▲',
+    title: 'Move up',
+    onclick: () => onMoveUp?.(row),
+  });
+  row.appendChild(upBtn);
+
+  // Down button
+  const downBtn = el('button', {
+    style: 'font-size: 11px; padding: 2px 6px; line-height: 1;',
+    text: '▼',
+    title: 'Move down',
+    onclick: () => onMoveDown?.(row),
+  });
+  row.appendChild(downBtn);
+
+  // Remove button
+  const removeBtn = el('button', {
+    style: 'font-size: 14px; padding: 2px 8px; line-height: 1; color: var(--danger);',
+    text: '×',
+    title: 'Remove this provider',
+    onclick: () => onRemove?.(row),
+  });
+  row.appendChild(removeBtn);
+
+  // Getter for current values
+  row._getValue = () => ({
+    provider: providerSelect.value,
+    model: modelSelect.value,
+  });
+
+  return row;
+}
+
+/** Re-index all entry rows in a container (updates move up/down button
+ *  visibility). */
+function reindexRows(container) {
+  const rows = container.querySelectorAll('.fs-entry-row');
+  rows.forEach((row, i) => {
+    const btns = row.querySelectorAll('button');
+    // Up button visibility
+    if (btns.length >= 3) {
+      btns[0].style.visibility = i === 0 ? 'hidden' : '';
+      btns[1].style.visibility = i === rows.length - 1 ? 'hidden' : '';
+    }
+  });
+}
+
 function renderFallbackSetsPanel() {
   const section = el("section", { class: "panel" });
   section.appendChild(el("h2", { text: "Fallback sets" }));
@@ -1095,55 +1255,114 @@ function renderFallbackSetsPanel() {
     section.appendChild(table);
   }
 
-  // Add form
+  // --- Add/edit form ---
   section.appendChild(el("hr", { class: "sep" }));
   section.appendChild(el("p", { class: "small", text: "Add or update a fallback set" }));
 
-  const setNameInput = el("input", { type: "text", placeholder: "key (e.g. complex)", class: "fs-set-name" });
-  const descInput = el("input", { type: "text", placeholder: "Description shown to the Project Manager", class: "fs-desc" });
-  // Provider chain editor (simplified: comma-separated provider/model pairs)
-  const providersInput = el("input", { type: "text", placeholder: "provider1/model1, provider2/model2 (in priority order)", class: "fs-providers" });
+  const setNameInput = el("input", { type: "text", placeholder: "key (e.g. complex)", class: "fs-set-name", style: "max-width: 300px;" });
+  const descInput = el("input", { type: "text", placeholder: "Description shown to the Project Manager", class: "fs-desc", style: "flex: 1;" });
+  section.appendChild(el("div", { class: "row" }, [setNameInput, descInput]));
 
-  const row1 = el("div", { class: "row" }, [setNameInput]);
-  const row2 = el("div", { class: "row" }, [descInput]);
-  const row3 = el("div", { class: "row" }, [providersInput]);
+  // Provider entries container
+  const entriesContainer = el("div", {
+    style: "margin: 10px 0; min-height: 40px;",
+    class: "fs-entries",
+  });
 
-  const addBtn = el("button", { class: "primary", text: "Save", onclick: () => {
-    const name = setNameInput.value.trim();
-    const desc = descInput.value.trim();
-    const providersStr = providersInput.value.trim();
-    if (!name || !providersStr) return showToast("Name and at least one provider/model pair are required", true);
-    const pairs = providersStr.split(",").map((s) => s.trim()).filter(Boolean);
-    const providers = [];
-    for (const pair of pairs) {
-      const parts = pair.split("/");
-      if (parts.length < 2) return showToast(`Invalid pair "${pair}" — use format provider/model`, true);
-      providers.push({ provider: parts[0].trim(), model: parts.slice(1).join("/").trim() });
-    }
-    reloadAfter(api(`/admin/api/fallback-sets/${encodeURIComponent(name)}`, {
-      method: "PUT",
-      body: { description: desc, providers },
-    }), "Fallback set saved");
-  }});
-  section.appendChild(row1);
-  section.appendChild(row2);
-  section.appendChild(row3);
-  section.appendChild(el("div", { class: "row" }, [addBtn]));
+  // Add entry button
+  const addEntryBtn = el("button", {
+    text: "+ Add provider",
+    style: "font-size: 12px;",
+    onclick: () => {
+      const entry = createProviderEntryRow(
+        '', '',
+        (row) => { row.remove(); reindexRows(entriesContainer); },
+        (row) => {
+          const prev = row.previousElementSibling;
+          if (prev && prev.classList.contains('fs-entry-row')) {
+            entriesContainer.insertBefore(row, prev);
+            reindexRows(entriesContainer);
+          }
+        },
+        (row) => {
+          const next = row.nextElementSibling;
+          if (next && next.classList.contains('fs-entry-row')) {
+            entriesContainer.insertBefore(next, row);
+            reindexRows(entriesContainer);
+          }
+        },
+        entriesContainer.querySelectorAll('.fs-entry-row').length
+      );
+      entriesContainer.appendChild(entry);
+      reindexRows(entriesContainer);
+    },
+  });
+
+  section.appendChild(entriesContainer);
+  section.appendChild(el("div", { class: "row" }, [addEntryBtn]));
+
+  // Save button
+  section.appendChild(el("div", { class: "row", style: "margin-top: 8px;" }, [
+    el("button", { class: "primary", text: "Save", onclick: () => {
+      const name = setNameInput.value.trim();
+      const desc = descInput.value.trim();
+      const rows = entriesContainer.querySelectorAll('.fs-entry-row');
+      if (!name) return showToast("Enter a set key", true);
+      if (!rows.length) return showToast("Add at least one provider", true);
+      const providers = [];
+      for (const row of rows) {
+        const val = row._getValue();
+        if (!val.provider || !val.model) return showToast("Every provider entry needs a provider and model selected", true);
+        providers.push(val);
+      }
+      reloadAfter(api(`/admin/api/fallback-sets/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: { description: desc, providers },
+      }), "Fallback set saved");
+    }}),
+  ]));
 
   return section;
 }
 
 // Opens the add/edit form with pre-filled values for an existing fallback set.
 function enterFallbackSetEditRow(name, set) {
-  // Scroll the add form into view and pre-fill its inputs.
+  // Fill name and description.
   const setNameInput = document.querySelector('.fs-set-name');
   const descInput = document.querySelector('.fs-desc');
-  const providersInput = document.querySelector('.fs-providers');
-  if (setNameInput && descInput && providersInput) {
+  if (setNameInput && descInput) {
     setNameInput.value = name;
     descInput.value = set.description || '';
-    providersInput.value = (set.providers || []).map(p => `${p.provider}/${p.model}`).join(', ');
     setNameInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  // Rebuild provider entries.
+  const container = document.querySelector('.fs-entries');
+  if (container) {
+    container.innerHTML = '';
+    for (const entry of (set.providers || [])) {
+      const row = createProviderEntryRow(
+        entry.provider, entry.model,
+        (r) => { r.remove(); reindexRows(container); },
+        (r) => {
+          const prev = r.previousElementSibling;
+          if (prev && prev.classList.contains('fs-entry-row')) {
+            container.insertBefore(r, prev);
+            reindexRows(container);
+          }
+        },
+        (r) => {
+          const next = r.nextElementSibling;
+          if (next && next.classList.contains('fs-entry-row')) {
+            container.insertBefore(next, r);
+            reindexRows(container);
+          }
+        },
+        Array.from(container.querySelectorAll('.fs-entry-row')).length
+      );
+      container.appendChild(row);
+    }
+    reindexRows(container);
   }
 }
 
