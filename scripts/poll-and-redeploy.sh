@@ -19,8 +19,10 @@
 #
 #     cd "$LOCAL_REPO"
 #     git pull
+#     git pull
 #     docker build -t custos-gateway:local .
 #     docker tag custos-gateway:local <IMAGE>:<TAG>
+#     docker compose up -d --no-deps gateway
 #     docker compose up -d --no-deps gateway
 #
 # Compose-flavoured. `docker-compose.override.yml` (in `COMPOSE_DIR`) is
@@ -167,9 +169,6 @@ remote_digest() {
   printf '%s' "$expected"
 }
 
-# Registry-mode only: gets the image digest of the running container.
-# Unused in local mode since the container is built from a local git clone
-# rather than pulled from a registry.
 running_digest() {
   timeout 5 docker inspect --format '{{.Image}}' "$GATEWAY_CONTAINER" 2>/dev/null \
     | sed 's|^sha256:||' || true
@@ -190,8 +189,7 @@ check_git_head() {
   fi
 
   # Fetch without merging — we just want to compare hashes.
-  # Timeout guards against a hanging network (unreachable git remote).
-  timeout 10 git -C "$repo" fetch origin "$branch" 2>/dev/null || {
+  git -C "$repo" fetch origin "$branch" 2>/dev/null || {
     log "WARN: git fetch failed for $repo"
     return 1
   }
@@ -224,7 +222,9 @@ build_local() {
   log "HEAD is now $head"
 
   log "building docker image (custos-gateway:local)..."
-  if ! docker build -t custos-gateway:local "$repo" >>"$LOG" 2>&1; then
+  local commit_sha
+  commit_sha=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)
+  if ! docker build --build-arg "COMMIT_SHA=$commit_sha" -t custos-gateway:local "$repo" >>"$LOG" 2>&1; then
     log "ERROR: docker build failed"
     return 1
   fi
@@ -237,6 +237,62 @@ build_local() {
   }
 
   printf '%s' "$head"
+}
+
+# Spin up a transient container from a freshly-built image and probe
+# GET /health. Only returns 0 (success) when we get HTTP 200 and the
+# response contains the expected commit hash. Takes the image tag and
+# the expected short commit hash. The container runs on an ephemeral
+# mapped port so we never conflict with the production gateway.
+health_check_image() {
+  local image_tag="$1"
+  local expected_commit="$2"
+  local health_port="$3"
+  local container_name="${4:-custos-gateway-healthcheck}"
+
+  # Clean up any leftover from a previous interrupted run.
+  docker rm -f "$container_name" >/dev/null 2>&1 || true
+
+  log "health-check: starting ${image_tag} on port ${health_port}..."
+  if ! docker run -d --rm \
+    --name "$container_name" \
+    -p "127.0.0.1:${health_port}:8787" \
+    "$image_tag" >/dev/null 2>&1; then
+    log "ERROR: health-check: failed to start container from ${image_tag}"
+    return 1
+  fi
+
+  # Wait up to 15 seconds for the container to respond.
+  local waited=0
+  local ok=1
+  while [ "$waited" -lt 15 ]; do
+    local resp
+    resp="$(curl -fsS --max-time 3 "http://127.0.0.1:${health_port}/health" 2>/dev/null)" && {
+      local commit_hash
+      commit_hash="$(printf '%s' "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('commit') or '')" 2>/dev/null)"
+      if [ -z "$expected_commit" ]; then
+        # No commit to compare — just verify the container responds.
+        ok=0
+        break
+      elif [ "$commit_hash" = "$expected_commit" ]; then
+        ok=0
+        break
+      fi
+      log "health-check: commit mismatch (got=${commit_hash} expected=${expected_commit}), waiting..."
+    }
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  # Clean up the transient container.
+  docker rm -f "$container_name" >/dev/null 2>&1 || true
+
+  if [ "$ok" -eq 0 ]; then
+    log "health-check: PASS (commit=${expected_commit})"
+    return 0
+  fi
+  log "ERROR: health-check: FAIL after ${waited}s - container did not respond with expected commit"
+  return 1
 }
 
 # ---- Main loop --------------------------------------------------------
@@ -289,6 +345,14 @@ while true; do
       continue
     }
 
+    # Health-check the new image before cutting traffic.
+    SHORT_HEAD="$(printf '%s' "$DEPLOYED_HEAD" | cut -c1-7)"
+    HEALTH_PORT=8788
+    if ! health_check_image "custos-gateway:local" "$SHORT_HEAD" "$HEALTH_PORT"; then
+      log "ERROR: health-check failed for ${DEPLOYED_HEAD}; old container kept running"
+      continue
+    fi
+
     if ! (
       cd "$COMPOSE_DIR" && \
         docker compose up -d --no-deps gateway
@@ -323,10 +387,24 @@ while true; do
 
     if ! (
       cd "$COMPOSE_DIR" && \
-        docker compose pull gateway && \
+        docker compose pull gateway
+    ) >>"$LOG" 2>&1; then
+      log "ERROR: docker compose pull failed; will retry on next poll"
+      continue
+    fi
+
+    # Health-check the newly pulled image before cutting traffic.
+    HEALTH_PORT=8788
+    if ! health_check_image "${IMAGE}:${TAG}" "" "$HEALTH_PORT"; then
+      log "ERROR: health-check failed for ${IMAGE}:${TAG}; old container kept running"
+      continue
+    fi
+
+    if ! (
+      cd "$COMPOSE_DIR" && \
         docker compose up -d --no-deps gateway
     ) >>"$LOG" 2>&1; then
-      log "ERROR: redeploy failed; will retry on next poll"
+      log "ERROR: docker compose up failed; will retry on next poll"
       continue
     fi
 
