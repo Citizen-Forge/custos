@@ -871,6 +871,15 @@ function renderProvidersPanel() {
   section.appendChild(rowPriority);
   section.appendChild(rowProbe);
   section.appendChild(modelsHint);
+  // The checkboxes populated by renderModelCheckboxes() live on this
+  // div. The auto-scan (preset switch) and manual Scan models button
+  // both call renderModelCheckboxes(modelCheckboxContainer, ...) which
+  // mutates its innerHTML — but until this div is attached to the
+  // section those mutations happen off-DOM and remain invisible. The
+  // count hint above is set via textContent on a real DOM node, which
+  // is why a scan visibly reports the right number but never shows the
+  // selector itself.
+  section.appendChild(modelCheckboxContainer);
   section.appendChild(row4);
   section.appendChild(row5);
 
