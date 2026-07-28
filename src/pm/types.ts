@@ -103,9 +103,6 @@ export interface CostProfile {
   /** True for locally-hosted or free-tier models -- the EM strongly prefers
    * these for low-complexity work even when they're slower. */
   free: boolean;
-  /** Null when unmetered. The EM avoids piling every ticket onto one
-   * rate-limited provider. */
-  requestsPerHour: number | null;
 }
 
 export interface AgentStats {

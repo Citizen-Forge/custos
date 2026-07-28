@@ -201,30 +201,21 @@ sub-prompts, and the devops contract could require an `awsRegion` field
 when target === "aws". Each of those is a real user feature, not
 schema cleanup.
 
-### `ModelRecord.requestsPerHour` ambiguity — `src/pm/types.ts:108`, `src/pm/model-registry.ts:47/92`, `ui/src/shared/types.ts:294`
+### `ModelRecord.requestsPerHour` ambiguity — DROPPED in follow-up commit
 
-| Surface | Reads |
-|---|---|
-| CostProfile (`src/pm/types.ts:108`) | ✗ declared; no `record.requestsPerHour` consumer anywhere |
-| ModelRecord (`src/pm/model-registry.ts:47`) —same field name, separate schema | ✗ declared; only the `requestsPerHour: null` default at `:92` is set |
-| ModelRecord mirror (`ui/src/shared/types.ts:294`) | ✗ declared; UI never reads it (admin stats endpoint returns the throttle stats, not the model-registry row) |
+**Status:** removed from `CostProfile` (`src/pm/types.ts`),
+`ModelRecord` (`src/pm/model-registry.ts`), the `ensureModel()` default,
+and the UI mirror (`ui/src/shared/types.ts`). The field had three
+schema mirrors and zero readers; the active per-provider rate limit
+moved to `ThrottledProvider.rpmLimit`
+(`src/providers/throttle.ts:108`) which carries the operator-facing
+signal (`rpmLimit: number | null`, `rateTokens: number | null` in
+`ThrottleStats`).
 
-**Verdict: orphaned field.** The "ambiguity" the audit was asked about
-was solved by a separate mechanism: `ThrottledProvider.rpmLimit`
-(`src/providers/throttle.ts:108`) — a per-provider token-bucket rate
-limiter that lands BEFORE the request is dispatched. The
-`requestsPerHour` field was the original design (rendered in the
-admin UI as a per-model rate cap) but was bypassed when the throttle
-moved to a token-bucket admission control. The schema kept the field
-for historical-shape reasons; nothing reads it.
-
-**Recommended follow-on (not this audit's job):**
-`delete requestsPerHour from CostProfile, ModelRecord (and its UI
-mirror), the default in `ensureModel`. Three schemas, 0 reads, 0
-external consumers — clean drop. The ThrottleStatsMonitor surface
-already exposes the active rate limit
-(`rpmLimit: number | null, rateTokens: number | null`), so the
-operator-facing rate-limit signal is not lost.
+See git history for the `<chore>` commit that removed all four
+declarations plus the `requestsPerHour: null` default in
+`ensureModel`. Recorded here so a future reviewer checking this audit
+ledger sees the resolution rather than re-hunting the orphan.
 
 ### `Emitterable` body kind — term-not-found
 

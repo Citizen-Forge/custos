@@ -43,8 +43,6 @@ export interface ModelRecord {
   unavailableUntil: number | null;
   /** Why it went unavailable, for the UI and the manager's prompt. */
   unavailableReason: string | null;
-  /** Requests per hour this provider tolerates, if known. */
-  requestsPerHour: number | null;
   updatedAt: number;
 }
 
@@ -89,7 +87,6 @@ export async function ensureModel(providerKey: string, model: string, config: Ga
     qaFailures: 0,
     unavailableUntil: null,
     unavailableReason: null,
-    requestsPerHour: null,
     updatedAt: Date.now(),
   });
 }

@@ -291,6 +291,5 @@ export interface ModelRecord {
   qaFailures: number;
   unavailableUntil: number | null;
   unavailableReason: string | null;
-  requestsPerHour: number | null;
   updatedAt: number;
 }
