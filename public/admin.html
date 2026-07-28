@@ -446,6 +446,64 @@ function enterEditRow(row, name, prov) {
     el("span", { class: "small", text: "interactive preempts background" }),
   ]));
 
+  // --- Embeddings URL (optional override) ---
+  // The runtime derives embeddings.baseUrl from this provider's
+  // baseUrl via a port/hostname heuristic (Ollama: strips /v1 and
+  // POSTs to /api/embeddings; everything else: keeps the base and
+  // POSTs to /embeddings). The override below wins outright — use it
+  // when the named provider is OpenAI-compat, when embeddings live
+  // on a separate host, or when the heuristic misfires for a custom
+  // server bolted onto the 11430-11440 port range. Test button
+  // confirms the runtime's effective URL responds to a real POST.
+  const embeddingUrlInput = el("input", { type: "text", value: prov.embeddingUrl ?? "", placeholder: "Auto-derived from base URL" });
+  const embedProbeBtn = el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Test embeddings", onclick: async () => {
+    embedProbeBtn.disabled = true;
+    const originalText = embedProbeBtn.textContent;
+    embedProbeBtn.textContent = "↻";
+    try {
+      // Save the override first so the probe endpoint sees it on
+      // runtime.config.providers -- otherwise a probe without Save
+      // is testing the OLD config, which is misleading UX. Reload
+      // happens after the probe so the user sees the current state.
+      await api(`/admin/api/providers/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        body: {
+          baseUrl: urlInput.value,
+          costType: costTypeSelect.value,
+          models: (prov.models || []).map((m) => ({ name: m.name, enabled: m.enabled })),
+          embeddingUrl: embeddingUrlInput.value || null,
+        },
+      });
+      const result = await api(`/admin/api/providers/${encodeURIComponent(name)}/probe-embeddings`, { method: "POST" });
+      if (result.ok) {
+        embedProbeBtn.textContent = "✓ responding";
+        embedProbeBtn.style.color = "var(--ok)";
+        embedProbeBtn.title = `resolved to ${result.host}${result.picked ?? ""} via ${result.plan.reason}`;
+      } else {
+        embedProbeBtn.textContent = "✕ failed";
+        embedProbeBtn.style.color = "var(--danger)";
+        const errs = (result.tried || []).map((t) => `HTTP ${t.status} ${t.statusText} @${t.path}`).join(", ");
+        embedProbeBtn.title = `tried ${result.host}: ${errs}`;
+      }
+    } catch (err) {
+      embedProbeBtn.textContent = "✕";
+      embedProbeBtn.style.color = "var(--danger)";
+      embedProbeBtn.title = err.message;
+    }
+    setTimeout(() => {
+      embedProbeBtn.disabled = false;
+      embedProbeBtn.textContent = originalText;
+      embedProbeBtn.style.color = "";
+      embedProbeBtn.title = "";
+    }, 4000);
+  }});
+  form.appendChild(el("div", { class: "row" }, [
+    el("label", { text: "Embeddings URL" }),
+    embeddingUrlInput,
+    embedProbeBtn,
+    el("span", { class: "small", text: "blank = auto-derived (Ollama: /api/embeddings, others: /embeddings at base); tested against the configured embeddings global agent's per-agent override" }),
+  ]));
+
   form.appendChild(el("p", { class: "small", text: "Per-model pricing (for metered providers, so per-token cost can be recorded against the project budget)." }));
   const inputPriceInput = el("input", { type: "text", placeholder: "$ per 1M input tokens", value: prov.pricing ? String(prov.pricing.inputPerMillion) : "" });
   const outputPriceInput = el("input", { type: "text", placeholder: "$ per 1M output tokens", value: prov.pricing ? String(prov.pricing.outputPerMillion) : "" });
@@ -485,6 +543,7 @@ function enterEditRow(row, name, prov) {
         maxConcurrent: throttle,
         rpmLimit: rpmVal,
         priority: prioritySelect.value,
+        embeddingUrl: embeddingUrlInput.value || null,
       },
     }), "Provider saved");
   };
@@ -859,6 +918,7 @@ function renderProvidersPanel() {
           maxConcurrent: throttle,
           rpmLimit: rpmVal,
           priority: prioritySelect.value,
+          embeddingUrl: embeddingUrlInput.value || null,
         },
       }), "Provider saved");
     }}),
@@ -869,6 +929,7 @@ function renderProvidersPanel() {
   section.appendChild(rowModels);
   section.appendChild(rowThrottle);
   section.appendChild(rowPriority);
+  section.appendChild(rowEmbedding);
   section.appendChild(rowProbe);
   section.appendChild(modelsHint);
   // The checkboxes populated by renderModelCheckboxes() live on this

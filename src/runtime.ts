@@ -7,6 +7,7 @@ import { loadConfig, type GatewayConfig } from "./config.js";
 import type { Provider } from "./providers/types.js";
 import type { EmbeddingConfig } from "./memory/embeddings.js";
 import { getGlobalAgent } from "./pm/global-agents.js";
+import { resolveEmbeddingHost } from "./providers/embedding-url.js";
 
 /** Per-provider runtime stats, used by the admin endpoint, the periodic
  * stats logger, and the threshold-alert monitor. Extends ThrottleStats
@@ -191,8 +192,10 @@ export class Runtime {
    * `EmbeddingConfig` from it. Called from `reload()` automatically
    * (so a fresh config picks up the embeddings agent the user just
    * configured) and explicitly from places that mutate the agents
-   * collection directly (the global-agent PUT route when commit 3
-   * lands). Idempotent — safe to call repeatedly. */
+   * collection directly (the global-agent PUT route in commit 4 of
+   * the global-agent split, which mutates `agent.embeddingBaseUrl`
+   * alongside the embeddings row). Idempotent — safe to call
+   * repeatedly. */
   async refreshEmbedding(): Promise<void> {
     const agent = await getGlobalAgent("embeddings");
     if (!agent) {
@@ -205,22 +208,34 @@ export class Runtime {
       this.embedding = null;
       return;
     }
-    // URL derivation:
-    //   1. Explicit `embeddingBaseUrl` on the agent wins — covers custom
-    //      Ollama hosts and providers that don't follow either convention.
-    //   2. "ollama" is its own convention: chat is at /v1/chat/completions
-    //      but embeddings is at /api/embeddings on the bare origin. Detect
-    //      by providerKey so the path is unambiguous and doesn't need the
-    //      chat path's `/v1` strip to be reversed elsewhere.
-    //   3. Anything else follows OpenAI-compat: `{baseUrl}/embeddings`.
-    let baseUrl: string;
-    if (agent.embeddingBaseUrl) {
-      baseUrl = agent.embeddingBaseUrl;
-    } else if (agent.providerKey === "ollama") {
-      baseUrl = providerDef.baseUrl.replace(/\/v1\/?$/, "");
-    } else {
-      baseUrl = providerDef.baseUrl.replace(/\/$/, "");
-    }
-    this.embedding = { baseUrl, model: agent.model };
+    // The full URL-resolution-rule chain lives in
+    // `src/providers/embedding-url.ts` so the admin probe endpoint and
+    // this runtime derive the same host for any given config. Three
+    // inputs in priority order:
+    //   1. `agent.embeddingBaseUrl` (set on the global agent) — explicit
+    //      per-agent override; wins outright.
+    //   2. `providerDef.embeddingUrl` (set on the named provider) —
+    //      provider-level override; useful when pointing the embeddings
+    //      agent at a provider whose chat baseUrl is on a non-default
+    //      port or protocol.
+    //   3. URL-shape heuristic — baseUrl with port 11430-11440 or
+    //      hostname containing "ollama" implies Ollama's native
+    //      /api/embeddings path on the bare origin (the chat path's
+    //      /v1 prefix is stripped for the embeddings target). Anything
+    //      else is OpenAI-compat and the consumer falls through to
+    //      whatever the named provider exposes.
+    // The consumer at `src/memory/embeddings.ts` is Ollama-shaped: it
+    // always POSTs to `${baseUrl}/api/embeddings` with `{model, prompt}`.
+    // OpenAI-compat embeddings need an explicit `providerDef.embeddingUrl`
+    // pointed at the right base — the helper's `providerEmbeddingUrl`
+    // path is the only way through for non-Ollama providers today.
+    this.embedding = {
+      baseUrl: resolveEmbeddingHost({
+        agentOverride: agent.embeddingBaseUrl,
+        providerEmbeddingUrl: providerDef.embeddingUrl,
+        providerBaseUrl: providerDef.baseUrl,
+      }),
+      model: agent.model,
+    };
   }
 }

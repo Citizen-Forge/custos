@@ -68,6 +68,7 @@ export async function describeProviders(runtime: Runtime) {
         name,
         {
           baseUrl: def.baseUrl,
+          embeddingUrl: def.embeddingUrl ?? null,
           costType: def.costType,
           models: def.models,
           pricing: firstEnabled?.pricing ?? null,

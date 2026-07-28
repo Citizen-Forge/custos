@@ -3,13 +3,15 @@ import type { Runtime } from "../runtime.js";
 import type { PricingConfig } from "../providers/spend-tracker.js";
 import type { Priority } from "../providers/types.js";
 import { findInstanceUsages, updateConfig } from "./admin-shared.js";
+import { planEmbeddingProbe, resolveEmbeddingHost } from "../providers/embedding-url.js";
+import { getGlobalAgent } from "../pm/global-agents.js";
 
 export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): void {
   // -- Provider instances (new providers shape) --------------------------
 
   app.put("/admin/api/providers/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, priority } = req.body as {
+    const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, priority, embeddingUrl } = req.body as {
       baseUrl: string;
       costType: "free" | "subscription" | "metered";
       models: { name: string; enabled: boolean; pricing?: PricingConfig | null }[];
@@ -17,6 +19,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       maxConcurrent?: number | null;
       rpmLimit?: number | null;
       priority?: Priority | null;
+      embeddingUrl?: string | null;
     };
     if (!baseUrl || !models?.length) {
       reply.code(400);
@@ -36,6 +39,17 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       reply.code(400);
       return { error: `priority must be "interactive", "background", or null (got ${JSON.stringify(priority)})` };
     }
+    if (embeddingUrl !== undefined && embeddingUrl !== null && embeddingUrl !== "") {
+      try {
+        // Lightweight parse signal: URL constructor catches obvious typos.
+        // The Admin UI also has a "Probe" button so a user can confirm
+        // reachability before Save clicks take effect.
+        new URL(embeddingUrl);
+      } catch {
+        reply.code(400);
+        return { error: `embeddingUrl "${embeddingUrl}" is not a valid URL` };
+      }
+    }
     await updateConfig(runtime, (cfg) => ({
       ...cfg,
       providers: {
@@ -48,6 +62,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
           maxConcurrent: maxConcurrent ?? undefined,
           rpmLimit: rpmLimit ?? undefined,
           priority: priority ?? undefined,
+          embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
         },
       },
     }));
@@ -89,6 +104,65 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
     }
   });
 
+  /** Proxied embeddings health check. Reads what the runtime WOULD use
+   *  for `runtime.embedding.baseUrl` for this provider (with the current
+   *  embeddings global agent's per-agent override applied on top), then
+   *  POSTs a trivial body to the candidate path the heuristic picked
+   *  and reports the upstream's response. Returns the resolution plan
+   *  alongside the live result so a "✓ responding" UI tick matches
+   *  what the runtime will actually do on the next refreshEmbedding. */
+  app.post("/admin/api/providers/:name/probe-embeddings", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const provider = runtime.config.providers?.[name];
+    if (!provider) { reply.code(404); return { error: `provider "${name}" not found` }; }
+    const embeddingAgent = await getGlobalAgent("embeddings");
+    const plan = planEmbeddingProbe({
+      agentOverride: embeddingAgent?.embeddingBaseUrl,
+      providerEmbeddingUrl: provider.embeddingUrl,
+      providerBaseUrl: provider.baseUrl,
+    });
+    // Pick a model to probe with -- first enabled model, else just the
+    // provider name as a generic read; an Ollama server is happy with a
+    // model name it has loaded, but our heuristic shouldn't 4xx on a
+    // name mismatch (that's a runtime concern, not a config-concern).
+    const probeModel = provider.models.find((m) => m.enabled)?.name ?? provider.models[0]?.name ?? "test";
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
+    const tries: Array<{
+      path: string;
+      shape: "ollama" | "openai-compat";
+      status: number;
+      statusText: string;
+      ok: boolean;
+    }> = [];
+    for (const candidate of plan.candidates) {
+      const url = `${plan.host}${candidate.path}`;
+      const body = candidate.shape === "ollama"
+        ? JSON.stringify({ model: probeModel, prompt: "ping" })
+        : JSON.stringify({ model: probeModel, input: "ping" });
+      try {
+        const res = await fetch(url, { method: "POST", headers, body, signal: AbortSignal.timeout(8_000) });
+        tries.push({
+          path: candidate.path,
+          shape: candidate.shape,
+          status: res.status,
+          statusText: res.statusText,
+          ok: res.ok,
+        });
+      } catch (err) {
+        tries.push({
+          path: candidate.path,
+          shape: candidate.shape,
+          status: 0,
+          statusText: (err as Error).message,
+          ok: false,
+        });
+      }
+    }
+    const success = tries.find((t) => t.ok);
+    return { plan, host: plan.host, tried: tries, ok: Boolean(success), picked: success?.path ?? null };
+  });
+
   /** Toggle a single model's enabled state without opening the edit form. */
   app.patch("/admin/api/providers/:name/models/:model", async (req, reply) => {
     const { name, model: modelName } = req.params as { name: string; model: string };
@@ -117,7 +191,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
 
   app.put("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, model, apiKey, pricing, maxConcurrent, priority, rpmLimit } = req.body as {
+    const { baseUrl, model, apiKey, pricing, maxConcurrent, priority, rpmLimit, embeddingUrl } = req.body as {
       baseUrl: string;
       model: string;
       apiKey?: string | null;
@@ -125,6 +199,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       maxConcurrent?: number | null;
       rpmLimit?: number | null;
       priority?: Priority | null;
+      embeddingUrl?: string | null;
     };
     if (!baseUrl || !model) {
       reply.code(400);
@@ -144,6 +219,14 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       reply.code(400);
       return { error: `priority must be "interactive", "background", or null (got ${JSON.stringify(priority)})` };
     }
+    if (embeddingUrl !== undefined && embeddingUrl !== null && embeddingUrl !== "") {
+      try {
+        new URL(embeddingUrl);
+      } catch {
+        reply.code(400);
+        return { error: `embeddingUrl "${embeddingUrl}" is not a valid URL` };
+      }
+    }
     const costType = pricing ? "metered" : "free";
     await updateConfig(runtime, (cfg) => ({
       ...cfg,
@@ -157,6 +240,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
           maxConcurrent: maxConcurrent ?? undefined,
           rpmLimit: rpmLimit ?? undefined,
           priority: priority ?? undefined,
+          embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
         },
       },
     }));

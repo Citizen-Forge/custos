@@ -79,6 +79,16 @@ export interface ProviderDef {
   priority?: Priority;
   /** Emit late vendor metadata deltas in streaming responses. */
   emitLateMetadataDelta?: boolean;
+  /** Explicit embeddings-endpoint override (full URL). When set, the
+   *  runtime uses it for `runtime.embedding.baseUrl` instead of the
+   *  port-11434 / hostname-`ollama` heuristic. Use this for providers
+   *  that don't follow either default convention — e.g. an OpenAI-
+   *  compat provider whose embeddings live at `/v1/embeddings` rather
+   *  than Ollama's native `/api/embeddings`, or a remote embedding
+   *  service colocated on a non-default port. The per-agent override on
+   *  the global embeddings agent's `embeddingBaseUrl` field still wins
+   *  over this when both are present. */
+  embeddingUrl?: string;
 }
 
 export interface GatewayConfig {
