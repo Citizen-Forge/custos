@@ -12,7 +12,7 @@
     "login": "tsx src/auth/login-cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/providers/openai-translate.test.ts src/providers/fixtures.test.ts src/providers/throttle.test.ts src/sdk-roundtrip.test.ts",
-    "test:matrix": "tsx --test src/providers/fixtures.test.ts",
+    "test:matrix": "tsx --test src/union-audit.test.ts src/providers/fixtures.test.ts",
     "test:gemini": "node scripts/run-vendor-test.mjs gemini",
     "test:openrouter": "node scripts/run-vendor-test.mjs openrouter",
     "test:bedrock": "node scripts/run-vendor-test.mjs bedrock",
