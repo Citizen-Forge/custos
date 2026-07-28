@@ -495,7 +495,14 @@ function renderProvidersPanel() {
   // OAuth row
   const oauthRow = el("div", { class: "row", style: "margin-bottom: 6px;" });
   const oauthBadge = anthropic.oauth.connected
-    ? el("span", { class: "badge ok", style: "font-size: 11px;", text: `OAuth: ${anthropic.oauth.source === "claude-code" ? "Claude Code session" : "Custos login"}` })
+    ? el("span", {
+        class: "badge ok",
+        style: "font-size: 11px;",
+        text: "OAuth: Connected",
+        title: anthropic.oauth.source === "claude-code"
+          ? "Token is reused from an existing local OAuth login (skipped Custos's own OAuth flow)."
+          : "Token was issued through Custos's own OAuth flow -- valid until expiry.",
+      })
     : el("span", { class: "badge off", style: "font-size: 11px;", text: "OAuth: Not connected" });
   oauthRow.appendChild(oauthBadge);
   if (anthropic.oauth.connected) {
@@ -877,7 +884,7 @@ function renderProvidersPanel() {
 function renderProjectsPanel() {
   const section = el("section", { class: "panel" });
   section.appendChild(el("h2", { text: "Projects" }));
-  section.appendChild(el("p", { class: "desc", text: "Each project is a workspace folder. Chats run \"claude\" in a real terminal inside this container, scoped to that folder, and stream over WebSocket -- steer them from your phone, another computer, or the Custos desktop app. A chat's connect link is a bearer credential: anyone with it can type into that session. Don't share it, and don't expose this port past a network you trust." }));
+  section.appendChild(el("p", { class: "desc", text: "Each project is a workspace folder. A chat is a connectable session for that workspace -- open it from your phone, another computer, or the Custos desktop app to stream turns against the project's folder. The connect link is a bearer credential: anyone with it can type into that session. Don't share it, and don't expose this port past a network you trust." }));
 
   // New project button
   section.appendChild(el("div", { class: "row" }, [
