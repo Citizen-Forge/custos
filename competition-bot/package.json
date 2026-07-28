@@ -1,0 +1,41 @@
+{
+  "name": "competition-bot",
+  "version": "1.0.0",
+  "description": "Autonomous competition entering bot with headless Chrome and LLM-powered form filling",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/bot/cta-match.test.ts",
+    "dev:ui": "cd admin-ui && npm run dev",
+    "build:ui": "cd admin-ui && npm run build",
+    "setup": "npm install && cd admin-ui && npm install && cd .. && npm run build:ui",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "node-cron": "^3.0.3",
+    "openai": "^4.77.0",
+    "puppeteer": "^23.11.1",
+    "sql.js": "^1.11.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/node-cron": "^3.0.11",
+    "@types/sql.js": "^1.4.9",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
