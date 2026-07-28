@@ -314,7 +314,6 @@ async function loadState() {
     project.pmLastRunAt = settingsResp.settings.pmLastRunAt ?? null;
     project.paused = settingsResp.settings.paused ?? false;
   }
-  state.recentConversations = (await api("/admin/api/remote/conversations")).conversations;
   render();
 }
 
@@ -1067,26 +1066,6 @@ function renderProjectsPanel() {
     section.appendChild(table);
   }
 
-  // Recent conversations section
-  const conversations = state.recentConversations || [];
-  if (conversations.length > 0 && projects.length > 0) {
-    section.appendChild(el("hr", { class: "sep" }));
-    section.appendChild(el("p", { class: "small", text: "Resume a recent conversation into a project -- Claude opens with a summary of where it left off (not a literal replay; see README)." }));
-    const list = el("div", { class: "priority-list" });
-    for (const conv of conversations) {
-      const when = new Date(conv.lastActiveAt).toLocaleString();
-      const select = el("select", {}, projects.map((p) => el("option", { value: p.id, text: p.name })));
-      list.appendChild(el("div", { class: "priority-item" }, [
-        el("span", { class: "small", text: `${conv.preview || "(no preview)"} -- ${when} (${conv.exchangeCount} exchanges)` }),
-        select,
-        el("button", { class: "primary", text: "Resume into project", onclick: () => reloadAfter(
-          api(`/admin/api/projects/${select.value}/chats`, { method: "POST", body: { resumeConversationId: conv.id } }), "Chat started"
-        )}),
-      ]));
-    }
-    section.appendChild(list);
-  }
-
   return section;
 }
 
@@ -1128,34 +1107,6 @@ function renderSecurityPanel() {
     if (!current.value || !next.value) return showToast("Fill in both fields", true);
     reloadAfter(api("/admin/api/change-password", { method: "POST", body: { currentPassword: current.value, newPassword: next.value } }), "Password changed");
   }})]));
-
-  section.appendChild(el("hr", { class: "sep" }));
-  section.appendChild(el("p", { class: "small", text: "Client API key -- required on every /v1/messages, /hooks/*, and /memory/search request, sent as the x-api-key header (the same header Claude Code already sends for real Anthropic API keys -- Custos checks this instead of forwarding it anywhere). Fails closed: until you generate one, those endpoints reject everything. Set the same value as ANTHROPIC_API_KEY on any Claude Code install pointed at this proxy." }));
-
-  if (state.clientApiKey) {
-    const keyRow = el("div", { class: "row" });
-    const keyInput = el("input", { type: "text", value: state.clientApiKey });
-    keyInput.readOnly = true;
-    keyRow.appendChild(keyInput);
-    keyRow.appendChild(el("button", { text: "Copy", onclick: () => { navigator.clipboard.writeText(state.clientApiKey); showToast("Copied"); } }));
-    section.appendChild(keyRow);
-    section.appendChild(el("div", { class: "row" }, [
-      el("span", { class: "badge ok", text: "Enforced" }),
-      el("button", { text: "Regenerate", onclick: () => {
-        if (!confirm("This invalidates the current key immediately -- any Claude Code install still using the old one will start getting 401s until you update it. Continue?")) return;
-        reloadAfter(api("/admin/api/client-key/generate", { method: "POST" }), "New key generated");
-      }}),
-      el("button", { class: "danger", text: "Clear key (blocks all proxy traffic)", onclick: () => {
-        if (!confirm("This immediately blocks /v1/messages, /hooks/*, and /memory/search for everyone, including your own Claude Code installs, until you generate a new key. Continue?")) return;
-        reloadAfter(api("/admin/api/client-key/clear", { method: "POST" }), "Key cleared -- proxy traffic now blocked");
-      }}),
-    ]));
-  } else {
-    section.appendChild(el("div", { class: "row" }, [
-      el("span", { class: "badge off", text: "Not set -- all proxy traffic is blocked" }),
-      el("button", { class: "primary", text: "Generate key", onclick: () => reloadAfter(api("/admin/api/client-key/generate", { method: "POST" }), "Key generated") }),
-    ]));
-  }
 
   return section;
 }
