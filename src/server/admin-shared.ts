@@ -29,13 +29,23 @@ export function maskApiKey(key: string): string {
 }
 
 export function findInstanceUsages(config: GatewayConfig, name: string): string[] {
-  // Only walk `config.tasks` -- per-turn complexity routing was deprecated
-  // with the pivot and is no longer mutable through the admin UI, so any
-  // tier reference a provider ends up holding is unrecoverable user state
-  // (not a real consumer). Walking it here locked deletes in a way a user
-  // could not satisfy.
+  // Walk only task kinds the runtime actually invokes. Of the four in
+  // `TaskKind`:
+  //   - general         -- /v1/messages non-pinned path  (live)
+  //   - permissionClassifier -- permissions classifier (live)
+  //   - memoryCurator   -- memory curator ingest        (live)
+  //   - complexityClassifier -- the per-turn classifier; the runtime
+  //     branch that called this was dropped in 5643718 when complexity
+  //     routing left the schema, so no caller invokes
+  //     `router.complete("complexityClassifier", ...)`. An admin path to
+  //     populate it (PUT /admin/api/tasks/complexityClassifier) still
+  //     exists for power users, so the field is reachable from outside
+  //     but unrecoverable from inside the operator flow the admin UI
+  //     exposes -- same shape as the dropped complexityRouting.tiers gate.
+  //     Walking it here would block a delete the user has no UI to clear.
   const usages: string[] = [];
   for (const [taskKind, entries] of Object.entries(config.tasks)) {
+    if (taskKind === "complexityClassifier") continue;
     if (entries.some((e) => e.provider === name)) usages.push(`task:${taskKind}`);
   }
   return usages;
