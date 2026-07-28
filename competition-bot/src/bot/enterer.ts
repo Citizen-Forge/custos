@@ -348,20 +348,41 @@ async function submitForm(
       return result;
     },
 
-    // Strategy 6b: Third-party "Click here to enter <prize>" CTAs.
+    // Strategy 6: Third-party "Click here to enter <prize>" CTAs.
     // Customerfocus.co.uk (Take a Break Competitions), Loquax, MSE and
     // similar aggregators wrap entry submissions in plain <a> tags inside
     // the article container — not styled as buttons nor input[type=submit].
     // Earlier strategies only catch <button>, <a class="btn">, [role=button],
     // or input[type=button], so they miss these plain-anchor CTAs and the
-    // enterer dies with "Could not find submit button". Adds them explicitly
-    // to the candidate pool so the "click here to enter" link on the page
-    // gets matched and clicked.
+    // enterer dies with "Could not find submit button".
+    //
+    // Two CDP round-trips total (not N per-handle round-trips): the first
+    // harvests candidate text + href across all scope roots in one go; the
+    // match runs Node-side through matchesEntryCta (unit-tested, no need
+    // to re-inline the matcher in the browser context); the second
+    // round-trip re-traverses in the SAME order and clicks the winner by
+    // index, but only if the element at that index still has the same
+    // visible text — a DOM-shift self-check that prevents the click from
+    // firing on the wrong anchor if the page mutated between scans (e.g.
+    // late hydration, ad injection). Total cost ≈ 2 round-trips × ~30ms
+    // ≈ 60ms rather than N handles × 30ms (600ms–1s on a 20-anchor
+    // customerfocus post).
     async () => {
-      // Scope to article containers so plain anchors in nav/footer/sidebar
-      // (which also tend to contain verbs like "Contact" or "Submit a
-      // recipe") don't false-positive on the CTA matcher.
-      const SCOPE_SELECTORS = [
+      // Article-container scope. Plain anchors in nav/footer/sidebar
+      // (which also contain verbs like "Contact" or "Submit a recipe")
+      // don't appear in any of these roots, so they're filtered out
+      // structurally before the matcher runs.
+      //
+      // The list covers:
+      //   - Standard: <main>, <article>, [role=main]
+      //   - WordPress (WordPress.org themes + Twenty*): .entry-content,
+      //     .post-content, .post, .content, .single-content
+      //   - Ghost + a number of WP magazine themes: .post-content, .post
+      //   - Newspaper-style themes: .article-body, .article-content,
+      //     [itemprop="articleBody"]
+      //   - Webflow: .w-richtext, .rich-text
+      //   - Generic CMS fallbacks: .page, .content
+      const SCOPE_SELECTORS: readonly string[] = [
         'main',
         'article',
         '[role="main"]',
@@ -370,28 +391,99 @@ async function submitForm(
         '.post',
         '.content',
         '.page',
+        '.article-body',
+        '.article-content',
+        '[itemprop="articleBody"]',
+        '.single-content',
+        '.w-richtext',
+        '.rich-text',
       ];
-      const handles = await page.$$(
-        SCOPE_SELECTORS.map((s) => `${s} a`).join(', ') + ', a.btn, a.button',
-      );
-      for (const h of handles) {
-        const info = await h.evaluate((el: Element) => {
-          const a = el as HTMLAnchorElement;
-          return {
-            text: (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim(),
-            href: a.getAttribute('href') || '',
-          };
-        });
-        if (!info.text) continue;
-        if (matchesEntryCta(info.text.toLowerCase())) {
-          await h.click();
-          botEvents.info(`  🎯 Clicked entry CTA: "${info.text}" → ${info.href}`);
-          await new Promise((r) => setTimeout(r, 2000));
-          return true;
+
+      // 1st round-trip: collect candidate (text, href) pairs in document
+      // order. Empty-text candidates are skipped here so the index sequence
+      // stays consistent with the click traversal below.
+      const candidates = await page.evaluate((SCOPES: readonly string[]) => {
+        const out: Array<{ text: string; href: string }> = [];
+        for (const sel of SCOPES) {
+          const roots = document.querySelectorAll(sel);
+          for (const root of Array.from(roots)) {
+            const els = root.querySelectorAll('a, button');
+            for (const el of Array.from(els)) {
+              const text = ((el as HTMLElement).innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+              if (!text) continue;
+              out.push({ text, href: el.getAttribute('href') || '' });
+            }
+          }
+        }
+        return out;
+      }, SCOPE_SELECTORS);
+
+      // Node-side: find the first index where the matcher accepts the
+      // visible text. This is where the unit-tested matcher logic runs,
+      // not in the browser context — keeps the matcher testable.
+      let winnerIdx = -1;
+      for (let i = 0; i < candidates.length; i++) {
+        if (matchesEntryCta(candidates[i].text.toLowerCase())) {
+          winnerIdx = i;
+          break;
         }
       }
-      botEvents.info('  ℹ️ No third-party entry CTA matched');
-      return false;
+
+      if (winnerIdx < 0) {
+        botEvents.info('  ℹ️ No third-party entry CTA matched');
+        return false;
+      }
+
+      // 2nd round-trip: re-traverse the scopes in the SAME order and
+      // click the element whose index matches the winner, gated on the
+      // currently-observed visible text matching what step 1 captured.
+      // If the page mutated between step 1's collection and step 2's
+      // click (hydration, lazy ad injection, the page-builder rewriting
+      // anchor text), the index often points at a different element;
+      // firing .click() at the wrong anchor is unsafe, so we abort.
+      const expectedText = candidates[winnerIdx].text;
+      const winner = await page.evaluate(({ SCOPES, idx, expectedText }: { SCOPES: readonly string[]; idx: number; expectedText: string }) => {
+        let cur = 0;
+        for (const sel of SCOPES) {
+          const roots = document.querySelectorAll(sel);
+          for (const root of Array.from(roots)) {
+            const els = root.querySelectorAll('a, button');
+            for (const el of Array.from(els)) {
+              const text = ((el as HTMLElement).innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+              if (!text) continue;
+              if (cur === idx) {
+                if (text !== expectedText) {
+                  // DOM-shift self-check failed. Don't fire the click —
+                  // surfacing the diagnostic to the activity feed happens
+                  // back in Node so the botEvents bus sees the actual
+                  // observed text.
+                  return { clicked: false, text, href: '', mismatch: true };
+                }
+                (el as HTMLElement).click();
+                return { clicked: true, text, href: el.getAttribute('href') || '' };
+              }
+              cur++;
+            }
+          }
+        }
+        return { clicked: false, text: '', href: '', mismatch: false };
+      }, { SCOPES: SCOPE_SELECTORS, idx: winnerIdx, expectedText });
+
+      if (winner.mismatch) {
+        botEvents.info(
+          `  ⚠️ DOM shifted during CTA scan — index ${winnerIdx} now matches "${winner.text}", expected "${expectedText}". Skipping click.`,
+        );
+        return false;
+      }
+
+      if (!winner.clicked) {
+        botEvents.info('  ⚠️ Entry CTA index out of range (DOM shifted beyond scans)');
+        return false;
+      }
+
+      botEvents.info(`  🎯 Clicked entry CTA: "${winner.text.trim()}" → ${winner.href}`);
+      await new Promise((r) => setTimeout(r, 2000));
+      return true;
     },
 
     // Strategy 7: LLM fallback — ask the model what to do
