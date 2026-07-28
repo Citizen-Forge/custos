@@ -16,8 +16,9 @@ export interface ChatRecord {
   title: string;
   kind: ChatKind;
   createdAt: number;
-  /** Set when the user explicitly stops the session. A live PTY dying for
-   * any other reason (crash, container restart) leaves this null -- the
+  /** Set when the user explicitly stops the session. A running turn dying
+   * for any other reason (the claude -p child crashes or the container
+   * restarts mid-turn) leaves this null -- the
    * chat's actual liveness is always read from RemoteSessionManager, not
    * this field, so a stale null here just means "not known to have been
    * cleanly stopped," not "still running." */

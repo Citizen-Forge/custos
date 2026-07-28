@@ -128,7 +128,8 @@ export function registerProjectRoutes(
   app.delete("/admin/api/projects/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     // Stop any live chats first -- deleting the tracking entry shouldn't
-    // leave an orphaned PTY nothing can reach or stop anymore.
+    // leave an orphaned turn mid-run or connected WebSocket clients with
+    // nothing to disconnect them.
     for (const chat of await chats.listChats(id)) {
       manager.stop(chat.id);
       await chats.deleteChat(chat.id);
