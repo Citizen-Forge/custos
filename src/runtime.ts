@@ -135,61 +135,21 @@ export interface FallbackSetEntryHealth {
    *  admin endpoint reads from it. Survives config reloads -- a
    *  reload that swaps the GlobalQueue preserves the log so the
    *  operator can see activity that spans the reload boundary. */
-  readonly activityLog = new ActivityLog();
-  /** Global queue replaces per-instance ThrottledProviders for
-   *  centralized concurrency/RPM management and fallback-set-aware
-   *  dispatching. Created on reload, used by completeWithFallback and
-   *  completeViaProvider. */
+  readonly activityLog = new ActivityLog();  /** Global queue replaces per-instance ThrottledProviders for
+   *  centralized concurrency/RPM management. Created on reload,
+   *  read directly by callers via the `globalQueue` accessor: the
+   *  `/v1/messages` handler calls `queue.complete` with a chain it
+   *  constructs inline from the request alias, and the curator /
+   *  classifier paths go through `Runtime.completeViaProvider`
+   *  which wraps the same call with a single-entry chain.
+   *  No Runtime-level wrapper sits between callers and the queue —
+   *  the queue is the dispatch surface. */
   private queue: GlobalQueue | null = null;
   /** Unsubscribe handles for the ProviderStateMap → model-registry
    *  availability listener chain. Re-bound on every reload so the
    *  previous bindings (in case anyone else has registered listeners)
    *  don't leak across reloads. */
   private availabilityUnsubs: Array<() => void> = [];
-
-  /** Best-guess default model for a fallback set (first entry's model).
-   *  Used by the /v1/messages handler to set `body.model` before the
-   *  request enters the GlobalQueue. The GlobalQueue may override this
-   *  via `modelOverride` if it dispatches to a different entry, but the
-   *  body field needs at least a sensible value for the ingestion
-   *  pipeline (which reads `body.model` pre-routing) and for providers
-   *  that don't support `modelOverride` (none configured today, but
-   *  defensively). */
-  fallbackDefaultModel(setName: string): string {
-    return this.config.fallbackSets?.[setName]?.providers[0]?.model ?? "unknown";
-  }
-
-  /** Complete a request using a fallback set from the agent's config.
-   *  Resolves through the GlobalQueue, iterating the fallback set's
-   *  providers in order and using the first available one. The model
-   *  from each fallback entry is passed as modelOverride so the
-   *  provider uses the fallback set's chosen model rather than its
-   *  default. Falls back to the router's task-based routing when the
-   *  agent has no fallback set configured (backward compat). The
-   *  optional `context` carries project + agent metadata used to
-   *  attribute activity-log events back to the dispatcher (typically
-   *  the /v1/messages handler, which recovers the context from the
-   *  fallback alias suffix). */
-  async completeWithFallback(
-    fallbackSetName: string,
-    request: AnthropicMessagesRequest,
-    options?: CompleteOptions,
-    context?: QueueContext,
-  ): Promise<ProviderResponse & { providerName: string }> {
-    const set = this.config.fallbackSets?.[fallbackSetName];
-    if (!set || !set.providers.length) {
-      throw new Error(`Fallback set "${fallbackSetName}" is not configured or is empty`);
-    }
-    if (this.queue) {
-      return this.queue.complete(
-        set.providers.map((p) => ({ provider: p.provider, model: p.model })),
-        request,
-        options,
-        context,
-      );
-    }
-    throw new Error("GlobalQueue not initialized");
-  }
 
   /** Resolve a fallback set to the first available provider+model and
    *  acquire a slot. Checks ProviderStateMap for each provider in the
@@ -232,11 +192,11 @@ export interface FallbackSetEntryHealth {
    *  then send one request to that picked pair. Single-entry inline chain
    *  — no per-request failover; the curator / classifier paths retry on
    *  failure themselves if the response really didn't land. Returns the
-   *  same `{ ...response, providerName }` shape that
-   *  `completeWithFallback` returns so callers can swap from one to
-   *  the other with no call-shape changes. Mirrors the legacy
-   *  `router.completeWithEntries([{provider, priority:1}], ...)` shape
-   *  one-for-one — the priority resolution that used to live in the
+   *  same `{ ...response, providerName }` shape that `Runtime.completeViaProvider`
+   *  and the /v1/messages route handler discards (they all flow through
+   *  GlobalQueue.complete which stamps providerName onto every response).
+   *  Mirrors the legacy `router.completeWithEntries([{provider, priority:1}], ...)`
+   *  shape one-for-one — the priority resolution that used to live in the
    *  router's per-entry loop is now explicitly passed via `options.priority`
    *  by each caller (`"background"` for the curator, `"interactive"`
    *  for the classifier). */
@@ -403,8 +363,7 @@ export interface FallbackSetEntryHealth {
     // (`config!: GatewayConfig;`) covered the silence. After the
     // curator+classifier drop, `Runtime.refreshEmbedding()` and
     // `Runtime.completeViaProvider(...)` read `this.config` from
-    // outside the reload scope (and so does `Runtime.fallbackDefaultModel`
-    // for each /v1/messages request); without this line those calls
+    // outside the reload scope; without this line those calls
     // receive `undefined` and `primaryPick(agent, undefined)` blows up
     // the boot with a TypeError that gives no hint that the root cause is
     // a missing assignment. The placement matters: BEFORE
@@ -424,9 +383,10 @@ export interface FallbackSetEntryHealth {
     // ProviderStateMap-owned queue now handles globally. After the drop
     // there's only the bare set — single source of truth for "which
     // providers can accept work right now" — and every dispatch surface
-    // (agents via `runtime.completeViaProvider`, global agents via
-    // `runtime.completeWithFallback`, /v1/messages via `runtime.globalQueue')
-    // reads from it.
+    // (agents via `runtime.completeViaProvider`, the /v1/messages handler
+    // via `runtime.globalQueue.complete` directly) reads from it.
+    // No intermediate wrapper sits between callers and the queue; the
+    // queue is the dispatch surface.
     const bareProviders: Record<string, Provider> = {};
     const stateMap = this.providerState;
 

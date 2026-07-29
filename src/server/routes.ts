@@ -146,8 +146,11 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       // The GlobalQueue will override this via modelOverride if it
       // dispatches to a different provider, but the body field needs
       // a real value for the ingestion pipeline and for providers
-      // that don't support modelOverride.
-      body.model = deps.runtime.fallbackDefaultModel(alias.fallbackSet);
+      // that don't support modelOverride. Inlined here so the routes
+      // handler owns its own dispatch shape end-to-end and doesn't
+      // reach back into Runtime for a chain-construction detail it
+      // already computed.
+      body.model = set.providers[0]?.model ?? "unknown";
       // Lift caller context (project, agent) from the alias suffix
       // so dispatch events land in the activity log attributed to
       // the right project/agent row. The fallback set name itself

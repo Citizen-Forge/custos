@@ -1,8 +1,9 @@
 // End-to-end integration test for fallback-set routing.
 //
 // Exercises the full chain:
-//   formatFallbackAlias → parseModelAlias → Runtime.completeWithFallback
-//   → GlobalQueue → provider dispatch with failover
+//   formatFallbackAlias → parseModelAlias →
+//     /v1/messages routes.ts builds FallbackTarget[] inline →
+//       GlobalQueue.complete → provider dispatch with failover
 //
 // Plus ProviderStateMap state verification after a 429, and a Fastify
 // inject test that confirms the /v1/messages handler sets x-custos-fallback.
@@ -283,72 +284,6 @@ describe("ProviderStateMap state after 429 in fallback flow", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Runtime.completeWithFallback integration
-// ---------------------------------------------------------------------------
-
-describe("Runtime.completeWithFallback integration", () => {
-  it("routes through the GlobalQueue with the correct fallback set", async () => {
-    // Create a Runtime-like setup: config with fallback sets, providers,
-    // and a GlobalQueue + ProviderStateMap.
-    const state = new ProviderStateMap();
-    state.register("gemini");
-    state.register("ollama");
-
-    const { provider: gemini } = makeControllableProvider("gemini");
-    const { provider: ollama } = makeControllableProvider("ollama");
-
-    const queue = new GlobalQueue({ gemini, ollama }, state);
-
-    // Simulate the same logic as Runtime.completeWithFallback.
-    const fallbackSets = {
-      complex: {
-        name: "Complex reasoning",
-        description: "For abstract reasoning",
-        providers: [
-          { provider: "gemini", model: "gemini-2.5-flash" },
-          { provider: "ollama", model: "qwen2.5:14b" },
-        ],
-      },
-    };
-
-    const set = fallbackSets["complex"];
-    const fallbackTargets = set.providers.map((p: { provider: string; model: string }) => ({
-      provider: p.provider,
-      model: p.model,
-    }));
-
-    const result = await queue.complete(fallbackTargets, ZERO_REQ);
-
-    assert.equal(result.providerName, "gemini", "first fallback entry was used");
-  });
-
-  it("falls through to second provider when first is unavailable in fallback set", async () => {
-    const state = new ProviderStateMap();
-    state.register("gemini", { maxConcurrent: 1 });
-    state.register("ollama");
-
-    // Saturate gemini's single slot so canAccept returns false.
-    const release = state.acquire("gemini");
-    assert.equal(state.canAccept("gemini"), false, "gemini saturated");
-
-    const { provider: gemini } = makeControllableProvider("gemini");
-    const { provider: ollama } = makeControllableProvider("ollama");
-    const queue = new GlobalQueue({ gemini, ollama }, state);
-
-    const fallbackTargets = [
-      { provider: "gemini", model: "gemini-2.5-flash" },
-      { provider: "ollama", model: "qwen2.5:14b" },
-    ];
-
-    const result = await queue.complete(fallbackTargets, ZERO_REQ);
-
-    assert.equal(result.providerName, "ollama", "fell through to ollama when gemini saturated");
-
-    release();
-  });
-});
-
-// ---------------------------------------------------------------------------
 // HTTP handler test via Fastify inject
 // ---------------------------------------------------------------------------
 
@@ -358,23 +293,23 @@ describe("HTTP /v1/messages fallback header", () => {
     // fallback aliases and sets the response header. The actual dispatch
     // is mocked because we don't want real network calls.
     //
-    // We create a minimal Runtime whose completeWithFallback resolves
-    // immediately with a fake response.
+    // We create a minimal Runtime whose GlobalQueue resolves a fake
+    // response. The route handler calls `runtime.globalQueue.complete(chain, ...)`, which the mock satisfies.
     const mockRuntime = {
-      completeWithFallback: async (_setName: string, _req: AnthropicMessagesRequest, _opts?: CompleteOptions) => ({
-        status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        body: new Blob([JSON.stringify({ content: [], model: "test" })]).stream(),
-        providerName: "mock-provider",
-      }),
-      fallbackDefaultModel: (_setName: string) => "gemini-2.5-flash",
+      globalQueue: {
+        complete: async (_chain: unknown, _req: AnthropicMessagesRequest, _opts?: CompleteOptions) => ({
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          body: new Blob([JSON.stringify({ content: [], model: "test" })]).stream(),
+          providerName: "mock-provider",
+        }),
+      },
       providerState: new ProviderStateMap(),
       spendTracker: {
         record: async () => {},
         projectSpend: () => ({ totalUsd: 0, budgetUsd: null }),
       },
       config: { fallbackSets: { complex: { providers: [{ provider: "gemini", model: "g" }] } } },
-      globalQueue: null,
     } as any;
 
     const app = Fastify();
@@ -406,14 +341,14 @@ describe("HTTP /v1/messages fallback header", () => {
 
   it("does NOT set x-custos-fallback for pinned custos:<provider>/<model> aliases", async () => {
     const mockRuntime = {
-      completeWithFallback: async () => ({
-        status: 200, headers: new Headers(), body: null, providerName: "mock",
-      }),
-      fallbackDefaultModel: () => "g",
+      globalQueue: {
+        complete: async () => ({
+          status: 200, headers: new Headers(), body: null, providerName: "mock",
+        }),
+      },
       providerState: new ProviderStateMap(),
       spendTracker: { record: async () => {}, projectSpend: () => ({ totalUsd: 0, budgetUsd: null }) },
       config: {},
-      globalQueue: null,
     } as any;
 
     const app = Fastify();
