@@ -67,6 +67,27 @@ export async function findInstanceUsages(name: string, runtime?: Runtime): Promi
   return usages;
 }
 
+/** Resolve an API key from a PUT/PATCH request body against the previously
+ *  stored value, preserving the existing key when the caller omits the field
+ *  (undefined) or sends an empty string (blank password field on save). Only
+ *  update when a non-empty string is provided, and only clear when `null` is
+ *  explicitly passed (the admin UI's separate "Clear" button).
+ *
+ *  All four call sites (provider-routes.ts new-provider + legacy PUT,
+ *  anthropic-routes.ts main + legacy PUT) previously duplicated this logic
+ *  inline — with a subtle divergence: the Anthropic handlers also checked
+ *  `apiKey === ""` while the provider handlers only checked `apiKey === undefined`.
+ *  This unified helper applies both guards so all callers behave identically.
+ *  See `provider-routes.ts` commit `a179e21` and `anthropic-routes.ts` commit
+ *  `51dcb10` for the original inline implementations. */
+export function resolveApiKey(
+  apiKey: string | null | undefined,
+  prevKey: string | undefined,
+): string | undefined {
+  if (apiKey === undefined || apiKey === "") return prevKey;
+  return apiKey || undefined;
+}
+
 export async function updateConfig(runtime: Runtime, mutate: (cfg: GatewayConfig) => GatewayConfig): Promise<GatewayConfig> {
   const next = mutate(runtime.config);
   await saveConfig(next);

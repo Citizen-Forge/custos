@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Runtime } from "../runtime.js";
 import type { PricingConfig } from "../providers/spend-tracker.js";
 import type { Priority } from "../providers/types.js";
-import { findInstanceUsages, updateConfig } from "./admin-shared.js";
+import { findInstanceUsages, resolveApiKey, updateConfig } from "./admin-shared.js";
 import { planEmbeddingProbe, resolveEmbeddingHost } from "../providers/embedding-url.js";
 import { getGlobalAgent } from "../pm/global-agents.js";
 
@@ -57,15 +57,6 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       }
     }
     await updateConfig(runtime, (cfg) => {
-      // Preserve the existing API key when the caller omits the field or
-      // passes `undefined` (empty form field on edit). Only update when
-      // a string value is explicitly provided, and only clear when `null`
-      // is passed (the admin UI's separate "Clear" action). Without this
-      // guard, editing a provider through the password-field form (which
-      // is always blank for security — placeholder says "(set -- enter to
-      // replace)") would inadvertently wipe the stored key on every save.
-      const prevKey = cfg.providers?.[name]?.apiKey;
-      const resolvedKey = apiKey === undefined ? prevKey : (apiKey || undefined);
       return {
         ...cfg,
         providers: {
@@ -74,7 +65,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
             baseUrl,
             costType,
             models: models.map((m) => ({ name: m.name, enabled: m.enabled, ...(m.pricing ? { pricing: m.pricing } : {}) })),
-            apiKey: resolvedKey,
+            apiKey: resolveApiKey(apiKey, cfg.providers?.[name]?.apiKey),
             maxConcurrent: maxConcurrent ?? undefined,
             rpmLimit: rpmLimit ?? undefined,
             maxRequestBytes: maxRequestBytes ?? undefined,
@@ -252,18 +243,15 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       }
     }
     const costType = pricing ? "metered" : "free";
-    await updateConfig(runtime, (cfg) => {
-      const prevKey = cfg.providers?.[name]?.apiKey;
-      const resolvedKey = apiKey === undefined ? prevKey : (apiKey || undefined);
-      return {
-        ...cfg,
-        providers: {
-          ...cfg.providers,
-          [name]: {
-            baseUrl,
-            costType,
-            models: [{ name: model, enabled: true, ...(pricing ? { pricing } : {}) }],
-            apiKey: resolvedKey,
+    await updateConfig(runtime, (cfg) => ({
+      ...cfg,
+      providers: {
+        ...cfg.providers,
+        [name]: {
+          baseUrl,
+          costType,
+          models: [{ name: model, enabled: true, ...(pricing ? { pricing } : {}) }],
+          apiKey: resolveApiKey(apiKey, cfg.providers?.[name]?.apiKey),
             maxConcurrent: maxConcurrent ?? undefined,
             rpmLimit: rpmLimit ?? undefined,
             maxRequestBytes: maxRequestBytes ?? undefined,
@@ -271,8 +259,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
             embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
           },
         },
-      };
-    });
+    }));
     return { ok: true };
   });
 

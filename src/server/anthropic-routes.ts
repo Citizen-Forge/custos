@@ -4,7 +4,7 @@ import { getApiKeySource } from "../config.js";
 import { startOAuthFlow, exchangeCode, type OAuthMode } from "../auth/oauth.js";
 import { OAuthFlowTracker } from "../auth/oauth-flow-tracker.js";
 import { getValidAccessToken, getOAuthStatus, saveTokens, clearTokens } from "../auth/credentials.js";
-import { maskApiKey, updateConfig } from "./admin-shared.js";
+import { maskApiKey, resolveApiKey, updateConfig } from "./admin-shared.js";
 
 export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime): void {
   const oauthFlows = new OAuthFlowTracker();
@@ -22,25 +22,15 @@ export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime):
       reply.code(400);
       return { error: "rpmLimit must be a positive integer (or null for unlimited)" };
     }
-    const config = await updateConfig(runtime, (cfg) => {
-      // Preserve the existing API key when the field is empty (blank
-      // password input on save — the admin UI never pre-fills it for
-      // security). Only update when a non-empty string is provided,
-      // and only clear when null is explicitly passed (the admin UI's
-      // separate "Clear" button). Same pattern as the provider PUT
-      // handlers at provider-routes.ts.
-      const prevKey = cfg.anthropic?.apiKey;
-      const resolvedKey = apiKey === undefined || apiKey === "" ? prevKey : (apiKey || undefined);
-      return {
-        ...cfg,
-        anthropic: {
-          ...cfg.anthropic,
-          apiKey: resolvedKey,
+    const config = await updateConfig(runtime, (cfg) => ({
+      ...cfg,
+      anthropic: {
+        ...cfg.anthropic,
+        apiKey: resolveApiKey(apiKey, cfg.anthropic?.apiKey),
           ...(maxConcurrent !== undefined ? { maxConcurrent: maxConcurrent ?? undefined } : {}),
           ...(rpmLimit !== undefined ? { rpmLimit: rpmLimit ?? undefined } : {}),
-        },
-      };
-    });
+      },
+    }));
     const result: Record<string, unknown> = {};
     if (apiKey !== undefined) {
       result.apiKeySource = await getApiKeySource();
@@ -52,14 +42,10 @@ export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime):
   // Keep the old endpoint for backward compat.
   app.put("/admin/api/anthropic-key", async (req, reply) => {
     const { apiKey } = req.body as { apiKey: string | null };
-    const config = await updateConfig(runtime, (cfg) => {
-      const prevKey = cfg.anthropic?.apiKey;
-      const resolvedKey = apiKey === undefined || apiKey === "" ? prevKey : (apiKey || undefined);
-      return {
-        ...cfg,
-        anthropic: { ...cfg.anthropic, apiKey: resolvedKey },
-      };
-    });
+    const config = await updateConfig(runtime, (cfg) => ({
+      ...cfg,
+      anthropic: { ...cfg.anthropic, apiKey: resolveApiKey(apiKey, cfg.anthropic?.apiKey) },
+    }));
     return { apiKeySource: await getApiKeySource(), apiKeyMasked: config.anthropic?.apiKey ? maskApiKey(config.anthropic.apiKey) : null };
   });
 
