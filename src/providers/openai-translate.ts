@@ -580,6 +580,40 @@ export function fitRequestToSize(req: OpenAIRequest, maxBytes: number, warnRatio
   };
 }
 
+/** True when an OpenAI message looks like a provider error that was echoed
+ *  back into the conversation history. The claude subprocess receives error
+ *  responses and includes them as assistant/user messages in the next
+ *  request. Over time these accumulate and waste the request-size budget
+ *  without contributing useful context. The pre-filter below strips them
+ *  before age-based removal, so a conversation bloated with retry loops
+ *  shrinks to useful exchanges first.
+ *
+ *  Detection patterns (extensible):
+ *    - Assistant message whose string content starts with "API Error:"
+ *    - Any message whose content (string or text-part) contains "Run failed:"
+ *      or "Request too large" — the gateway's own 413 phrasing and the
+ *      PM agent's failure reports both use this pattern.
+ *
+ *  The check is intentionally loose to catch both the claude subprocess's
+ *  raw error echo AND the PM agent's structured context summary. A false
+ *  positive would remove a legitimate message that happens to contain the
+ *  words "API Error" in its text — extremely rare in practice since normal
+ *  conversation exchanges don't discuss gateway error messages. */
+function isErrorMessage(msg: OpenAIMessage): boolean {
+  const text = typeof msg.content === "string" ? msg.content :
+    Array.isArray(msg.content) ? msg.content.map((p) => (p as OpenAITextPart).text ?? "").join(" ") :
+    "";
+  // Assistant messages that directly echo provider errors start with
+  // exactly this prefix.
+  if (msg.role === "assistant" && text.startsWith("API Error:")) return true;
+  // Any role — the PM agent embeds failure reports in user-role session
+  // context, and claude may re-echo errors as user messages on retry.
+  if (text.includes("Run failed:") || text.includes("API Error:")) return true;
+  // Gateway-level 413 the claude subprocess includes verbatim.
+  if (text.includes("Request too large")) return true;
+  return false;
+}
+
 /** Remove the oldest messages (everything after the system prompt) from
  *  an OpenAI request until its serialized body fits `maxBytes`. Keeps the
  *  system prompt at index 0 and the newest messages. Returns a
@@ -597,14 +631,23 @@ export function fitRequestToSize(req: OpenAIRequest, maxBytes: number, warnRatio
  *  which works for both traditional chat conversations and tool-result-heavy
  *  agent turns even when the conversation is far past the size cap.
  *
+ *  ERROR-FIRST PRE-FILTER: Before the age-based loop, the function scans
+ *  for messages whose content matches known error patterns (
+ *  `isErrorMessage`). These error exchanges are dead weight — they echo
+ *  provider failures back into the conversation without adding useful
+ *  context. Stripping them first often brings the body under the cap in
+ *  one pass, avoiding the age-based loop entirely for conversations
+ *  bloated by retry storms.
+ *
  *  LOOPING BEHAVIOR: A single 50% pass may not suffice for very large
- *  conversations — a 131MB session file reduced by 50% still leaves ~65MB,
- *  which exceeds most caps. The old one-shot approach returned
- *  `stillOverLimit: true` after that single attempt, blocking the request
- *  entirely. Now the function keeps removing 25% of remaining messages per
- *  iteration until the body fits or only 2 messages survive, at which point
- *  the limit really can't be satisfied (unless the system prompt alone
- *  exceeds the cap, which is an operator config issue). */
+ *  conversations — even after error stripping, a 131MB session file
+ *  reduced by 50% still leaves ~65MB, which exceeds most caps. The old
+ *  one-shot approach returned `stillOverLimit: true` after that single
+ *  attempt, blocking the request entirely. Now the function keeps
+ *  removing 25% of remaining messages per iteration until the body fits
+ *  or only 2 messages survive, at which point the limit really can't be
+ *  satisfied (unless the system prompt alone exceeds the cap, which is
+ *  an operator config issue). */
 function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxBytes: number): FitRequestResult | undefined {
   // Need at least system (0) + 2 more messages to have anything worth
   // trimming. A single turn with only its system prompt, one user, and
@@ -614,10 +657,40 @@ function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxByt
   const clone: OpenAIRequest = JSON.parse(JSON.stringify(req));
   let removedCount = 0;
 
-  // Loop: remove oldest messages in chunks of ~25% until the body fits
-  // or only the system prompt + 1 message remain. The old one-shot 50%
-  // pass was insufficient for conversations whose <newest half> alone
-  // exceeds the cap (e.g. a 131MB session file's newest 50% = ~65MB).
+  // ERROR-FIRST PASS: Strip known error-pattern messages before the
+  // age-based loop. In a conversation saturated with retry errors (e.g.
+  // a PM agent that retried 50 times before succeeding), this single
+  // pass removes all the dead weight at once — no need to touch healthy
+  // exchanges. Check every non-system message; system prompt at index 0
+  // is never removed.
+  let i = clone.messages.length - 1;
+  while (i >= 1) {
+    if (isErrorMessage(clone.messages[i])) {
+      clone.messages.splice(i, 1);
+      removedCount++;
+    }
+    i--;
+  }
+  if (removedCount > 0) {
+    const finalBytes = serializeRequestBytes(clone);
+    if (finalBytes <= maxBytes) {
+      return {
+        request: clone,
+        stripped: 0,
+        truncatedMessages: removedCount,
+        stillOverLimit: false,
+        initialBytes: currentBytes,
+        finalBytes,
+      };
+    }
+    // Error pass alone wasn't enough — fall through to age-based removal.
+  }
+
+  // AGE-BASED LOOP: remove oldest messages in chunks of ~25% until the
+  // body fits or only the system prompt + 1 message remain. The old
+  // one-shot 50% pass was insufficient for conversations whose <newest
+  // half> alone exceeds the cap (e.g. a 131MB session file's newest
+  // 50% = ~65MB).
   while (clone.messages.length > 2) {
     // Remove the oldest ~25% of remaining non-system messages.
     const chunkSize = Math.max(1, Math.floor((clone.messages.length - 1) * 0.25));
@@ -637,10 +710,65 @@ function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxByt
     }
   }
 
-  // Even with only system + 1 message, still over the cap. Nothing more
-  // we can remove — the system prompt alone (or its serialization overhead)
-  // exceeds the limit. Return what we have with stillOverLimit: true so
-  // the caller surfaces a clear 413.
+  // Even with only system + 1 message, still over the cap. The message
+  // itself may be enormous (a session-context message containing hundreds
+  // of "Run failed" entries can be tens of MB alone). Try truncating
+  // the system prompt content first, then the first user message, before
+  // giving up.
+  //
+  // SYSTEM PROMPT TRUNCATION: Cut the system message to ~25% of its
+  // original size by taking the first and last portions. The system
+  // prompt is the agent instructions — losing the middle is better than
+  // a 413.
+  if (clone.messages.length >= 1 && typeof clone.messages[0].content === "string") {
+    const sysContent = clone.messages[0].content;
+    if (sysContent.length > 1024) {
+      const quarter = Math.max(512, Math.floor(sysContent.length * 0.25));
+      clone.messages[0].content = sysContent.slice(0, Math.floor(quarter * 0.6)) +
+        "\n...[truncated by Custos to fit request size limit]...\n" +
+        sysContent.slice(-Math.floor(quarter * 0.4));
+      const sysBytes = serializeRequestBytes(clone);
+      if (sysBytes <= maxBytes) {
+        return {
+          request: clone,
+          stripped: 0,
+          truncatedMessages: removedCount,
+          stillOverLimit: false,
+          initialBytes: currentBytes,
+          finalBytes: sysBytes,
+        };
+      }
+    }
+  }
+
+  // FIRST USER MESSAGE TRUNCATION: If still over, truncate the first
+  // user/assistant message (index 1) to ~25% of its original size. This
+  // is the session context that accumulates "Run failed" entries over
+  // time. Truncating it preserves decisions and key info from the head
+  // and tail while shedding the bloated middle.
+  if (clone.messages.length >= 2 && typeof clone.messages[1].content === "string") {
+    const msgContent = clone.messages[1].content;
+    if (msgContent.length > 1024) {
+      const quarter = Math.max(512, Math.floor(msgContent.length * 0.25));
+      clone.messages[1].content = msgContent.slice(0, Math.floor(quarter * 0.6)) +
+        "\n...[truncated by Custos to fit request size limit]...\n" +
+        msgContent.slice(-Math.floor(quarter * 0.4));
+      const finalBytes = serializeRequestBytes(clone);
+      if (finalBytes <= maxBytes) {
+        return {
+          request: clone,
+          stripped: 0,
+          truncatedMessages: removedCount,
+          stillOverLimit: false,
+          initialBytes: currentBytes,
+          finalBytes,
+        };
+      }
+    }
+  }
+
+  // Even after truncating both system and user message content, still
+  // over the cap. Nothing more we can do.
   const finalBytes = serializeRequestBytes(clone);
   return {
     request: clone,
