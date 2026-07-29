@@ -224,7 +224,7 @@ build_local() {
   log "building docker image (custos-gateway:local)..."
   local commit_sha
   commit_sha=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)
-  if ! docker build --build-arg "COMMIT_SHA=$commit_sha" -t custos-gateway:local "$repo" >>"$LOG" 2>&1; then
+  if ! docker build --no-cache-filter=runtime --build-arg "COMMIT_SHA=$commit_sha" -t custos-gateway:local "$repo" >>"$LOG" 2>&1; then
     log "ERROR: docker build failed"
     return 1
   fi
