@@ -157,6 +157,12 @@ export interface AgentDef {
   name: string;
   providerKey: string;
   model: string;
+  /** When set, the runtime dispatches this agent through the named
+   *  fallback set (per-request failover via GlobalQueue). At most one of
+   *  `fallbackSet` and `providerKey`/`model` is the operational driver —
+   *  `fallbackSet` wins when present, the legacy fields are kept around
+   *  for the UI's "primary pick" display (see docs/primary-pick.md). */
+  fallbackSet?: string | null;
   systemPrompt: string;
   specialty: string | null;
   createdBy: "system" | "engineering-manager" | "human";
@@ -166,6 +172,25 @@ export interface AgentDef {
   notes: string[];
   createdAt: number;
   updatedAt: number;
+}
+
+/** Minimal fallback-set shape surfaced to the UI so the agent card's
+ *  Model dropdown can pick one without a second round-trip. Matches the
+ *  backend's `FallbackSetDef` (src/config.ts) — the renderer only needs
+ *  the name (for the dropdown label) and the providers chain (for the
+ *  tooltip). The full set, with the long description, is loaded when
+ *  the user opens the Settings panel. */
+export interface FallbackSetOption {
+  name: string;
+  /** Free-text description for the tooltip. */
+  description: string;
+  providers: Array<{ provider: string; model: string }>;
+}
+
+export interface AgentsResponse {
+  agents: AgentDef[];
+  providerOptions: ProviderOption[];
+  fallbackSets: Record<string, FallbackSetOption>;
 }
 
 export interface AgentRun {
