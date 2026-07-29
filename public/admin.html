@@ -1513,9 +1513,22 @@ function renderProjectsPanel() {
       if (shown.length || project.pmLastRunAt) {
         const badgesRow = el("div", { style: "display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; align-items: center;" });
         for (const agent of shown) {
-          // Compact badge: just providerKey/model, no role label (shown by position)
-          // Build a tooltip with the full providerKey/model, specialty, and QA stats.
-          const tooltipLines = [`${agent.providerKey}/${agent.model}`];
+          // Compact badge: fallback set is the headline when assigned (the
+          // runtime dispatches through `custos:fallback/<set-name>` when
+          // fallbackSet is set, so the legacy providerKey/model is just
+          // a "primary pick" hint for the human reading this card -- not
+          // what the runtime actually uses). When no fallbackSet is set
+          // we fall back to providerKey/model so the card still has a
+          // informative label.
+          // Tooltip carries the full providerKey/model, the fallback set
+          // name (or a "no fallback set" note), the specialty, and the
+          // QA stats so the operator can dig in without leaving the page.
+          const tooltipLines = [`Provider/model: ${agent.providerKey}/${agent.model}`];
+          if (agent.fallbackSet) {
+            tooltipLines.push(`Fallback set: ${agent.fallbackSet} (runtime uses this for per-request failover)`);
+          } else {
+            tooltipLines.push("Fallback set: none (legacy pinned model)");
+          }
           if (agent.specialty) tooltipLines.push(`Specialty: ${agent.specialty}`);
           const { assigned, completed, qaRejections } = agent.stats || {};
           const statsParts = [];
@@ -1527,11 +1540,18 @@ function renderProjectsPanel() {
             const lastNote = agent.notes[agent.notes.length - 1];
             tooltipLines.push(`Last note: ${lastNote.length > 80 ? lastNote.slice(0, 80) + "..." : lastNote}`);
           }
+          // Headline: fallback set when set, otherwise the legacy model.
+          // The ":" separator matches the previous style so a row of mixed
+          // agents (some with fallbackSets, some without) still reads as
+          // [role]: [what lives at that role].
+          const label = agent.fallbackSet
+            ? `${roleLabels[agent.role]}: ${agent.fallbackSet}`
+            : `${roleLabels[agent.role]}:${agent.model.includes("/") ? agent.model.split("/").pop() : agent.model}`;
           badgesRow.appendChild(el("span", {
             class: `badge ${agent.role === "engineer" ? "warn" : "ok"}`,
             style: "font-size: 10px; padding: 1px 5px; cursor: help;",
             title: tooltipLines.join("\n"),
-            text: `${roleLabels[agent.role]}:${agent.model.includes("/") ? agent.model.split("/").pop() : agent.model}`,
+            text: label,
           }));
         }
       if (project.pmLastRunAt) {
