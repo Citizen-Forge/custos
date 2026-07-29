@@ -19,13 +19,21 @@
  * 6. If NO provider is available at all (every one is cooling/at-capacity),
  *    the request is queued.
  * 7. When a slot frees up, pump() re-checks queued requests.
+ * 7b. While parked, an enqueue deadline (default 60s) actively watches
+ *    for "stuck" work: when the timer fires, the request is removed
+ *    from the queue, dropped into a fixed-size dead-letter ring buffer,
+ *    recorded as a `stuck-request` event in the activity log, and the
+ *    awaiter sees ProviderUnavailableError("queue timeout: ...", 5_000)
+ *    so callers can distinguish a stuck-queue park from a transient
+ *    unavailable.
  *
  * Per-provider limits (concurrency, RPM) are enforced by ProviderStateMap.
  * Queue priority aging prevents background starvation.
  *
  * When an ActivityLog is wired in via the constructor, the queue records
- * queued/dispatched/fallback/succeeded/failed events so the admin panel
- * can show what work is actually flowing through which provider.
+ * queued/dispatched/fallback/succeeded/failed/stuck-request events so the
+ * admin panel can show what work is actually flowing through which
+ * provider and what work has been dropped to the dead-letter buffer.
  */
 
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
@@ -34,6 +42,37 @@ import { ProviderStateMap } from "./provider-state.js";
 import { ActivityLog, type DispatchContext } from "./activity-log.js";
 
 const DEFAULT_AGED_MS = 5_000;
+/** Wall-clock the queue gives an enqueued request to find a dispatchable
+ *  provider. After this elapses without successful dispatch the request
+ *  is moved to the dead-letter buffer and the awaiter sees
+ *  ProviderUnavailableError("queue timeout: ...", 5_000). The default
+ *  is 60s — long enough to absorb a short upstream cooldown (Gemini
+ *  Free tier's typical 30s reset, Ollama's transient 5xx of ~10-20s)
+ *  but short enough that an operator sees stuck work within one
+ *  eyeball-pass of the admin panel. Configurable via the constructor
+ *  for tests (which would otherwise have to wait 60s of wall clock). */
+const DEFAULT_ENQUEUE_TIMEOUT_MS = 60_000;
+/** retryAfterMs threaded into the ProviderUnavailableError raised when
+ *  the enqueue deadline fires. 5s is a generous client-side retry
+ *  hint: if the queue timed out at 60s, asking again 5s later is
+ *  likely to either find a real provider or time out again — just
+ *  with a fresh budget — rather than to add load. */
+const DEFAULT_ENQUEUE_RETRY_AFTER_MS = 5_000;
+/** Maximum number of dropped / timed-out entries retained in memory
+ *  for the admin endpoint to read. 50 keeps the buffer well under
+ *  100KB even with the full fallback chain captured per entry, so it
+ *  can stay in-process rather than getting paged to disk at this size.
+ *  Old entries are shifted off the front (FIFO) when the cap is hit —
+ *  recent overflow is the operator's most useful diagnostic signal,
+ *  so the newest N always win over the historical oldest. */
+const DEAD_LETTER_CAP = 50;
+
+/** Optional knob set on a per-queue basis. Pass-through to the constructor
+ *  for tests; production callers use the defaults. */
+export interface GlobalQueueOptions {
+  enqueueTimeoutMs?: number;
+  enqueueRetryAfterMs?: number;
+}
 
 export interface FallbackTarget {
   /** Provider name (key in the providers map). */
@@ -49,6 +88,42 @@ export interface FallbackTarget {
  *  suffix or supplied directly by /v1/messages handler), used to
  *  attribute events onto the right row in the admin activity log. */
 export type QueueContext = DispatchContext;
+
+/** Why the entry landed in the dead-letter buffer. Today only
+ *  `"timeout"` is fired by `enqueue()`'s onTimeout callback; future
+ *  extensions (admin-cancelled, abortAll-on-reload shedding an
+ *  outstanding entry, priority demotion) extend this union without
+ *  breaking existing readers that switch on the literal. */
+export type DeadLetterReason = "timeout";
+
+/** Operator-facing record of work that the queue dropped because it sat
+ *  parked longer than the enqueue deadline. Stored in a fixed-size
+ *  in-memory ring buffer; surfaced via `Queue.deadLettersSnapshot()`
+ *  for the admin endpoint to render so operators can identify THE
+ *  specific stuck request, not just the fact that something is stuck.
+ *  The full message body is intentionally not captured: at 50 entries
+ *  the cost adds up faster than the diagnostic value, and the
+ *  `requestId` lets the admin panel join back into either the
+ *  activity log (for event history) or the originating /v1/messages
+ *  handler log (for the request body) when an operator wants that. */
+export interface DeadLetterEntry {
+  requestId: string;
+  /** ms epoch at which the timeout fired and the entry was dropped. */
+  timestamp: number;
+  /** ms epoch at which `enqueue()` first parked the request. */
+  queuedAt: number;
+  /** timestamp - queuedAt so the operator sees the wait at a glance. */
+  waitMs: number;
+  fallbackTargets: FallbackTarget[];
+  priority: Priority;
+  reason: DeadLetterReason;
+  /** Caller context (project/agent) carried through enqueue so the
+   *  admin endpoint can attribute the stuck request to its origin
+   *  row without a join. Mirrors the field of the same name in
+   *  QueueActivityEvent but lives in the snapshot view rather than
+   *  the event stream. */
+  context?: QueueContext;
+}
 
 interface QueuedEntry {
   fallbackTargets: FallbackTarget[];
@@ -66,6 +141,15 @@ interface QueuedEntry {
   requestId: string;
   /** Caller context (project + agent) carried through enqueue. */
   context: QueueContext | undefined;
+  /** Wall-clock deadline the queue watches while parked. Cleared (set
+   *  to `undefined`) the instant the entry leaves the queue under any
+   *  path (dispatch via pump, signal-abort, abortAll on reload, or the
+   *  timeout's natural fire). The cleanup paths call clearTimeout
+   *  unconditionally — clearTimeout is the runtime's natty cleanup
+   *  primitive — so even if the timer's callback is already scheduled,
+   *  clearTimeout is a safe no-op and the promise's resolve/reject is
+   *  never reached twice. */
+  timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 }
 
 export class GlobalQueue {
@@ -76,8 +160,24 @@ export class GlobalQueue {
   private readonly activity: ActivityLog | null;
   private readonly ownActivity: ActivityLog | null;
   private requestCounter = 0;
+  /** Resolved from constructor options. Frozen effectively: setters
+   *  aren't exposed because the deadline is per-request-watchdog, not
+   *  a tunable runtime knob. Tests pass small values via the options
+   *  arg in new GlobalQueue(...) to keep CI fast. */
+  private readonly options: Required<GlobalQueueOptions>;
+  /** Operator-facing buffer of dropped work. Fixed-size FIFO ring: the
+   *  oldest entry is shifted off when DEAD_LETTER_CAP is hit so the
+   *  newest overflow is the diagnostic value. Accessed through
+   *  `deadLettersSnapshot()` (returns a defensive copy) to keep
+   *  callers from leaking references into the queue's bookkeeping. */
+  private readonly deadLetter: DeadLetterEntry[] = [];
 
-  constructor(providers: Record<string, Provider>, state: ProviderStateMap, activity?: ActivityLog) {
+  constructor(
+    providers: Record<string, Provider>,
+    state: ProviderStateMap,
+    activity?: ActivityLog,
+    options: GlobalQueueOptions = {},
+  ) {
     this.providers = providers;
     this.state = state;
     if (activity) {
@@ -87,6 +187,10 @@ export class GlobalQueue {
       this.ownActivity = new ActivityLog();
       this.activity = this.ownActivity;
     }
+    this.options = {
+      enqueueTimeoutMs: options.enqueueTimeoutMs ?? DEFAULT_ENQUEUE_TIMEOUT_MS,
+      enqueueRetryAfterMs: options.enqueueRetryAfterMs ?? DEFAULT_ENQUEUE_RETRY_AFTER_MS,
+    };
   }
 
   /** Replace providers map on config reload. */
@@ -248,7 +352,14 @@ export class GlobalQueue {
     return this.enqueue(fallbackTargets, request, options, context, requestId, startedAt);
   }
 
-  /** Queue a request until a provider slot frees up. */
+  /** Queue a request until a provider slot frees up. The moment the
+   *  request lands here the queue also starts an enqueue-deadline
+   *  watchdog; if no provider becomes dispatchable within
+   *  `options.enqueueTimeoutMs`, the request is dropped to the
+   *  dead-letter buffer and the awaiter sees ProviderUnavailableError
+   *  (see `onTimeout` below for the exact behavior). The watchdog is
+   *  a plain `setTimeout`, cleared by every cleanup path so the
+   *  promise's resolve/reject is never reached twice. */
   private enqueue(
     fallbackTargets: FallbackTarget[],
     request: AnthropicMessagesRequest,
@@ -281,16 +392,79 @@ export class GlobalQueue {
         reject,
         requestId,
         context,
+        timeoutHandle: undefined,
       };
 
       const queue = priority === "interactive" ? this.interactiveQueue : this.backgroundQueue;
       for (const target of fallbackTargets) this.state.incrementQueued(target.provider, priority);
       queue.push(entry);
 
+      const onTimeout = (): void => {
+        // Defense-in-depth: cleanup paths (dispatch, signal-abort,
+        // abortAll) call clearTimeout before resolving/rejecting the
+        // entry, so by the time this callback runs the entry has
+        // either already been dispatched (in which case dispatch
+        // cleared our handle, OR the timer's callback still runs once
+        // and entry.aborted is set inside it), or it was aborted by
+        // the signal/abortAll path which would have left entry.aborted
+        // already true. We check entry.aborted first so a no-op
+        // re-entry doesn't double-decrement the per-provider
+        // queued-counter.
+        if (entry.aborted) return;
+        entry.aborted = true;
+        entry.timeoutHandle = undefined;
+        const i = queue.indexOf(entry);
+        if (i !== -1) queue.splice(i, 1);
+        for (const target of fallbackTargets) this.state.decrementQueued(target.provider, priority);
+
+        const waitMs = Date.now() - queuedAt;
+        const detailReason = waitMs >= this.options.enqueueTimeoutMs
+          ? `waited the full ${this.options.enqueueTimeoutMs}ms budget without a dispatchable provider`
+          : `cleaned up before the deadline fired (timing skew ${this.options.enqueueTimeoutMs - waitMs}ms short)`;
+        this.pushDeadLetter({
+          requestId,
+          timestamp: Date.now(),
+          queuedAt,
+          waitMs,
+          fallbackTargets,
+          priority,
+          reason: "timeout",
+          context,
+        });
+        // Emit a `stuck-request` outcome distinct from the generic
+        // `failed` so the admin panel can grep them ("show me all
+        // stuck-request events for project X"). provider/model are
+        // absent: the queue never picked a target, so they're not
+        // truthful. errorMessage carries the wait detail.
+        this.recordEvent({
+          requestId,
+          timestamp: Date.now(),
+          outcome: "stuck-request",
+          queuedAt,
+          durationMs: waitMs,
+          errorMessage: `queue timeout: ${detailReason}`,
+          ...context,
+        });
+        entry.reject(new ProviderUnavailableError(
+          `queue timeout: ${detailReason}`,
+          this.options.enqueueRetryAfterMs,
+        ));
+      };
+      entry.timeoutHandle = setTimeout(onTimeout, this.options.enqueueTimeoutMs);
+
       if (!options?.signal) return;
       const onAbort = (): void => {
         if (entry.aborted) return;
         entry.aborted = true;
+        // Signal-driven abort must clear the deadline so the timer
+        // can't fire after we've already rejected the awaiter
+        // (double-reject). clearTimeout is idempotent — if a previous
+        // path already cleared it (e.g. dispatch via pump racing the
+        // signal), this is a safe no-op.
+        if (entry.timeoutHandle !== undefined) {
+          clearTimeout(entry.timeoutHandle);
+          entry.timeoutHandle = undefined;
+        }
         const i = queue.indexOf(entry);
         if (i !== -1) queue.splice(i, 1);
         for (const target of fallbackTargets) this.state.decrementQueued(target.provider, priority);
@@ -357,8 +531,16 @@ export class GlobalQueue {
     return null;
   }
 
-  /** Dispatch a queued entry to a specific fallback target. */
+  /** Dispatch a queued entry to a specific fallback target. Clears the
+   *  enqueue deadline the instant dispatch begins; the timer can't
+   *  fire after this point because clearTimeout is idempotent and
+   *  synchronous with the splice that just removed the entry from the
+   *  queue. */
   private dispatchQueued(target: FallbackTarget, entry: QueuedEntry): void {
+    if (entry.timeoutHandle !== undefined) {
+      clearTimeout(entry.timeoutHandle);
+      entry.timeoutHandle = undefined;
+    }
     const provider = this.providers[target.provider];
     if (!provider) {
       entry.reject(new Error(`Provider "${target.provider}" not found`));
@@ -462,6 +644,14 @@ export class GlobalQueue {
     for (const queue of [this.interactiveQueue, this.backgroundQueue]) {
       for (const entry of queue) {
         entry.aborted = true;
+        // Cancel the enqueue deadline so it can't fire after this
+        // abort path has already rejected the awaiter. Without this,
+        // a queued request that's just been timed out by `reload`
+        // would still tick the timer and re-reject (double-fire).
+        if (entry.timeoutHandle !== undefined) {
+          clearTimeout(entry.timeoutHandle);
+          entry.timeoutHandle = undefined;
+        }
         if (entry.signal && entry.onAbort) entry.signal.removeEventListener("abort", entry.onAbort);
         entry.reject(err);
       }
@@ -473,6 +663,31 @@ export class GlobalQueue {
   get queuedInteractive(): number { return this.interactiveQueue.length; }
   get queuedBackground(): number { return this.backgroundQueue.length; }
   get queuedTotal(): number { return this.interactiveQueue.length + this.backgroundQueue.length; }
+
+  /** Defensive snapshot of the dead-letter buffer. Returned as a
+   *  copy so admin-panel code can iterate, filter, or even hand-edit
+   *  the array without leaking references into the queue's own
+   *  bookkeeping. Order is insertion-order (newest-last); callers
+   *  that prefer newest-first should reverse the result client-side.
+   *  The buffer is bounded to DEAD_LETTER_CAP (50) by `pushDeadLetter`,
+   *  so this returns at most 50 entries plus a small metadata payload. */
+  deadLettersSnapshot(): readonly DeadLetterEntry[] {
+    return this.deadLetter.slice();
+  }
+
+  /** Push one entry onto the dead-letter ring buffer; if the cap is
+   *  reached, shift the oldest off the front so the most recent
+   *  overflow stays visible to the operator. Called only from inside
+   *  `enqueue()`'s `onTimeout` callback, so the only reason this is
+   *  exposed on the class at all is for the in-line `this.pushDeadLetter(...)`
+   *  call. Limited to the queue's internal use; external callers
+   *  should reflect through `deadLettersSnapshot()`. */
+  private pushDeadLetter(entry: DeadLetterEntry): void {
+    this.deadLetter.push(entry);
+    if (this.deadLetter.length > DEAD_LETTER_CAP) {
+      this.deadLetter.shift();
+    }
+  }
 
   /** Generate a per-request id used to group activity events. Cheap
    *  monotonic counter + ms suffix; uniqueness within a process is

@@ -30,7 +30,13 @@ export type QueueActivityOutcome =
   | "dispatched"
   | "fallback"
   | "succeeded"
-  | "failed";
+  | "failed"
+  /** Enqueue timeout fired without the queue finding a dispatchable
+   *  provider. Carries the same fields as `failed` plus the queue's
+   *  own wait moment (the durationMs equals the enqueue wait, since
+   *  the request never reached a provider). The errorMessage starts
+   *  with "queue timeout:" so the activity panel can grep them. */
+  | "stuck-request";
 
 /** Shape passed to `record()`. Identical to the event itself except
  *  `id` is optional (the log generates one if absent). Splitting the

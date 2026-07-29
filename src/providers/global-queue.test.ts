@@ -18,7 +18,7 @@
 // on a controlled schedule; no network, no module mocking.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { GlobalQueue, type FallbackTarget } from "./global-queue.js";
+import { GlobalQueue, type FallbackTarget, type DeadLetterEntry } from "./global-queue.js";
 import { ProviderStateMap } from "./provider-state.js";
 import type { Provider, ProviderResponse, CompleteOptions } from "./types.js";
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
@@ -582,5 +582,270 @@ describe("GlobalQueue", () => {
     q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ, { priority: "background" });
     assert.equal(q.queuedBackground, 1);
     assert.equal(q.queuedTotal, 2);
+  });
+
+  // -- enqueue timeout + dead-letter buffer ---------------------------------
+
+  it("enqueue timeout fires after the configured deadline; drops to dead-letter; rejects with ProviderUnavailableError", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama", { maxConcurrent: 1 });
+    const release = state.acquire("ollama");
+
+    const { provider: ollama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ ollama }, state, undefined, {
+      enqueueTimeoutMs: 50,
+      enqueueRetryAfterMs: 5_000,
+    });
+
+    const p = q.complete([{ provider: "ollama", model: "qwen2.5:14b" }], ZERO_REQ);
+    assert.equal(q.queuedTotal, 1, "request should be parked");
+
+    await assert.rejects(p, (err: unknown) => {
+      assert.ok(err instanceof ProviderUnavailableError, "expect ProviderUnavailableError");
+      assert.equal((err as ProviderUnavailableError).retryAfterMs, 5_000, "retryAfterMs threaded through");
+      assert.ok(err.message.startsWith("queue timeout:"), `error message starts with 'queue timeout:'; got: ${err.message}`);
+      return true;
+    });
+
+    assert.equal(q.queuedTotal, 0, "queue cleared by timeout");
+    assert.equal(state.get("ollama")!.queuedInteractive, 0, "queued counter decremented on timeout");
+
+    const dead = q.deadLettersSnapshot();
+    assert.equal(dead.length, 1, "one entry in dead-letter buffer");
+    assert.equal(dead[0].reason, "timeout");
+    assert.ok(dead[0].waitMs >= 50, `waitMs >= 50, got: ${dead[0].waitMs}`);
+    assert.equal(dead[0].fallbackTargets.length, 1);
+    assert.equal(dead[0].fallbackTargets[0].provider, "ollama");
+    assert.equal(dead[0].fallbackTargets[0].model, "qwen2.5:14b");
+
+    const recent = q.queueActivityLog().recent(5);
+    const stuckEvents = recent.filter((e) => e.outcome === "stuck-request");
+    assert.equal(stuckEvents.length, 1, "exactly one stuck-request event");
+    assert.ok(stuckEvents[0].errorMessage!.startsWith("queue timeout:"), "stuck-request errorMessage starts with 'queue timeout:'");
+    assert.ok(stuckEvents[0].durationMs !== undefined && stuckEvents[0].durationMs! >= 50);
+
+    release();
+  });
+
+  it("slot freed before the deadline → dispatches normally, no stuck-request event, timer cleared", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama", { maxConcurrent: 1 });
+    const release = state.acquire("ollama");
+
+    const { provider: ollama, resolvePromise: resolveOllama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ ollama }, state, undefined, { enqueueTimeoutMs: 600 });
+
+    const p = q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ);
+    assert.equal(q.queuedTotal, 1);
+
+    // Free the slot and pump before the deadline would fire.
+    release();
+    q.pump();
+    resolveOllama(OK_RESPONSE);
+    const result = await p;
+    assert.equal(result.providerName, "ollama");
+
+    // Wait long enough for any leaked timer to fire to verify none did.
+    await new Promise<void>((r) => setTimeout(r, 700));
+
+    const stuckEvents = q.queueActivityLog().recent(20).filter((e) => e.outcome === "stuck-request");
+    assert.equal(stuckEvents.length, 0, "no stuck-request after successful dispatch");
+    assert.equal(q.deadLettersSnapshot().length, 0, "dead-letter empty after successful dispatch");
+    assert.equal(q.queuedTotal, 0);
+  });
+
+  it("manual abort via signal → no stuck-request event, timer cleared", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama", { maxConcurrent: 1 });
+    const release = state.acquire("ollama");
+
+    const { provider: ollama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ ollama }, state, undefined, { enqueueTimeoutMs: 200 });
+
+    const ctrl = new AbortController();
+    const p = q.complete(
+      [{ provider: "ollama", model: "q" }],
+      ZERO_REQ,
+      { signal: ctrl.signal },
+    );
+    assert.equal(q.queuedTotal, 1);
+
+    ctrl.abort("user cancelled");
+    await assert.rejects(p, /user cancelled/);
+    assert.equal(q.queuedTotal, 0, "queue cleared by signal abort");
+
+    // Wait past the would-be timeout to confirm no stuck-request fires.
+    await new Promise<void>((r) => setTimeout(r, 250));
+
+    const stuckEvents = q.queueActivityLog().recent(20).filter((e) => e.outcome === "stuck-request");
+    assert.equal(stuckEvents.length, 0, "no stuck-request after manual abort");
+    assert.equal(q.deadLettersSnapshot().length, 0, "dead-letter empty after manual abort");
+
+    release();
+  });
+
+  it("abortAll clears all pending timeouts so they can't fire after the abort", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama", { maxConcurrent: 1 });
+    const release = state.acquire("ollama");
+
+    const { provider: ollama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ ollama }, state, undefined, { enqueueTimeoutMs: 120 });
+
+    const p1 = q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ);
+    const p2 = q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ);
+    const p3 = q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ);
+    assert.equal(q.queuedTotal, 3);
+
+    q.abortAll("runtime reload");
+    await assert.rejects(p1, /runtime reload/);
+    await assert.rejects(p2, /runtime reload/);
+    await assert.rejects(p3, /runtime reload/);
+
+    // Wait past the would-be timeout to confirm no timers leaked.
+    await new Promise<void>((r) => setTimeout(r, 200));
+
+    const stuckEvents = q.queueActivityLog().recent(30).filter((e) => e.outcome === "stuck-request");
+    assert.equal(stuckEvents.length, 0, "abortAll cleared timers — no stuck-request fires");
+    assert.equal(q.deadLettersSnapshot().length, 0, "abortAll leaves dead-letter empty");
+
+    release();
+  });
+
+  it("dead-letter ring buffer caps at 50 entries; oldest is shifted off on overflow (FIFO)", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama", { maxConcurrent: 1 });
+    const release = state.acquire("ollama");
+
+    const { provider: ollama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ ollama }, state, undefined, { enqueueTimeoutMs: 50 });
+
+    // Drive 51 distinct enqueues. Each receives its own requestId from
+    // the queue's internal counter. The activity log records the
+    // `queued` event synchronously inside enqueue(), so the requestIds
+    // are in enqueue-order in the log. With Node's setTimeout queue
+    // processing same-delay timers in scheduling order, the dead-letter
+    // pushes happen in the same enqueue order; the FIFO shift-oldest
+    // implementation drops the first-enqueued entry on the 51st push.
+    const ps: Promise<unknown>[] = [];
+    for (let i = 0; i < 51; i++) {
+      ps.push(
+        q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ).catch(() => {}),
+      );
+    }
+    await Promise.all(ps);
+    // Generous grace period so all 51 timers fire even on a slow CI.
+    await new Promise<void>((r) => setTimeout(r, 200));
+
+    const dead = q.deadLettersSnapshot();
+    assert.equal(dead.length, 50, "dead-letter buffer caps at 50 entries");
+
+    // Pin the FIFO semantic: the queue's requestId counter is monotonic
+    // within a single process, so the enqueue-ordered requestIds are
+    // a sorted slice of those. The first-enqueued id MUST be missing
+    // (it's the only one shifted off); the last-enqueued MUST be
+    // present. This is what makes "the most recent overflow stays
+    // visible" hold for the operator's mental model.
+    const queuedInOrder = q.queueActivityLog()
+      .recent(1000)
+      .filter((e) => e.outcome === "queued")
+      .map((e) => e.requestId);
+    assert.equal(queuedInOrder.length, 51, "all 51 enqueues recorded a queued event");
+    const firstEnqueuedId = queuedInOrder[0];
+    const lastEnqueuedId = queuedInOrder[queuedInOrder.length - 1];
+
+    const deadIds = new Set(dead.map((d) => d.requestId));
+    assert.equal(deadIds.size, 50, "50 distinct request ids in the dead-letter buffer (no duplicates)");
+    assert.ok(!deadIds.has(firstEnqueuedId), `earliest-enqueued id ${firstEnqueuedId} was shifted off (FIFO)`);
+    assert.ok(deadIds.has(lastEnqueuedId), `latest-enqueued id ${lastEnqueuedId} is still in the buffer (FIFO)`);
+
+    release();
+  });
+
+  it("deadLettersSnapshot returns a defensive copy — each call yields a fresh array, mutations don't bleed back", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama", { maxConcurrent: 1 });
+    const release = state.acquire("ollama");
+
+    const { provider: ollama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ ollama }, state, undefined, { enqueueTimeoutMs: 5 });
+
+    const p = q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ);
+    await p.catch(() => {});
+    await new Promise<void>((r) => setTimeout(r, 15));
+
+    // Each call returns a new array (slice() semantics).
+    const a = q.deadLettersSnapshot();
+    const b = q.deadLettersSnapshot();
+    assert.notEqual(a, b, "each deadLettersSnapshot() call returns a fresh array");
+    assert.equal(a.length, 1);
+    assert.equal(b.length, 1);
+
+    // Defensive copy: cast past the readonly type to mutate exactly
+    // like a misbehaving caller would; verify the underlying buffer
+    // is unaffected.
+    const mutable = a as DeadLetterEntry[];
+    mutable.length = 0;
+    mutable.push({
+      requestId: "fake",
+      timestamp: 0,
+      queuedAt: 0,
+      waitMs: 0,
+      fallbackTargets: [],
+      priority: "interactive",
+      reason: "timeout",
+    });
+    assert.equal(q.deadLettersSnapshot().length, 1, "buffer state unaffected by snapshot mutation");
+
+    release();
+  });
+
+  it("stuck-request event carries the project's DispatchContext from the call site", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama", { maxConcurrent: 1 });
+    const release = state.acquire("ollama");
+
+    const { provider: ollama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ ollama }, state, undefined, { enqueueTimeoutMs: 10 });
+
+    const p = q.complete(
+      [{ provider: "ollama", model: "q" }],
+      ZERO_REQ,
+      { priority: "background" },
+      { projectId: "p-lightspeed", agentId: "a-pm", role: "project-manager", fallbackSet: "complex" },
+    );
+    await p.catch(() => {});
+
+    const recent = q.queueActivityLog().recent(5);
+    const stuckEvent = recent.find((e) => e.outcome === "stuck-request");
+    assert.ok(stuckEvent, "expected a stuck-request event");
+    assert.equal(stuckEvent?.projectId, "p-lightspeed", "projectId propagated from call context");
+    assert.equal(stuckEvent?.agentId, "a-pm", "agentId propagated from call context");
+    assert.equal(stuckEvent?.role, "project-manager", "role propagated");
+    assert.equal(stuckEvent?.fallbackSet, "complex", "fallbackSet propagated");
+    assert.equal(stuckEvent?.provider, undefined, "no provider stamps the queue never picked one");
+    assert.equal(stuckEvent?.model, undefined, "no model stamps the queue never picked one");
+
+    release();
+  });
+
+  it("retryAfterMs from options is honored on the rejected ProviderUnavailableError", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama", { maxConcurrent: 1 });
+    const release = state.acquire("ollama");
+
+    const { provider: ollama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ ollama }, state, undefined, {
+      enqueueTimeoutMs: 10,
+      enqueueRetryAfterMs: 30_000,
+    });
+
+    const p = q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ);
+    await assert.rejects(p, (err: unknown) => {
+      assert.equal((err as ProviderUnavailableError).retryAfterMs, 30_000);
+      return true;
+    });
+
+    release();
   });
 });
