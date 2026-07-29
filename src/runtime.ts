@@ -9,7 +9,7 @@ import type { AnthropicMessagesRequest } from "./types.js";
 import type { Provider, CompleteOptions, ProviderResponse } from "./providers/types.js";
 import type { EmbeddingConfig } from "./memory/embeddings.js";
 import { getGlobalAgent } from "./pm/global-agents.js";
-import { resolveEmbeddingHost } from "./providers/embedding-url.js";
+import { resolveEmbeddingHost, looksLikeOllamaEndpoint } from "./providers/embedding-url.js";
 import * as agentStore from "./pm/agents.js";
 import { markProviderAvailable, markProviderUnavailable } from "./pm/model-registry.js";
 import { syncSpawnedSessionCredentials } from "./auth/credentials.js";
@@ -605,17 +605,26 @@ export interface FallbackSetEntryHealth {
     //      /v1 prefix is stripped for the embeddings target). Anything
     //      else is OpenAI-compat and the consumer falls through to
     //      whatever the named provider exposes.
-    // The consumer at `src/memory/embeddings.ts` is Ollama-shaped: it
-    // always POSTs to `${baseUrl}/api/embeddings` with `{model, prompt}`.
-    // OpenAI-compat embeddings need an explicit `providerDef.embeddingUrl`
-    // pointed at the right base — the helper's `providerEmbeddingUrl`
-    // path is the only way through for non-Ollama providers today.
+    const baseUrl = resolveEmbeddingHost({
+      agentOverride: agent.embeddingBaseUrl,
+      providerEmbeddingUrl: providerDef.embeddingUrl,
+      providerBaseUrl: providerDef.baseUrl,
+    });
+
+    // Determine the embeddings path and body format from the provider's
+    // URL shape. Ollama's native endpoint lives at `/api/embeddings` (the
+    // bare origin, no `/v1` prefix) and expects `{model, prompt}`.
+    // OpenAI-compat providers expose `/embeddings` (under their existing
+    // path prefix, e.g. `/v1/embeddings`) and expect `{model, input}`.
+    // The heuristic checks the agent override first (most specific), then
+    // the provider embedding URL override, then the provider base URL.
+    const isOllama = looksLikeOllamaEndpoint(
+      agent.embeddingBaseUrl ?? providerDef.embeddingUrl ?? providerDef.baseUrl,
+    );
+
     this.embedding = {
-      baseUrl: resolveEmbeddingHost({
-        agentOverride: agent.embeddingBaseUrl,
-        providerEmbeddingUrl: providerDef.embeddingUrl,
-        providerBaseUrl: providerDef.baseUrl,
-      }),
+      baseUrl,
+      path: isOllama ? "/api/embeddings" : "/embeddings",
       model: pick.model,
     };
   }

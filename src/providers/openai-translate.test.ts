@@ -975,6 +975,7 @@ describe("translateStream -- vendor metadata in content_block_start", () => {
 import {
   fitRequestToSize,
   isOpenAIImagePart,
+  estimateTokens,
   type OpenAIContentPart,
 } from "./openai-translate.js";
 
@@ -1174,5 +1175,117 @@ describe("fitRequestToSize", () => {
     const beforeJson = JSON.stringify(req);
     fitRequestToSize(req, 1500);
     assert.equal(JSON.stringify(req), beforeJson, "original request must not be mutated");
+  });
+});
+
+describe("estimateTokens", () => {
+  it("estimates tokens with text ~4 chars/token and JSON overhead ~2 chars/token", () => {
+    // Two messages: "hello world" (11 chars) and long response.
+    // The estimate should be dominated by text length / 4.
+    const req = toOpenAIRequest(
+      {
+        model: "test",
+        max_tokens: 100,
+        messages: [
+          { role: "user", content: "hello world" },
+          { role: "assistant", content: "This is a moderately long response that should produce several tokens worth of text content." },
+        ],
+      },
+      "x",
+    );
+
+    const tokens = estimateTokens(req);
+    // Short text: ~80 text chars / 4 = ~20 text tokens + ~50-80 overhead tokens ≈ 70-100
+    // This is a smoke check — the exact value varies with JSON serialization.
+    assert.ok(tokens > 50, `expected > 50 tokens, got ${tokens}`);
+    assert.ok(tokens < 300, `expected < 300 tokens, got ${tokens}`);
+  });
+
+  it("produces a lower estimate than bytes/3 for text-heavy requests", () => {
+    // Pure text with no tool calls — text is more efficiently tokenized
+    // (~4 chars/token) than the uniform bytes/3 heuristic (~3 chars/byte
+    // which becomes ≈3 chars/token for ASCII text since 1 char = 1 byte).
+    const text = "x".repeat(1000);
+    const req = toOpenAIRequest(
+      {
+        model: "test",
+        max_tokens: 100,
+        messages: [{ role: "user", content: text }],
+      },
+      "x",
+    );
+
+    const tokens = estimateTokens(req);
+    const bytes = Buffer.byteLength(JSON.stringify(req), "utf8");
+    const oldHeuristic = Math.ceil(bytes / 3);
+
+    // For 1000 chars of ASCII text + ~40 chars JSON overhead:
+    //   text chars = ~1000 → text tokens = 250
+    //   overhead ≈ 40B / 2 = 20 tokens
+    //   total ≈ 270
+    //   bytes/3 ≈ (1000 + 40) / 3 ≈ 347
+    assert.ok(tokens < oldHeuristic, `new estimate ${tokens} should be lower than bytes/3 ${oldHeuristic} for text-heavy requests`);
+  });
+
+  it("counts tool call names and arguments as text content", () => {
+    const req = toOpenAIRequest(
+      {
+        model: "test",
+        max_tokens: 100,
+        messages: [
+          { role: "user", content: "search for weather" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "call_1",
+                name: "search_weather",
+                input: { location: "London" },
+              },
+            ],
+          },
+        ],
+      },
+      "x",
+    );
+
+    const tokens = estimateTokens(req);
+    // Has tool call with function name + arguments JSON — must count toward text tokens.
+    assert.ok(tokens > 30, `expected > 30 tokens for tool-call request, got ${tokens}`);
+  });
+
+  it("handles an empty messages array gracefully", () => {
+    const req = { model: "test", messages: [] } as any;
+    const tokens = estimateTokens(req);
+    assert.ok(tokens > 0, `empty request should still have some structural tokens, got ${tokens}`);
+    assert.ok(tokens < 100, `empty request should be small, got ${tokens}`);
+  });
+
+  it("counts tool definitions (description + parameters) toward token estimate", () => {
+    const req = toOpenAIRequest(
+      {
+        model: "test",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "do something" }],
+        tools: [
+          {
+            name: "search_database",
+            description: "Search the internal knowledge base for relevant documents matching the query",
+            input_schema: {
+              type: "object",
+              properties: { query: { type: "string" } },
+            },
+          },
+        ],
+      },
+      "x",
+    );
+
+    const tokens = estimateTokens(req);
+    // The tool description is ~70 chars of natural language text → ~17 text tokens
+    // plus the parameters JSON → more text tokens. Total should be above a
+    // no-tools baseline for the same conversation.
+    assert.ok(tokens > 40, `expected > 40 tokens with tool definition, got ${tokens}`);
   });
 });

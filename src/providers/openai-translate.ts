@@ -389,17 +389,100 @@ export function toOpenAIRequest(req: AnthropicMessagesRequest, model: string): O
 const OMITTED_IMAGE_PLACEHOLDER: OpenAITextPart = {
   type: "text",
   text: "[previous image omitted — request size limit reached for this provider]",
-};
-
-/** Serialize an OpenAIRequest to a UTF-8 byte count. The size cap is
- *  measured against the wire byte count (not the character count) since
- *  that's what the upstream will see at its server. Buffer.byteLength
- *  measures UTF-8 byte length without allocating a string. */
+};/** Serialize an OpenAIRequest to a UTF-8 byte count. The size cap is
+ * measured against the wire byte count (not the character count) since
+ * that's what the upstream will see at its server. Buffer.byteLength
+ * measures UTF-8 byte length without allocating a string. */
 function serializeRequestBytes(req: OpenAIRequest): number {
   // The shape is plain JSON (no Buffers/Maps/Sets), so a round-trip is
   // safe. Using Buffer.byteLength is the cheapest UTF-8 byte counter we
   // can write without pulling in a serialization library.
   return Buffer.byteLength(JSON.stringify(req), "utf8");
+}
+
+/**
+ * Estimate the number of tokens a model's tokenizer would produce for a
+ * given OpenAIRequest, without actually running a tokenizer.
+ *
+ * Text content (user/assistant messages, tool names, function arguments)
+ * is estimated at ~4 characters per token — the typical ratio for English
+ * prose. JSON structural overhead (field names, braces, quotes, colons,
+ * commas) is estimated at ~2 characters per token — JSON is denser than
+ * natural language, so a tighter ratio is appropriate.
+ *
+ * The two ratios are derived from the same insight: a tokenizer splits on
+ * whitespace boundaries and subword units, which means a given character
+ * in natural language carries fewer tokens per byte than the same character
+ * in JSON syntax. Using separate rates per component produces a per-request
+ * total that's closer to what the model's tokenizer would produce than the
+ * naive `estimateBytes / 3` heuristic, which treats all bytes uniformly.
+ */
+export function estimateTokens(req: OpenAIRequest): number {
+  const json = JSON.stringify(req);
+  const totalBytes = Buffer.byteLength(json, "utf8");
+
+  // Extract all text content across every message to measure its byte
+  // contribution separately from the JSON structural overhead. Counting
+  // characters (~4 chars/token for prose) rather than bytes avoids the
+  // UTF-8 multi-byte-vs-ASCII skew that the old `bytes / 3` heuristic
+  // introduced (text with accents or emoji would over-estimate).
+  const textParts: string[] = [];
+
+  // System prompt (index 0 when role === "system").
+  for (const msg of req.messages) {
+    extractTextContent(msg, textParts);
+  }
+
+  // Tool definitions — the `description` and `parameters` fields are
+  // prose-like text; the `name` is short but still counts toward tokens.
+  if (req.tools) {
+    for (const t of req.tools) {
+      textParts.push(t.function.name);
+      if (t.function.description) textParts.push(t.function.description);
+      textParts.push(JSON.stringify(t.function.parameters));
+    }
+  }
+
+  const allText = textParts.join("");
+  const textChars = allText.length;
+
+  // Text token estimate: ~4 characters per token for natural language.
+  const textTokens = Math.ceil(textChars / 4);
+
+  // Structural JSON overhead: everything in the serialized form that isn't
+  // text content (field names like "role", "content", "tool_calls"; braces,
+  // quotes, colons, commas; the `model` and `max_tokens` fields). Measured
+  // as byte difference because the structural parts are all ASCII (each
+  // char = 1 byte) and subtracting the text bytes is exact.
+  const textBytes = Buffer.byteLength(allText, "utf8");
+  const overheadBytes = totalBytes - textBytes;
+  const overheadTokens = Math.ceil(Math.max(0, overheadBytes) / 2);
+
+  return textTokens + overheadTokens;
+}
+
+/** Push the text content of a single message into `parts`. Handles string
+ * content, array content (text parts + image_url URLs), and tool_calls
+ * (function name + arguments JSON). Tool call IDs and extra_body vendor
+ * metadata are structural overhead, not text, so they're excluded from the
+ * text-chars count — they contribute to the `overheadBytes / 2` ratio
+ * instead. */
+function extractTextContent(msg: OpenAIMessage, parts: string[]): void {
+  if (typeof msg.content === "string") {
+    if (msg.content) parts.push(msg.content);
+  } else if (Array.isArray(msg.content)) {
+    for (const part of msg.content) {
+      if (part.type === "text") parts.push(part.text);
+      if (part.type === "image_url") parts.push(part.image_url.url);
+    }
+  }
+  if (msg.tool_calls) {
+    for (const tc of msg.tool_calls) {
+      parts.push(tc.function.name);
+      parts.push(tc.function.arguments);
+      if (tc.extra_content) parts.push(JSON.stringify(tc.extra_content));
+    }
+  }
 }
 
 /** Return the byte contribution of a single message's content parts to

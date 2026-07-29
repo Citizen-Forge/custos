@@ -1,5 +1,5 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type VendorMetadata } from "../types.js";
-import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf, fitRequestToSize } from "./openai-translate.js";
+import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf, fitRequestToSize, estimateTokens } from "./openai-translate.js";
 import { parseRetryAfterMs } from "./retry-header.js";
 import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
@@ -115,16 +115,17 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     // Warn when the serialized request exceeds the model's context window.
-    // Token count is estimated from bytes at ~3 chars per token (a
-    // reasonable approximation for mixed JSON + text). This is advisory
-    // only — the request is still sent because the upstream enforces its
-    // own limit and the estimate is approximate. Logged at `warn` level
-    // so it reaches the admin panel and the docker logs.
+    // Token count uses the per-message estimator (~4 chars/token for text,
+    // ~2 chars/token for JSON overhead) rather than the naive `bytes / 3`
+    // heuristic — the per-component estimate is closer to what the model's
+    // tokenizer produces by treating prose and structural JSON at different
+    // densities. This is advisory only — the request is still sent because
+    // the upstream enforces its own limit and the estimate is approximate.
+    // Logged at `warn` level so it reaches the admin panel and the logs.
     if (modelCfg?.maxContextWindow !== undefined) {
-      const estimatedBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
-      const estimatedTokens = Math.ceil(estimatedBytes / 3);
+      const estimatedTokens = estimateTokens(openaiRequest);
       if (estimatedTokens > modelCfg.maxContextWindow) {
-        console.warn(`[${this.name}] model ${effectiveModel}: estimated ${estimatedTokens} tokens exceeds ${modelCfg.maxContextWindow} context window (${estimatedBytes}B serialized body)`);
+        console.warn(`[${this.name}] model ${effectiveModel}: estimated ${estimatedTokens} tokens exceeds ${modelCfg.maxContextWindow} context window`);
       }
     }
 

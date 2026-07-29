@@ -26,11 +26,14 @@
  * `host:11434/v1`, still routes embeddings through Ollama's native
  * endpoint without anyone hand-configuring the override.
  *
- * The consumer (`src/memory/embeddings.ts`) is Ollama-shaped — it always
- * POSTs to `${baseUrl}/api/embeddings` with a `{ model, prompt }` body.
- * For OpenAI-compat embeddings the user MUST set `providerEmbeddingUrl`
- * to a base that ends at `/v1/embeddings` and design the consumer as
- * OpenAI; that's out of scope here.
+ * The consumer (`src/memory/embeddings.ts`) reads `config.path` from the
+ * `EmbeddingConfig` the runtime builds in `refreshEmbedding()`. The path
+ * determines both the URL suffix (`/api/embeddings` for Ollama,
+ * `/embeddings` for OpenAI-compat) and the body format (`{model, prompt}`
+ * vs `{model, input}`). This function is the single place that computes
+ * the host; the path is chosen by `refreshEmbedding()` from the same
+ * `looksLikeOllamaEndpoint` heuristic, so the probe preview and the
+ * runtime fetch can't disagree.
  */
 
 export interface ResolveEmbeddingUrlInput {

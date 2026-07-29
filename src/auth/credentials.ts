@@ -165,6 +165,66 @@ export async function getValidAccessToken(): Promise<string | null> {
 }
 
 /**
+ * Three-layer auth for spawned `claude -p` subprocesses.
+ *
+ * Each spawned Claude Code CLI needs some form of credentials to pass its
+ * local startup auth check. This function resolves that from the gateway's
+ * configured auth sources in priority order.
+ *
+ * **Execution order** differs from **return-value priority**: Layer 1
+ * (the OAuth mirror side effect — writing to ~/.claude/.credentials.json)
+ * always runs first, because it keeps the mirror file fresh regardless of
+ * which layer wins the return-value check. The return-value priority is:
+ *
+ *   Layer 2 — Static API key: if the gateway config has an Anthropic API
+ *   key, pass it as ANTHROPIC_API_KEY. The CLI prefers API-key auth over
+ *   OAuth when both are present, so this takes highest return priority.
+ *
+ *   Layer 1 — OAuth mirror: when the mirror succeeds
+ *   (outcome === "mirrored") and no static key is configured, no
+ *   ANTHROPIC_API_KEY is needed — the CLI authenticates via the
+ *   credentials file.
+ *
+ *   Layer 3 — Synthetic fallback: when neither OAuth nor a static key is
+ *   available, any non-empty value suffices to pass the CLI's local auth
+ *   check, because ANTHROPIC_BASE_URL points at this gateway and the
+ *   gateway's /v1/messages handler authenticates against its OWN provider
+ *   config, not the subprocess's credentials. The sentinel value "auth-ok"
+ *   marks these as synthetic (never a real upstream key).
+ *
+ * Extracted from the inline three-way if/else in turn-runner.ts so the
+ * policy lives in one place and unit tests can pin exactly when each layer
+ * activates without spawning a real subprocess.
+ */
+export interface ResolvedClaudeAuth {
+  ANTHROPIC_API_KEY?: string;
+}
+
+export async function resolveClaudeAuthEnv(runtime: { config?: { anthropic?: { apiKey?: string } } }): Promise<ResolvedClaudeAuth> {
+  // Layer 1: mirror the gateway's OAuth session into the format the
+  // spawned Claude Code CLI reads at startup. Refuses to clobber the
+  // file with empty tokens if the gateway's own TokenSet is malformed
+  // (see the long-form rationale in syncSpawnedSessionCredentials) —
+  // in that case we fall through to Layers 2 and 3 below.
+  const oauthResult = await syncSpawnedSessionCredentials();
+
+  // Layer 2: static Anthropic API key from gateway config.
+  const anthropicApiKey = runtime.config?.anthropic?.apiKey?.trim();
+  if (anthropicApiKey) {
+    return { ANTHROPIC_API_KEY: anthropicApiKey };
+  }
+
+  // Layer 3: synthetic fallback when no auth source is available.
+  if (oauthResult.outcome !== "mirrored") {
+    return { ANTHROPIC_API_KEY: "auth-ok" };
+  }
+
+  // OAuth mirror succeeded — the credentials file is populated and the
+  // CLI will use OAuth auth mode. No ANTHROPIC_API_KEY needed.
+  return {};
+}
+
+/**
  * Projects Custos's own connected OAuth session into the file format the
  * real Claude Code CLI reads (~/.claude/.credentials.json), so a
  * remote-spawned `claude` process is already authenticated and skips its

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Runtime } from "../runtime.js";
-import { syncSpawnedSessionCredentials } from "../auth/credentials.js";
+import { resolveClaudeAuthEnv } from "../auth/credentials.js";
 import { ensureHeadlessSettingsFile, type HookProfile } from "./headless-settings.js";
 
 const PORT = process.env.PORT ?? "8787";
@@ -121,12 +121,12 @@ export interface RunTurnOptions {
  */
 export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promise<void> {
   const { cwd, prompt, resumeSessionId, appendSystemPrompt, model, onEvent, signal } = options;
-  // Layer 1 + 3: mirror the gateway's OAuth session into the format the
-  // spawned Claude Code CLI reads at startup. Refuses to clobber the file
-  // with empty tokens if the gateway's own TokenSet is malformed (see
-  // credentials.ts for the long-form rationale) — in that case the
-  // subprocess falls back to ANTHROPIC_API_KEY below.
-  const oauthResult = await syncSpawnedSessionCredentials();
+
+  // Resolve the three-layer auth (OAuth mirror → static API key → synthetic
+  // fallback) onto the subprocess env. The policy lives in credentials.ts so
+  // unit tests can pin exactly when each layer activates without spawning a
+  // real `claude` subprocess.
+  const auth = await resolveClaudeAuthEnv(runtime);
   const settingsPath = await ensureHeadlessSettingsFile(options.hookProfile ?? "chat");
 
   const env: Record<string, string> = {};
@@ -135,53 +135,16 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   }
   // The spawned CLI always relays through the gateway -- the gateway
   // is the only path to the upstream, regardless of provider. The
-  // /v1/messages handler dispatches via GlobalQueue + ProviderRouter so
-  // every call keeps the operator-visible metrics (cooldowns, RPM,
-  // fallback chains, queue depth) and goes through the same
-  // translation layer that lets OpenAI-compat providers participate.
-  // No `ANTHROPIC_API_KEY` is set here -- the gateway is internal-only
-  // (only the orchestrator's own subprocesses ever call it) so the
-  // shared-secret clientAuth gate is dead weight. The CLI authenticates
-  // against the upstream provider via its own credentials path
-  // (providerDef.apiKey for static keys, OAuth via
-  // ~/.claude/.credentials.json when syncSpawnedSessionCredentials
-  // populated it); either routes through the gateway's relay without
-  // carrying that auth back through ANTHROPIC_API_KEY.
+  // /v1/messages handler dispatches via GlobalQueue so every call keeps
+  // the operator-visible metrics (cooldowns, RPM, fallback chains, queue
+  // depth) and goes through the same translation layer that lets
+  // OpenAI-compat providers participate. ANTHROPIC_API_KEY is set only
+  // when the auth policy above resolved one (static key or synthetic
+  // fallback); when OAuth mirroring succeeded, no ANTHROPIC_API_KEY is
+  // needed and the CLI uses the credentials file it wrote.
   env.ANTHROPIC_BASE_URL = `http://localhost:${PORT}`;
   if (model) env.ANTHROPIC_MODEL = model;
-
-  // Layer 2 (belt-and-suspenders): if a static Anthropic API key is set
-  // in the gateway config, propagate it to the subprocess as
-  // ANTHROPIC_API_KEY. This is the SECOND auth path the spawned CLI can
-  // use — if the OAuth mirror above bails (Layer 1's `preserved`
-  // outcome because the in-memory TokenSet is somehow empty) the
-  // subprocess's local-login check still passes, the CLI picks API-key
-  // auth mode over OAuth (Claude Code's precedence), and the request
-  // still routes through the gateway because ANTHROPIC_BASE_URL is the
-  // localhost gateway URL regardless of which auth scheme the CLI
-  // chose. Skipped when there is no static key configured (OAuth-only
-  // users) because overwriting ANTHROPIC_API_KEY with an empty string
-  // would crash the CLI's auth check with the inverse failure mode
-  // (Claude Code sees `ANTHROPIC_API_KEY=""`, decides it's unset, then
-  // falls through to the OAuth mirror which is also broken — the
-  // opposite of what we want).
-  const anthropicApiKey = runtime.config?.anthropic?.apiKey?.trim();
-  if (anthropicApiKey) {
-    env.ANTHROPIC_API_KEY = anthropicApiKey;
-  } else if (oauthResult.outcome !== "mirrored") {
-    // Layer 3 (synthetic auth): when neither the OAuth mirror (Layer 1)
-    // nor a static API key (Layer 2) is available, the spawned Claude
-    // Code subprocess still needs some form of credentials to pass its
-    // local startup auth check — without it the process exits with
-    // "not logged in" before it can route any request through the
-    // gateway. Since ANTHROPIC_BASE_URL points at this gateway and the
-    // gateway's /v1/messages handler authenticates against its OWN
-    // provider config (not the subprocess's credentials), any non-empty
-    // value suffices as a synthetic marker. Claude Code prefers API-key
-    // auth over OAuth when both are present, so the stale empty
-    // credentials file on disk is simply ignored — no need to delete it.
-    env.ANTHROPIC_API_KEY = "auth-ok";
-  }
+  if (auth.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = auth.ANTHROPIC_API_KEY;
 
   // Vault secrets last: they're the caller's explicit choice for this run,
   // and should win over anything the gateway process happens to inherit.
