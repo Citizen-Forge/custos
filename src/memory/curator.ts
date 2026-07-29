@@ -406,7 +406,24 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
     cursor[file] = newLineCount;
 
     compacted++;
-    console.log(`[compact] ${file}: compacted ${compactCount} exchange(s) (${bytes}B -> ~${Buffer.byteLength(newContent, "utf8")}B, threshold=${compactThreshold}B)`);
+    const newBytes = Buffer.byteLength(newContent, "utf8");
+    const byteDelta = bytes - newBytes;
+    const detail =
+      byteDelta >= 1024 * 1024
+        ? `${(byteDelta / (1024 * 1024)).toFixed(1)} MB`
+        : byteDelta >= 1024
+          ? `${(byteDelta / 1024).toFixed(1)} KB`
+          : `${byteDelta} B`;
+    console.log(`[compact] ${file}: compacted ${compactCount} exchange(s) (${bytes}B -> ${newBytes}B, threshold=${compactThreshold}B)`);
+    deps.runtime.activityLog.record({
+      requestId: `compact-${Date.now().toString(36)}-${file.replace(".jsonl", "")}`,
+      timestamp: Date.now(),
+      outcome: "compact",
+      provider: pick.providerKey,
+      model: pick.model,
+      fallbackSet: agent.fallbackSet ?? undefined,
+      errorMessage: `compacted ${compactCount} exchange(s) (${bytes}B → ${newBytes}B, saved ${detail})`,
+    });
   }
 
   await saveCursor(cursor);

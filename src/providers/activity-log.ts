@@ -36,7 +36,11 @@ export type QueueActivityOutcome =
    *  own wait moment (the durationMs equals the enqueue wait, since
    *  the request never reached a provider). The errorMessage starts
    *  with "queue timeout:" so the activity panel can grep them. */
-  | "stuck-request";
+  | "stuck-request"
+  /** Session-file compaction ran and rewrote a session's oldest exchanges
+   *  with an LLM summary. The `errorMessage` carries the byte delta and
+   *  exchange count (e.g. "compacted 12 exchanges (2.1MB -> 4.2KB)"). */
+  | "compact";
 
 /** Shape passed to `record()`. Identical to the event itself except
  *  `id` is optional (the log generates one if absent). Splitting the

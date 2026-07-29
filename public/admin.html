@@ -90,6 +90,7 @@
   .activity-table .outcome-failed { color: var(--danger); }
   .activity-table .outcome-fallback { color: var(--warn); }
   .activity-table .outcome-queued { color: var(--muted); }
+  .activity-table .outcome-compact { color: var(--accent); }
   .activity-table tr.outcome-failed td { background: rgba(217,112,91,0.04); }
   .activity-table .err-msg { color: var(--danger); font-size: 11px; display: block; max-width: 320px; word-break: break-word; }
   .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -1233,6 +1234,7 @@ function renderQueueActivityPanel() {
     { value: "stuck-request", label: "⏱ stuck", color: "var(--warn)" },
     { value: "dispatched", label: "→ dispatched", color: "var(--accent)" },
     { value: "queued", label: "queued", color: "var(--muted)" },
+    { value: "compact", label: "📦 compact", color: "var(--accent)" },
   ];
 
   const filterRow = el("div", { class: "row", style: "margin-bottom: 10px; gap: 5px;" });
@@ -1341,6 +1343,7 @@ function renderQueueActivityRow(ev) {
     fallback: "↪ fallback",
     succeeded: "✓ succeeded",
     failed: "✕ failed",
+    compact: "📦 compact",
   }[ev.outcome] || ev.outcome;
   const duration = ev.durationMs != null ? `${ev.durationMs}ms` : (ev.queuedAt != null ? `…${Date.now() - ev.queuedAt}ms` : "—");
   const tr = el("tr", { class: `outcome-${ev.outcome}` });

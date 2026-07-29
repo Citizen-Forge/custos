@@ -71,6 +71,15 @@ export async function enterCompetition(
     await page.goto(competition.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await new Promise((r) => setTimeout(r, 2000));
 
+    // ── Follow external competition link if this is an aggregator/forum ──
+    // Loquax, MSE, and similar forums don't host entry forms themselves —
+    // they link out to the actual competition page. If we detect a single
+    // prominent outbound link, navigate to it before analysing the form.
+    const followed = await followExternalCompetitionLink(page, competition.url);
+    if (followed) {
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+
     // ── CAPTCHA detection ────────────────────────────────────────────
     // Don't abort immediately — many pages embed reCAPTCHA/hCaptcha widgets
     // (e.g. Gleam forms) that don't block basic email entry. We mark the
@@ -278,6 +287,101 @@ async function checkSuccess(page: PlaywrightPage): Promise<boolean> {
 }
 
 /**
+ * If the current page is a forum/aggregator thread that links out to the
+ * actual competition (e.g. Loquax XenForo threads), find the outbound
+ * link and navigate to it before form analysis. Returns true if followed.
+ */
+async function followExternalCompetitionLink(
+  page: PlaywrightPage,
+  currentUrl: string,
+): Promise<boolean> {
+  try {
+    const currentOrigin = new URL(currentUrl).origin;
+
+    const outbound = await page.evaluate((origin: string) => {
+      // Collect all <a> tags in the main content area. On XenForo (Loquax),
+      // the thread content lives in .messageContent or .message-body.
+      const contentSelectors = [
+        '.messageContent',
+        '.message-body',
+        '.article-body',
+        '.post-body',
+        'article',
+        '[role="main"]',
+        'main',
+      ];
+
+      const links: Array<{ text: string; href: string; score: number }> = [];
+
+      function scoreLink(href: string, text: string): number {
+        const lowerText = text.toLowerCase();
+        let score = 0;
+        if (!href.startsWith('/') && !href.startsWith(origin) && !href.startsWith('#')) {
+          score += 10;
+        }
+        if (['enter', 'click here', 'visit', 'go to', 'try', 'enter now', 'enter competition'].some((w) => lowerText.includes(w))) {
+          score += 20;
+        }
+        if (lowerText.startsWith('http')) {
+          score += 15;
+        }
+        return score;
+      }
+
+      for (const sel of contentSelectors) {
+        const roots = document.querySelectorAll(sel);
+        for (const root of Array.from(roots)) {
+          const anchors = root.querySelectorAll('a[href]');
+          for (const a of Array.from(anchors)) {
+            const href = a.getAttribute('href') || '';
+            const text = (a.textContent || '').trim();
+            if (!href || href.startsWith('#') || href.startsWith(origin)) continue;
+            const score = scoreLink(href, text);
+            if (score > 0) {
+              links.push({ text, href, score });
+            }
+          }
+        }
+      }
+
+      // If nothing found in content scopes, fall back to scanning ALL links
+      // and picking the best off-domain candidate.
+      if (links.length === 0) {
+        const allAnchors = document.querySelectorAll('a[href]');
+        for (const a of Array.from(allAnchors)) {
+          const href = a.getAttribute('href') || '';
+          const text = (a.textContent || '').trim();
+          if (!href || href.startsWith('#') || href.startsWith(origin)) continue;
+          const score = scoreLink(href, text);
+          if (score > 0) {
+            links.push({ text, href, score });
+          }
+        }
+      }
+
+      // Sort by score descending, return best candidate
+      links.sort((a, b) => b.score - a.score);
+      // Require score >= 15 in fallback to avoid nav/footer off-domain links
+      const minScore = links.length > 0 && links[0].href && !links[0].href.startsWith('http') ? 15 : 10;
+      return links.length > 0 && links[0].score >= minScore ? links[0] : null;
+    }, currentOrigin);
+
+    if (!outbound) {
+      return false;
+    }
+
+    botEvents.info(`  🔗 Following outbound competition link: "${outbound.text.slice(0, 60)}" → ${outbound.href}`);
+
+    // Navigate to the competition page
+    await page.goto(outbound.href, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    return true;
+  } catch (err) {
+    botEvents.info(`  ⚠️ Could not follow external link: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+/**
  * Attempt to submit the form using multiple strategies in order.
  * Returns true if any strategy appeared to succeed.
  */
@@ -421,6 +525,7 @@ async function submitForm(
       //     [itemprop="articleBody"]
       //   - Webflow: .w-richtext, .rich-text
       //   - Generic CMS fallbacks: .page, .content
+      //   - XenForo / forum software: .messageContent, .message-body, .post-body
       const SCOPE_SELECTORS: readonly string[] = [
         'main',
         'article',
@@ -436,6 +541,9 @@ async function submitForm(
         '.single-content',
         '.w-richtext',
         '.rich-text',
+        '.messageContent',       // XenForo
+        '.message-body',          // XenForo alternate
+        '.post-body',             // Generic forum
       ];
 
       // 1st round-trip: collect candidate (text, href) pairs in document
