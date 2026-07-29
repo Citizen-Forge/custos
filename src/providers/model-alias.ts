@@ -25,16 +25,35 @@ export interface PinnedRoute {
   type: "pinned";
   providerKey: string;
   model: string;
+  /** Optional caller context recovered from the alias suffix. */
+  context?: FallbackContext;
 }
 
 export interface FallbackRoute {
   type: "fallback";
   fallbackSet: string;
+  /** Optional caller context recovered from the alias suffix. */
+  context?: FallbackContext;
+}
+
+/** Caller-supplied metadata that travels inside the alias so the global
+ *  queue can attribute dispatch events back to the project + agent that
+ *  triggered them. Encoded as a URL-encoded JSON blob after `?` on the
+ *  alias; the parser ignores a malformed or missing suffix. Keys are
+ *  deliberately permissive -- only the ones the dispatcher reads are
+ *  typed below; future fields round-trip without changes here. */
+export interface FallbackContext {
+  projectId?: string;
+  projectName?: string;
+  agentId?: string;
+  agentName?: string;
+  role?: string;
 }
 
 export type ModelAlias = PinnedRoute | FallbackRoute;
 
 const PREFIX = "custos:";
+const FALLBACK_MARKER = "fallback/";
 
 export function formatModelAlias(providerKey: string, model: string): string {
   return `${PREFIX}${providerKey}/${model}`;
@@ -42,21 +61,61 @@ export function formatModelAlias(providerKey: string, model: string): string {
 
 /** Format a fallback-set alias — `custos:fallback/<set-name>`. The
  * agent-runner uses this when the PM assigned a fallback set to the
- * role (rather than a fixed provider/model). */
-export function formatFallbackAlias(setName: string): string {
-  return `${PREFIX}fallback/${setName}`;
+ * role (rather than a fixed provider/model). When a context is supplied
+ * (and carries at least one field), it is URL-encoded and appended
+ * after `?` so the gateway can recover it at dispatch time and attribute
+ * queue events to the project + agent that triggered them. The `?`
+ * delimiter never appears in a set name (the same identifier syntax
+ * as a config key), so the parser can split cleanly. */
+export function formatFallbackAlias(setName: string, context?: FallbackContext): string {
+  if (!context || Object.keys(context).length === 0) return `${PREFIX}${FALLBACK_MARKER}${setName}`;
+  const ctxStr = encodeURIComponent(JSON.stringify(context));
+  return `${PREFIX}${FALLBACK_MARKER}${setName}?${ctxStr}`;
+}
+
+/** Parse a context suffix (after `?`) on an alias. Returns undefined on
+ *  malformed input rather than throwing -- the dispatcher treats a bad
+ *  suffix as "no context" and continues, which is the same behavior as
+ *  the bare alias. */
+function parseContextSuffix(suffix: string | undefined): FallbackContext | undefined {
+  if (!suffix) return undefined;
+  try {
+    const decoded = decodeURIComponent(suffix);
+    const parsed = JSON.parse(decoded) as Record<string, unknown>;
+    const ctx: FallbackContext = {};
+    if (typeof parsed.projectId === "string") ctx.projectId = parsed.projectId;
+    if (typeof parsed.projectName === "string") ctx.projectName = parsed.projectName;
+    if (typeof parsed.agentId === "string") ctx.agentId = parsed.agentId;
+    if (typeof parsed.agentName === "string") ctx.agentName = parsed.agentName;
+    if (typeof parsed.role === "string") ctx.role = parsed.role;
+    return Object.keys(ctx).length > 0 ? ctx : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function parseModelAlias(model: string | undefined): ModelAlias | null {
   if (!model || !model.startsWith(PREFIX)) return null;
   const rest = model.slice(PREFIX.length);
 
-  // custos:fallback/<set-name> — GlobalQueue routing.
-  const FALLBACK_MARKER = "fallback/";
+  // custos:fallback/<set-name>?<urlencoded-json> — GlobalQueue routing,
+  // optionally with caller context appended after `?` so the dispatcher
+  // can attribute events back to the project + agent that triggered the
+  // request. The set name cannot contain `?`, so splitting on the first
+  // `?` cleanly separates the two halves.
   if (rest.startsWith(FALLBACK_MARKER)) {
-    const setName = rest.slice(FALLBACK_MARKER.length);
+    const tail = rest.slice(FALLBACK_MARKER.length);
+    const qIdx = tail.indexOf("?");
+    let setName: string;
+    let context: FallbackContext | undefined;
+    if (qIdx >= 0) {
+      setName = tail.slice(0, qIdx);
+      context = parseContextSuffix(tail.slice(qIdx + 1));
+    } else {
+      setName = tail;
+    }
     if (!setName) return null;
-    return { type: "fallback", fallbackSet: setName };
+    return context ? { type: "fallback", fallbackSet: setName, context } : { type: "fallback", fallbackSet: setName };
   }
 
   // Only the first slash separates provider from model -- model ids

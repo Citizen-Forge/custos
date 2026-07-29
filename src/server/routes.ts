@@ -93,10 +93,19 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         // a real value for the ingestion pipeline and for providers
         // that don't support modelOverride.
         body.model = deps.runtime.fallbackDefaultModel(alias.fallbackSet);
+        // Lift caller context (project, agent) from the alias suffix
+        // so dispatch events land in the activity log attributed to
+        // the right project/agent row. The fallback set name itself
+        // is also carried so events without caller context still
+        // identify which chain was routed through.
+        const dispatchContext = alias.context
+          ? { ...alias.context, fallbackSet: alias.fallbackSet }
+          : { fallbackSet: alias.fallbackSet };
         providerResponse = await deps.runtime.completeWithFallback(
           alias.fallbackSet,
           body,
           options,
+          dispatchContext,
         );
       } else {
         // No alias: use the `general` task's configured priority list

@@ -53,6 +53,45 @@
   }
   section.panel h2 { margin: 0 0 4px; font-size: 15px; }
   section.panel .desc { color: var(--muted); font-size: 12.5px; margin: 0 0 16px; }
+  /* Collapsible panel toggle. Default to collapsed so the settings
+     page isn't a wall of tables on first load; operators expand the
+     panels they want to inspect. Persisted per panel in localStorage
+     so the operator's preferred working set survives reloads. */
+  section.panel .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+    gap: 12px;
+  }
+  section.panel .panel-header:hover h2 { color: var(--accent); }
+  section.panel .panel-toggle {
+    color: var(--muted);
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    flex-shrink: 0;
+    transition: transform 0.15s;
+  }
+  section.panel .panel-toggle:hover { color: var(--text); }
+  section.panel.collapsed .panel-body { display: none; }
+  section.panel.collapsed .panel-toggle { transform: rotate(-90deg); }
+  /* Activity log table sits tighter than the per-provider tables
+     because there are many rows and the operator scans them. */
+  .activity-table { font-size: 12px; }
+  .activity-table td, .activity-table th { padding: 4px 6px; vertical-align: top; }
+  .activity-table td.outcome-cell { white-space: nowrap; }
+  .activity-table td.time-cell { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .activity-table td.duration-cell { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .activity-table td.project-cell { font-weight: 600; }
+  .activity-table td.muted { color: var(--muted); }
+  .activity-table .outcome-dispatched { color: var(--accent); }
+  .activity-table .outcome-succeeded { color: var(--ok); }
+  .activity-table .outcome-failed { color: var(--danger); }
+  .activity-table .outcome-fallback { color: var(--warn); }
+  .activity-table .outcome-queued { color: var(--muted); }
+  .activity-table tr.outcome-failed td { background: rgba(217,112,91,0.04); }
+  .activity-table .err-msg { color: var(--danger); font-size: 11px; display: block; max-width: 320px; word-break: break-word; }
   .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
   label { color: var(--muted); font-size: 12.5px; min-width: 70px; }
   input[type=text], input[type=password], input[type=number], select {
@@ -349,12 +388,56 @@ async function reloadAfter(promise, successMessage) {
 function render() {
   const app = $("#app");
   app.innerHTML = "";
-  app.appendChild(renderProvidersPanel());
-  app.appendChild(renderGlobalServicesPanel(state.providers));
-  app.appendChild(renderFallbackSetHealthPanel());
-  app.appendChild(renderFallbackSetsPanel());
-  app.appendChild(renderProjectsPanel());
-  app.appendChild(renderSecurityPanel());
+  app.appendChild(makeCollapsible(renderProvidersPanel(), "providers"));
+  app.appendChild(makeCollapsible(renderGlobalServicesPanel(state.providers), "global-services"));
+  app.appendChild(makeCollapsible(renderFallbackSetHealthPanel(), "fallback-set-health"));
+  app.appendChild(makeCollapsible(renderQueueActivityPanel(), "queue-activity"));
+  app.appendChild(makeCollapsible(renderFallbackSetsPanel(), "fallback-sets"));
+  app.appendChild(makeCollapsible(renderProjectsPanel(), "projects"));
+  app.appendChild(makeCollapsible(renderSecurityPanel(), "security"));
+}
+
+// Wrap a panel so the header is a click toggle that hides the body.
+// State is persisted per panel id in localStorage; default is collapsed
+// so a fresh visit doesn't show every table at once. The header
+// retains the original <h2> (and any leading <p class="desc"> the panel
+// put there) so the section's identity is unchanged when expanded.
+function makeCollapsible(panel, panelId) {
+  if (!panel || !panel.querySelector) return panel;
+  const h2 = panel.querySelector("h2");
+  if (!h2) return panel;
+  // Wrap every child except h2 in a single panel-body div so we can
+  // hide them with one CSS rule. We deliberately re-use the existing
+  // header-level elements (h2 + .desc) -- they're the panel's identity
+  // and belong outside the toggle.
+  const headerKids = [h2];
+  const desc = panel.querySelector("p.desc");
+  if (desc && desc.parentNode === panel) headerKids.push(desc);
+  const body = el("div", { class: "panel-body" });
+  for (const child of Array.from(panel.children)) {
+    if (headerKids.includes(child)) continue;
+    body.appendChild(child);
+  }
+  const header = el("div", { class: "panel-header" });
+  for (const k of headerKids) header.appendChild(k);
+  const toggle = el("span", { class: "panel-toggle", text: "▾", title: "Click to collapse" });
+  header.appendChild(toggle);
+  panel.innerHTML = "";
+  panel.appendChild(header);
+  panel.appendChild(body);
+
+  const storageKey = `custos.collapsed.${panelId}`;
+  // Default = collapsed. Only flip to expanded if the operator has
+  // explicitly expanded this panel before (any stored truthy value).
+  const wasExpanded = localStorage.getItem(storageKey) === "false";
+  if (!wasExpanded) panel.classList.add("collapsed");
+  toggle.textContent = panel.classList.contains("collapsed") ? "▸" : "▾";
+  header.addEventListener("click", () => {
+    const collapsed = panel.classList.toggle("collapsed");
+    toggle.textContent = collapsed ? "▸" : "▾";
+    try { localStorage.setItem(storageKey, collapsed ? "true" : "false"); } catch { /* private mode etc. */ }
+  });
+  return panel;
 }
 
 async function startOAuthFlow(area) {
@@ -1077,6 +1160,118 @@ function renderGlobalServicesPanel(providers) {
 // the boot-time fetch populates `state.fallbackSetHealth` from
 // /admin/api/runtime/stats so a freshly-loaded admin panel can spot
 // an exhausted chain before any user sees latency.
+// -- Queue activity log --------------------------------------------------
+//
+// Surfaces the global queue's recent dispatch events so an operator can
+// see, at a glance, what work is flowing through which provider — without
+// having to trawl server logs. Each row is one event (queued / dispatched
+// / fallback / succeeded / failed); a single logical request shows up as
+// multiple rows in sequence, linked by requestId on the wire but
+// recognisable in the table by identical project/agent/provider. The
+// auto-poll fires every 5 seconds so a stalled chain is visible while the
+// operator is staring at the page; the manual Refresh button forces an
+// immediate re-fetch after a config change.
+let queueActivityPollHandle = null;
+function renderQueueActivityPanel() {
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Queue activity" }));
+  section.appendChild(el("p", { class: "desc", text: "Recent work dispatched through the global queue, oldest at the bottom. Rows tagged with the same project + agent came from one logical request; a request that walked the chain shows queued → dispatched → fallback → succeeded across multiple rows. Auto-refreshes every 5s." }));
+
+  const body = el("div", { class: "panel-body" });
+  const tbody = el("tbody");
+  const table = el("table", { class: "activity-table" });
+  table.appendChild(el("thead", {}, [el("tr", {}, [
+    el("th", { text: "Time" }),
+    el("th", { text: "Project" }),
+    el("th", { text: "Agent" }),
+    el("th", { text: "Role" }),
+    el("th", { text: "Set" }),
+    el("th", { text: "Provider" }),
+    el("th", { text: "Model" }),
+    el("th", { text: "Outcome" }),
+    el("th", { text: "Duration" }),
+  ])]));
+  table.appendChild(tbody);
+  body.appendChild(table);
+
+  const statusLine = el("div", { class: "small", style: "margin-top: 6px;" });
+  body.appendChild(statusLine);
+
+  const refreshBtn = el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Refresh", onclick: async () => {
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = "↻";
+    try {
+      await refreshQueueActivity();
+    } finally {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = "Refresh";
+    }
+  }});
+  const controls = el("div", { class: "row", style: "margin-top: 8px;" });
+  controls.appendChild(refreshBtn);
+  body.appendChild(controls);
+
+  section.appendChild(body);
+
+  async function refreshQueueActivity() {
+    try {
+      const resp = await api("/admin/api/queue/activity?limit=100");
+      const events = resp.events || [];
+      tbody.innerHTML = "";
+      if (events.length === 0) {
+        tbody.appendChild(el("tr", {}, [el("td", { colspan: "9", class: "muted", text: "No queue activity yet — dispatch an agent or trigger the chat to see events stream in." })]));
+      } else {
+        for (const ev of events) tbody.appendChild(renderQueueActivityRow(ev));
+      }
+      const cap = resp.capacity ?? events.length;
+      statusLine.textContent = `Showing ${events.length} of last ${cap} events (newest first).`;
+    } catch (err) {
+      statusLine.textContent = `Failed to load: ${err.message}`;
+    }
+  }
+
+  // Kick off the first fetch and start the 5s auto-poll. The poll
+  // survives across renders via the closure on `tbody` and `statusLine`
+  // — when render() runs again it replaces the DOM nodes, but the
+  // previous interval keeps firing harmlessly (its writes land in
+  // detached nodes that get GC'd). Clearing the handle on render()
+  // exit avoids the leak entirely.
+  refreshQueueActivity();
+  if (queueActivityPollHandle) clearInterval(queueActivityPollHandle);
+  queueActivityPollHandle = setInterval(() => { void refreshQueueActivity(); }, 5000);
+
+  return section;
+}
+
+function renderQueueActivityRow(ev) {
+  const time = new Date(ev.timestamp).toISOString().substr(11, 8);
+  const outcomeLabel = {
+    queued: "queued",
+    dispatched: "→ dispatched",
+    fallback: "↪ fallback",
+    succeeded: "✓ succeeded",
+    failed: "✕ failed",
+  }[ev.outcome] || ev.outcome;
+  const duration = ev.durationMs != null ? `${ev.durationMs}ms` : (ev.queuedAt != null ? `…${Date.now() - ev.queuedAt}ms` : "—");
+  const tr = el("tr", { class: `outcome-${ev.outcome}` });
+  tr.appendChild(el("td", { class: "time-cell", title: new Date(ev.timestamp).toISOString(), text: time }));
+  tr.appendChild(el("td", { class: "project-cell", text: ev.projectName || ev.projectId || "—" }));
+  tr.appendChild(el("td", {}, [
+    el("span", { text: ev.agentName || ev.agentId || "—" }),
+    ev.agentId && ev.agentName ? el("br") : null,
+    ev.agentId && ev.agentName ? el("span", { class: "muted", style: "font-size: 10px;", text: ev.agentId }) : null,
+  ].filter(Boolean)));
+  tr.appendChild(el("td", { class: "muted", text: ev.role || "—" }));
+  tr.appendChild(el("td", { class: "muted", text: ev.fallbackSet || "—" }));
+  tr.appendChild(el("td", { class: "muted", text: ev.provider || "—" }));
+  tr.appendChild(el("td", { class: "muted", text: ev.model || "—" }));
+  const outcomeTd = el("td", { class: `outcome-cell outcome-${ev.outcome}`, text: outcomeLabel });
+  if (ev.errorMessage) outcomeTd.title = ev.errorMessage;
+  tr.appendChild(outcomeTd);
+  tr.appendChild(el("td", { class: "duration-cell", text: duration }));
+  return tr;
+}
+
 function renderFallbackSetHealthPanel() {
   const section = el("section", { class: "panel" });
   section.appendChild(el("h2", { text: "Fallback set health" }));

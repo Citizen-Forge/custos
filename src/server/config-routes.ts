@@ -50,4 +50,23 @@ export function registerConfigRoutes(app: FastifyInstance, runtime: Runtime): vo
   app.get("/admin/api/runtime/stats", async () => {
     return runtime.stats();
   });
+
+  // -- Queue activity log ------------------------------------------------
+  //
+  // Recent dispatch events from the global queue. Each event captures
+  // project + agent + fallback set + provider/model + outcome so an
+  // operator can see what work is flowing through which provider, who
+  // initiated it, and whether it succeeded or fell through the chain.
+  // The buffer is bounded (see activity-log.ts MAX_EVENTS); the `limit`
+  // query param caps the slice returned. Auto-poll from the admin panel
+  // keeps this fresh without a separate streaming endpoint.
+
+  app.get<{ Querystring: { limit?: string } }>("/admin/api/queue/activity", async (req) => {
+    const rawLimit = Number(req.query.limit);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 500) : 100;
+    return {
+      events: runtime.activityLog.recent(limit),
+      capacity: runtime.activityLog.size,
+    };
+  });
 }

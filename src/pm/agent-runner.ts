@@ -257,7 +257,18 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       // the chain). The legacy `custos:<provider>/<model>` form is gone
       // -- an agent without a fallbackSet is broken and the run throws up
       // the stack before this point.
-      model: formatFallbackAlias(agent.fallbackSet as string),
+      //
+      // Append caller context (project + agent identity) after `?` so the
+      // gateway's /v1/messages handler can recover it and attribute the
+      // resulting activity-log events back to the project + agent that
+      // triggered them. Without this the queue's dispatch events would be
+      // visible but anonymous in the admin panel.
+      model: formatFallbackAlias(agent.fallbackSet as string, {
+        projectId,
+        agentId: agent.id,
+        agentName: agent.name,
+        role: agent.role,
+      }),
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
       onEvent,

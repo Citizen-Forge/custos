@@ -3,8 +3,9 @@ import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { ProviderRouter, type AvailabilityListener } from "./providers/router.js";
 import { SpendTracker } from "./providers/spend-tracker.js";
 import { ThrottledProvider, type ThrottleStats } from "./providers/throttle.js";
-import { GlobalQueue } from "./providers/global-queue.js";
+import { GlobalQueue, type QueueContext } from "./providers/global-queue.js";
 import { ProviderStateMap } from "./providers/provider-state.js";
+import { ActivityLog, type DispatchContext } from "./providers/activity-log.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import type { AnthropicMessagesRequest } from "./types.js";
 import type { Provider, CompleteOptions, ProviderResponse } from "./providers/types.js";
@@ -111,6 +112,12 @@ export class Runtime {
   /** Global provider state map. Registered on reload, read by
    *  GlobalQueue for availability checks. */
   readonly providerState = new ProviderStateMap();
+  /** Ring-buffered activity log. The GlobalQueue writes
+   *  queued/dispatched/fallback/succeeded/failed events into it; the
+   *  admin endpoint reads from it. Survives config reloads -- a
+   *  reload that swaps the GlobalQueue preserves the log so the
+   *  operator can see activity that spans the reload boundary. */
+  readonly activityLog = new ActivityLog();
   /** Global queue replaces per-instance ThrottledProviders for
    *  centralized concurrency/RPM management and fallback-set-aware
    *  dispatching. Created on reload, used by completeWithFallback. */
@@ -145,11 +152,16 @@ export class Runtime {
    *  from each fallback entry is passed as modelOverride so the
    *  provider uses the fallback set's chosen model rather than its
    *  default. Falls back to the router's task-based routing when the
-   *  agent has no fallback set configured (backward compat). */
+   *  agent has no fallback set configured (backward compat). The
+   *  optional `context` carries project + agent metadata used to
+   *  attribute activity-log events back to the dispatcher (typically
+   *  the /v1/messages handler, which recovers the context from the
+   *  fallback alias suffix). */
   async completeWithFallback(
     fallbackSetName: string,
     request: AnthropicMessagesRequest,
     options?: CompleteOptions,
+    context?: QueueContext,
   ): Promise<ProviderResponse & { providerName: string }> {
     const set = this.config.fallbackSets?.[fallbackSetName];
     if (!set || !set.providers.length) {
@@ -160,6 +172,7 @@ export class Runtime {
         set.providers.map((p) => ({ provider: p.provider, model: p.model })),
         request,
         options,
+        context,
       );
     }
     throw new Error("GlobalQueue not initialized");
@@ -453,13 +466,18 @@ export class Runtime {
       });
     }
 
-    // Create or update the GlobalQueue.
+    // Create or update the GlobalQueue. Share the runtime's activity
+    // log with the queue so dispatch events land in the same buffer the
+    // admin endpoint reads from. On reload the queue gets the same log
+    // reference, so activity spanning the reload boundary survives
+    // rather than vanishing into a fresh buffer the admin panel would
+    // have to discover.
     if (this.queue) {
       this.queue.abortAll("runtime reload: config changed");
       this.queue.setProviders(bareProviders);
       this.queue.setStateMap(stateMap);
     } else {
-      this.queue = new GlobalQueue(bareProviders, stateMap);
+      this.queue = new GlobalQueue(bareProviders, stateMap, this.activityLog);
     }
 
     await this.refreshEmbedding();
