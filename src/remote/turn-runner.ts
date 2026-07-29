@@ -126,7 +126,7 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   // with empty tokens if the gateway's own TokenSet is malformed (see
   // credentials.ts for the long-form rationale) — in that case the
   // subprocess falls back to ANTHROPIC_API_KEY below.
-  await syncSpawnedSessionCredentials();
+  const oauthResult = await syncSpawnedSessionCredentials();
   const settingsPath = await ensureHeadlessSettingsFile(options.hookProfile ?? "chat");
 
   const env: Record<string, string> = {};
@@ -168,6 +168,19 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   const anthropicApiKey = runtime.config?.anthropic?.apiKey?.trim();
   if (anthropicApiKey) {
     env.ANTHROPIC_API_KEY = anthropicApiKey;
+  } else if (oauthResult.outcome !== "mirrored") {
+    // Layer 3 (synthetic auth): when neither the OAuth mirror (Layer 1)
+    // nor a static API key (Layer 2) is available, the spawned Claude
+    // Code subprocess still needs some form of credentials to pass its
+    // local startup auth check — without it the process exits with
+    // "not logged in" before it can route any request through the
+    // gateway. Since ANTHROPIC_BASE_URL points at this gateway and the
+    // gateway's /v1/messages handler authenticates against its OWN
+    // provider config (not the subprocess's credentials), any non-empty
+    // value suffices as a synthetic marker. Claude Code prefers API-key
+    // auth over OAuth when both are present, so the stale empty
+    // credentials file on disk is simply ignored — no need to delete it.
+    env.ANTHROPIC_API_KEY = "auth-ok";
   }
 
   // Vault secrets last: they're the caller's explicit choice for this run,
