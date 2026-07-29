@@ -28,7 +28,7 @@ const BUILTIN_GLOBAL_AGENTS: ReadonlyArray<{
   {
     systemRole: "embeddings",
     name: "Embeddings",
-    fallbackSet: "standard",
+    fallbackSet: "embeddings",
     specialty: "Vector embeddings for the memory store and semantic recall",
   },
 ];
