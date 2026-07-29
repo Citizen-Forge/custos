@@ -147,9 +147,24 @@ async function main() {
   // Tie monitor lifecycle to Fastify's shutdown so SIGTERM/SIGINT (and
   // app.close()) clears the timer instead of leaving a dangling
   // interval that keeps the event loop busy.
-  app.addHook("onClose", async () => {
+  // Synchronous body: clearInterval / statsMonitor.stop are sync,
+  // so the onClose handler doesn't need to be async — keeping it
+  // sync avoids misleading Fastify callers about async cleanup
+  // ordering on shutdown.
+  app.addHook("onClose", () => {
     statsMonitor.stop();
+    runtime.stopMirrorRefresh();
   });
+
+  // Periodic OAuth-mirror re-write (defense in depth on top of the
+  // boot-time sync above and the per-spawn sync in turn-runner.ts).
+  // The spawned claude CLI on auth-rotation / rate-limit responses can
+  // clobber /root/.claude/.credentials.json back to empty within seconds
+  // -- a brief window where the next claude -p would inherit the bad
+  // shape. The 30s timer caps that window so even a stuck third writer
+  // can't keep the mirror bad past one interval. Disabled by setting
+  // MIRROR_REFRESH_INTERVAL_MS=0 or any value < 1000ms.
+  runtime.startMirrorRefresh();
 
   await app.listen({ port: PORT, host: "0.0.0.0" });
 }

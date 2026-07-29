@@ -480,3 +480,141 @@ describe("StatsMonitor", () => {
     assert.match(logs[1], /ALERT/);
   });
 });
+
+describe("Runtime.startMirrorRefresh disable paths", () => {
+  // The mirror-refresh timer must NOT schedule a setInterval when the
+  // env var is invalid. The disable contract on startMirrorRefresh is:
+  //   - 0           → disabled (covers MIRROR_REFRESH_INTERVAL_MS=0)
+  //   - < 1000ms    → disabled (sub-1000ms spin loop is forbidden)
+  //   - NaN         → disabled (malformed env like "30s"; !NaN === true)
+  //   - undefined   → falls through to the 30_000ms default
+  // These tests pin that contract so a future refactor (e.g. someone
+  // inverting the check to `if (val >= 1000)`) cannot accidentally
+  // schedule a spin-loop on a malformed value.
+
+  /** Snapshot env, run body, restore on exit. Each test mutates
+   *  MIRROR_REFRESH_INTERVAL_MS to a value the disable path expects,
+   *  so try/finally is required to keep the test process from leaking
+   *  a bad interval to the next describe block. */
+  function withMirrorEnv(value: string | undefined, body: () => void): void {
+    const original = process.env.MIRROR_REFRESH_INTERVAL_MS;
+    try {
+      if (value === undefined) delete process.env.MIRROR_REFRESH_INTERVAL_MS;
+      else process.env.MIRROR_REFRESH_INTERVAL_MS = value;
+      body();
+    } finally {
+      if (original === undefined) delete process.env.MIRROR_REFRESH_INTERVAL_MS;
+      else process.env.MIRROR_REFRESH_INTERVAL_MS = original;
+    }
+  }
+
+  it("refuses to schedule the timer when MIRROR_REFRESH_INTERVAL_MS=0", async () => {
+    const { Runtime } = await import("./runtime.js");
+    withMirrorEnv("0", () => {
+      const runtime = new Runtime();
+      const r = runtime as unknown as {
+        mirrorRefreshIntervalMs: number;
+        mirrorRefreshTimer: ReturnType<typeof setInterval> | null;
+      };
+      assert.equal(r.mirrorRefreshIntervalMs, 0, "field initializer should have read 0 from env");
+      runtime.startMirrorRefresh();
+      assert.equal(r.mirrorRefreshTimer, null, "timer must not be scheduled when interval is 0 (treated as disabled)");
+    });
+  });
+
+  it("refuses to schedule the timer when MIRROR_REFRESH_INTERVAL_MS is below 1000", async () => {
+    const { Runtime } = await import("./runtime.js");
+    withMirrorEnv("500", () => {
+      const runtime = new Runtime();
+      const r = runtime as unknown as {
+        mirrorRefreshIntervalMs: number;
+        mirrorRefreshTimer: ReturnType<typeof setInterval> | null;
+      };
+      assert.equal(r.mirrorRefreshIntervalMs, 500, "field initializer should have read 500 from env");
+      runtime.startMirrorRefresh();
+      assert.equal(r.mirrorRefreshTimer, null, "timer must not be scheduled when interval is below the 1000ms floor");
+    });
+  });
+
+  it("refuses to schedule the timer at 999ms (1ms below the 1000ms floor)", async () => {
+    // Boundary-pair companion to the 1000ms test below. Without both
+    // sides of the boundary pinned, refactors that flip `<` to `<=`
+    // (or hoist a misnamed "floor" constant) silently break the
+    // contract. With the pair, the swap is caught at unit-test time.
+    const { Runtime } = await import("./runtime.js");
+    withMirrorEnv("999", () => {
+      const runtime = new Runtime();
+      const r = runtime as unknown as {
+        mirrorRefreshIntervalMs: number;
+        mirrorRefreshTimer: ReturnType<typeof setInterval> | null;
+      };
+      assert.equal(r.mirrorRefreshIntervalMs, 999, "field initializer should have read 999 from env");
+      runtime.startMirrorRefresh();
+      assert.equal(r.mirrorRefreshTimer, null, "timer must not be scheduled at 999ms (just below the 1000ms floor)");
+    });
+  });
+
+  it("schedules the timer at exactly the 1000ms floor", async () => {
+    // Boundary-pair companion to the 999ms test above. At exactly
+    // 1000ms the floor check (`< 1000`) does NOT trigger, so the
+    // timer is scheduled. We schedule a real 1Hz tick explicitly so
+    // the pair as a whole pins "below floor disables, at-or-above
+    // floor schedules" — a refactor to `<= 1000` would pass 999 (still
+    // disables) but fail this test (1000 would also disable). Cleanup
+    // with stopMirrorRefresh() so the 1Hz tick doesn't pollute the
+    // remainder of the test process with mirror-write attempts; the
+    // unref() makes the timer exit-safe even without the explicit
+    // stop, but stopping it matches the normal runtime lifecycle.
+    const { Runtime } = await import("./runtime.js");
+    withMirrorEnv("1000", () => {
+      const runtime = new Runtime();
+      const r = runtime as unknown as {
+        mirrorRefreshIntervalMs: number;
+        mirrorRefreshTimer: ReturnType<typeof setInterval> | null;
+      };
+      assert.equal(r.mirrorRefreshIntervalMs, 1000, "field initializer should have read 1000 from env");
+      runtime.startMirrorRefresh();
+      assert.notEqual(r.mirrorRefreshTimer, null, "timer MUST be scheduled at exactly 1000ms (boundary passes)");
+      // Pin the `.unref()` contract. If a future refactor drops the
+      // `.unref()` block in startMirrorRefresh, the disable-path tests
+      // still pass (they assert `=== null`) and the production behavior
+      // silently regresses to a keeping-alive interval that holds the
+      // event loop past `app.close()` until SIGKILL. Asserting `unref`
+      // is a function surfaces that regression at unit-test time.
+      assert.equal(
+        typeof (r.mirrorRefreshTimer as { unref?: () => unknown } | null)?.unref,
+        "function",
+        "timer must expose .unref() so it doesn't keep the process alive past shutdown",
+      );
+      assert.doesNotThrow(
+        () => (r.mirrorRefreshTimer as { unref: () => unknown } | null)?.unref?.(),
+        "calling .unref() on the timer must be a no-throw",
+      );
+      runtime.stopMirrorRefresh();
+      assert.equal(r.mirrorRefreshTimer, null, "stopMirrorRefresh clears the timer reference");
+    });
+  });
+
+  it("refuses to schedule the timer when MIRROR_REFRESH_INTERVAL_MS is malformed (parses to NaN)", async () => {
+    // The disable contract relies on `!NaN === true` short-circuiting
+    // before the `< 1000` clause. This test exists specifically to
+    // pin that behavior -- a refactor that drops the `!` short-circuit
+    // (e.g. `if (val >= 1000) schedule`) would let NaN fall through
+    // and schedule a sub-1ms spin-loop on a malformed env like "30s".
+    const { Runtime } = await import("./runtime.js");
+    withMirrorEnv("30s", () => {
+      const runtime = new Runtime();
+      const r = runtime as unknown as {
+        mirrorRefreshIntervalMs: number;
+        mirrorRefreshTimer: ReturnType<typeof setInterval> | null;
+      };
+      assert.ok(Number.isNaN(r.mirrorRefreshIntervalMs), "Number('30s') is NaN");
+      runtime.startMirrorRefresh();
+      assert.equal(
+        r.mirrorRefreshTimer,
+        null,
+        "timer must not be scheduled when interval parses to NaN (!NaN === true short-circuits the disable)",
+      );
+    });
+  });
+});

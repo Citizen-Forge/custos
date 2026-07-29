@@ -12,6 +12,7 @@ import { getGlobalAgent } from "./pm/global-agents.js";
 import { resolveEmbeddingHost } from "./providers/embedding-url.js";
 import * as agentStore from "./pm/agents.js";
 import { markProviderAvailable, markProviderUnavailable } from "./pm/model-registry.js";
+import { syncSpawnedSessionCredentials } from "./auth/credentials.js";
 
 /** Per-provider runtime stats, used by the admin endpoint, the periodic
  * stats logger, and the threshold-alert monitor. Reads from
@@ -150,6 +151,18 @@ export interface FallbackSetEntryHealth {
    *  previous bindings (in case anyone else has registered listeners)
    *  don't leak across reloads. */
   private availabilityUnsubs: Array<() => void> = [];
+  /** `setInterval` handle for the periodic OAuth-mirror re-write. The
+   *  third writer (likely the spawned `claude` CLI on auth rotation /
+   *  rate-limit responses) can clobber `/root/.claude/.credentials.json`
+   *  back to empty within seconds after our boot-time or per-spawn
+   *  mirror runs. The re-mirror timer bounds that gap to the
+   *  `intervalMs` threshold so a long-lived agent eventually reads a
+   *  valid file even if a single transient clobber slipped between the
+   *  boot-time sync and the first agent spawn. Default 30s interval is
+   *  tunable via MIRROR_REFRESH_INTERVAL_MS env; the timer is owned by
+   *  index.ts and torn down on Fastify `onClose`. */
+  private mirrorRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private mirrorRefreshIntervalMs: number = Number(process.env.MIRROR_REFRESH_INTERVAL_MS ?? 30_000);
 
   /** Resolve a fallback set to the first available provider+model and
    *  acquire a slot. Checks ProviderStateMap for each provider in the
@@ -184,6 +197,52 @@ export interface FallbackSetEntryHealth {
   /** Access the GlobalQueue for direct calls (e.g. from agent-runner). */
   get globalQueue(): GlobalQueue | null {
     return this.queue;
+  }
+
+  /** Start the periodic OAuth-mirror re-mirror timer. Idempotent — a second
+   *  call cleanly replaces the existing timer (e.g. when a config edit
+   *  triggers a runtime reload). The timer ticks `syncSpawnedSessionCredentials()`
+   *  at the configured interval; that function returns gracefully on
+   *  invalid/empty input (logs a warn, doesn't throw) so the timer
+   *  never becomes a noise source beyond what's already emitted by the
+   *  sync itself.
+   *
+   *  Disable contract: `MIRROR_REFRESH_INTERVAL_MS` of 0, any value
+   *  below 1000ms, `undefined` after env-miss, or `NaN` (from a
+   *  malformed env like `30s`) ALL disable the timer. Documented so a
+   *  future maintainer doesn't try to "fix" the guard by inverting it
+   *  (e.g. `if (val >= 1000)` would drop the `!val` short-circuit for
+   *  NaN and accidentally schedule a 0-ms spin loop). The boot-time +
+   *  per-spawn syncs still cover the common paths when disabled. */
+  startMirrorRefresh(): void {
+    if (this.mirrorRefreshTimer) clearInterval(this.mirrorRefreshTimer);
+    if (!this.mirrorRefreshIntervalMs || this.mirrorRefreshIntervalMs < 1000) {
+      // Treat sub-1000ms intervals as "off" rather than spinning the
+      // event loop. The full disable contract (0 / NaN / undefined /
+      // <1000) is documented in the JSDoc above -- this guard relies
+      // on `!NaN === true` to short-circuit before the `< 1000` clause.
+      console.warn(`[mirror-refresh] disabled: MIRROR_REFRESH_INTERVAL_MS=${this.mirrorRefreshIntervalMs}ms is below the 1000ms floor`);
+      return;
+    }
+    this.mirrorRefreshTimer = setInterval(() => {
+      void syncSpawnedSessionCredentials();
+    }, this.mirrorRefreshIntervalMs);
+    // Don't keep the process alive solely on this timer; Fastify keeps
+    // the loop busy while it's listening, and on shutdown we explicitly
+    // call stopMirrorRefresh() via Fastify's onClose hook.
+    if (typeof this.mirrorRefreshTimer.unref === "function") {
+      this.mirrorRefreshTimer.unref();
+    }
+  }
+
+  /** Stop the periodic mirror-refresh timer. Safe to call when not
+   *  running (no-op). Called from Fastify's onClose so SIGTERM/SIGINT/
+   *  `app.close()` doesn't leave a dangling interval keeping the event
+   *  loop busy. */
+  stopMirrorRefresh(): void {
+    if (!this.mirrorRefreshTimer) return;
+    clearInterval(this.mirrorRefreshTimer);
+    this.mirrorRefreshTimer = null;
   }
 
   /** Dispatch a single provider+model call through the GlobalQueue. Used
