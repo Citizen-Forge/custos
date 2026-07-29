@@ -121,6 +121,11 @@ export interface RunTurnOptions {
  */
 export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promise<void> {
   const { cwd, prompt, resumeSessionId, appendSystemPrompt, model, onEvent, signal } = options;
+  // Layer 1 + 3: mirror the gateway's OAuth session into the format the
+  // spawned Claude Code CLI reads at startup. Refuses to clobber the file
+  // with empty tokens if the gateway's own TokenSet is malformed (see
+  // credentials.ts for the long-form rationale) — in that case the
+  // subprocess falls back to ANTHROPIC_API_KEY below.
   await syncSpawnedSessionCredentials();
   const settingsPath = await ensureHeadlessSettingsFile(options.hookProfile ?? "chat");
 
@@ -144,6 +149,27 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   // carrying that auth back through ANTHROPIC_API_KEY.
   env.ANTHROPIC_BASE_URL = `http://localhost:${PORT}`;
   if (model) env.ANTHROPIC_MODEL = model;
+
+  // Layer 2 (belt-and-suspenders): if a static Anthropic API key is set
+  // in the gateway config, propagate it to the subprocess as
+  // ANTHROPIC_API_KEY. This is the SECOND auth path the spawned CLI can
+  // use — if the OAuth mirror above bails (Layer 1's `preserved`
+  // outcome because the in-memory TokenSet is somehow empty) the
+  // subprocess's local-login check still passes, the CLI picks API-key
+  // auth mode over OAuth (Claude Code's precedence), and the request
+  // still routes through the gateway because ANTHROPIC_BASE_URL is the
+  // localhost gateway URL regardless of which auth scheme the CLI
+  // chose. Skipped when there is no static key configured (OAuth-only
+  // users) because overwriting ANTHROPIC_API_KEY with an empty string
+  // would crash the CLI's auth check with the inverse failure mode
+  // (Claude Code sees `ANTHROPIC_API_KEY=""`, decides it's unset, then
+  // falls through to the OAuth mirror which is also broken — the
+  // opposite of what we want).
+  const anthropicApiKey = runtime.config?.anthropic?.apiKey?.trim();
+  if (anthropicApiKey) {
+    env.ANTHROPIC_API_KEY = anthropicApiKey;
+  }
+
   // Vault secrets last: they're the caller's explicit choice for this run,
   // and should win over anything the gateway process happens to inherit.
   Object.assign(env, options.env ?? {});
