@@ -1,4 +1,4 @@
-import { readFile, readdir, mkdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, mkdir, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import type { Runtime } from "../runtime.js";
 import type { EmbeddingConfig } from "./embeddings.js";
@@ -6,6 +6,7 @@ import { embed } from "./embeddings.js";
 import { MemoryStore } from "./store.js";
 import { getGlobalAgent } from "../pm/global-agents.js";
 import { primaryPick } from "../pm/agents.js";
+import { toOpenAIRequest } from "../providers/openai-translate.js";
 
 const SESSIONS_DIR = process.env.GATEWAY_SESSIONS_DIR ?? "data/sessions";
 const CURSOR_PATH = process.env.GATEWAY_CURATOR_CURSOR_PATH ?? "data/curator-cursor.json";
@@ -18,6 +19,23 @@ Output rules, which matter more than being helpful:
 - Your entire reply must be the JSON array and nothing else. No greeting, no explanation, no commentary on the conversation, no markdown fence.
 - Do not reply to the conversation you are shown. You are not a participant in it — you are reading a transcript and cataloguing facts from it.
 - If there is nothing worth keeping, the correct and complete reply is exactly: []`;
+
+/** System prompt for conversation compaction. Unlike fact extraction (which
+ *  isolates individual durable facts), compaction produces a single
+ *  structured user message that replaces the oldest exchanges. The summary
+ *  must preserve every decision, user preference, and architectural choice
+ *  so the conversation can continue without the compacted context going
+ *  silent. */
+const COMPACTION_SYSTEM_PROMPT = `You are a conversation compaction assistant. Given the oldest exchanges from a long-running chat, produce a concise structured summary that preserves every decision, fact, user preference, architectural choice, and ongoing task. The summary will replace these exchanges so the conversation can continue without hitting size limits.
+
+Write a single user message that a new participant in the conversation could read to get up to speed. Use plain text, keep it factual and complete. Include:
+- Project goals and constraints
+- Key decisions and their rationale
+- User preferences (tool choices, coding style, review depth)
+- Open issues / in-progress work
+- Architecture or design choices
+
+Your entire response must be the user message text and nothing else. No greeting, no explanation, no markdown fences.`;
 
 /**
  * Pulls the first balanced JSON array out of a model's reply.
@@ -251,14 +269,170 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
   return factsStored;
 }
 
+/** Scans session files and compacts the oldest half of exchanges when the
+ *  estimated dispatch size exceeds the compaction threshold (60 % of the
+ *  smallest `maxRequestBytes` across all configured providers). The oldest
+ *  exchanges are replaced with a structured summary produced by the
+ *  memoryCurator global agent, preventing conversations from growing to
+ *  the point where pre-emptive truncation drops context on every dispatch.
+ *
+ *  Runs BEFORE `runCuratorPass` in the same interval so the curator reads
+ *  the compacted file rather than the pre-compaction original. The cursor
+ *  is updated after compaction so the next curator pass does not re-process
+ *  the compacted summary as new content.
+ *
+ *  Returns the number of session files compacted this pass (not the number
+ *  of exchanges — an operator seeing `compact: 3` knows three sessions were
+ *  rewritten, which is the actionable signal). Returns 0 when no provider
+ *  has a `maxRequestBytes` cap (compaction not needed) or when all sessions
+ *  are under the compaction threshold. */
+export async function runCompactPass(deps: CuratorDeps): Promise<number> {
+  // Find the smallest maxRequestBytes across all providers.
+  const config = deps.runtime.config;
+  let maxRequestBytes: number | undefined;
+  for (const def of Object.values(config.providers ?? {})) {
+    if (def.maxRequestBytes !== undefined) {
+      if (maxRequestBytes === undefined || def.maxRequestBytes < maxRequestBytes) {
+        maxRequestBytes = def.maxRequestBytes;
+      }
+    }
+  }
+  // Also check legacy instances in case no new-shape provider has a cap.
+  for (const instance of Object.values(config.openaiCompatibleInstances)) {
+    if (instance.maxRequestBytes !== undefined) {
+      if (maxRequestBytes === undefined || instance.maxRequestBytes < maxRequestBytes) {
+        maxRequestBytes = instance.maxRequestBytes;
+      }
+    }
+  }
+  if (maxRequestBytes === undefined) {
+    return 0; // No provider has a request size cap; no compaction needed.
+  }
+
+  const compactThreshold = maxRequestBytes * 0.6;
+
+  let files: string[];
+  try {
+    files = await readdir(SESSIONS_DIR);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw err;
+  }
+
+  const agent = await getGlobalAgent("memoryCurator");
+  if (!agent) {
+    console.warn("compact: no global agent with systemRole \"memoryCurator\"; skipping pass");
+    return 0;
+  }
+  const pick = primaryPick(agent, config);
+  if (!pick) {
+    console.warn(`compact: no primary pick for global agent "${agent.name}" (fallbackSet="${agent.fallbackSet ?? "<unset>"}"); skipping pass`);
+    return 0;
+  }
+
+  const cursor = await loadCursor();
+  let compacted = 0;
+
+  for (const file of files.filter((f) => f.endsWith(".jsonl"))) {
+    const filePath = join(SESSIONS_DIR, file);
+    const content = await readFile(filePath, "utf8");
+    const lines = content.split("\n").filter(Boolean);
+    if (lines.length < 4) continue; // Too few lines to compact (< 2 turns).
+
+    // Estimate dispatch size from the LAST line's request, which already
+    // contains the full accumulated conversation up to that turn (all prior
+    // user messages + all prior assistant responses). Iterating every line's
+    // request.messages would accumulate N copies of the conversation (O(N²))
+    // and trigger compaction far below the intended threshold.
+    const lastParsed = JSON.parse(lines[lines.length - 1]);
+    const openaiReq = toOpenAIRequest(lastParsed.request, "estimation");
+    const bytes = Buffer.byteLength(JSON.stringify(openaiReq), "utf8");
+
+    if (bytes <= compactThreshold) continue;
+
+    // Compact the oldest half of exchanges.
+    const compactCount = Math.max(1, Math.floor(lines.length / 2));
+    const oldLines = lines.slice(0, compactCount);
+    const keepLines = lines.slice(compactCount);
+
+    // Build exchange text for the compaction agent.
+    const exchanges = oldLines.map((l) => {
+      const { request, response } = JSON.parse(l);
+      const userText = request.messages?.at(-1)?.content ?? "";
+      const assistantText = response.content?.find((b: { type: string }) => b.type === "text")?.text ?? "";
+      const user = typeof userText === "string" ? userText : JSON.stringify(userText);
+      return `USER: ${truncate(user)}\nASSISTANT: ${truncate(assistantText)}`;
+    });
+    const batchText = exchanges.join("\n---\n");
+
+    const res = await deps.runtime.completeViaProvider(
+      pick.providerKey,
+      pick.model,
+      {
+        model: pick.model,
+        system: COMPACTION_SYSTEM_PROMPT,
+        max_tokens: 2000,
+        messages: [{ role: "user", content: batchText }],
+      },
+      { priority: "background" },
+      { fallbackSet: agent.fallbackSet ?? undefined, projectId: undefined, agentId: agent.id, agentName: agent.name, role: "memoryCurator" },
+    );
+
+    const responseText = await new Response(res.body).text();
+    let summary = responseText;
+    try {
+      const json = JSON.parse(responseText);
+      summary = json.content?.[0]?.text ?? responseText;
+    } catch {
+      // Not an Anthropic-shaped envelope; treat the whole body as the text.
+    }
+
+    // Build the compacted file: one summary exchange + kept exchanges.
+    const summaryLine = JSON.stringify({
+      request: { messages: [{ role: "user", content: summary }] },
+      response: { content: [{ type: "text", text: "[compacted summary]" }] },
+    });
+    const newContent = [summaryLine, ...keepLines].join("\n") + "\n";
+
+    // Atomic write: write to .tmp, then rename.
+    const tmpPath = filePath + ".tmp";
+    await writeFile(tmpPath, newContent, "utf8");
+    await rename(tmpPath, filePath);
+
+    // Reset the curator cursor so the next curator pass doesn't try to
+    // process the compacted summary as new content nor miss lines after
+    // the old cursor (which was tracking the pre-compaction line count).
+    const newLineCount = 1 + keepLines.length; // summary + kept lines
+    cursor[file] = newLineCount;
+
+    compacted++;
+    console.log(`[compact] ${file}: compacted ${compactCount} exchange(s) (${bytes}B -> ~${Buffer.byteLength(newContent, "utf8")}B, threshold=${compactThreshold}B)`);
+  }
+
+  await saveCursor(cursor);
+  return compacted;
+}
+
 /** Takes a deps thunk rather than a fixed object so a live config reload
  * (e.g. from the admin UI) is picked up on the next tick instead of
  * requiring a restart. The thunk may resolve to `embedding: null` when
  * no embeddings global agent has been configured -- the curator still
  * runs (so its presence is obvious in logs) but skips fact storage
- * rather than crashing. */
+ * rather than crashing. Runs compact pass first (to keep session files
+ * under the size threshold) then the curator pass (to extract facts from
+ * any new exchanges). Both errors are caught independently so a failure
+ * in one does not strand the other. */
 export function startCurator(getDeps: () => CuratorDeps, intervalMs: number): NodeJS.Timeout {
-  return setInterval(() => {
-    runCuratorPass(getDeps()).catch((err) => console.error("curator pass failed:", err));
+  return setInterval(async () => {
+    try {
+      await runCompactPass(getDeps());
+    } catch (err) {
+      console.error("compact pass failed:", err);
+    }
+    try {
+      await runCuratorPass(getDeps());
+    } catch (err) {
+      console.error("curator pass failed:", err);
+    }
   }, intervalMs);
 }
