@@ -1,5 +1,6 @@
 import type { Runtime } from "../runtime.js";
 import { runTurn, type TurnEvent } from "../remote/turn-runner.js";
+import { getProject } from "../remote/projects.js";
 import { formatModelAlias, formatFallbackAlias } from "../providers/model-alias.js";
 import { ROLE_PROMPTS } from "./prompts.js";
 import { resolveAgentEnv, redactSecrets } from "./vault.js";
@@ -241,6 +242,14 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   }, RUN_TIMEOUT_MS);
 
   try {
+    // Look up the project here (not from the agent row) so a rename on
+    // the board shows up immediately in the activity log rather than
+    // waiting for the agent row to be re-persisted. If the project has
+    // been deleted between scheduling and dispatch, surface the throw
+    // through the existing catch -- a missing project is a real failure,
+    // not a "use the GUID as a name" fallback.
+    const project = await getProject(projectId);
+    if (!project) throw new Error(`project ${projectId} not found`);
     await runTurn(runtime, {
       cwd,
       // The contract lives in the system prompt, but a provider whose
@@ -262,9 +271,14 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       // gateway's /v1/messages handler can recover it and attribute the
       // resulting activity-log events back to the project + agent that
       // triggered them. Without this the queue's dispatch events would be
-      // visible but anonymous in the admin panel.
+      // visible but anonymous in the admin panel. `projectName` is
+      // looked up above (just before runTurn) because the project file
+      // is the source of truth -- a rename on the board shows up
+      // immediately rather than waiting for the agent row to be
+      // re-persisted, which never happens for legacy agents.
       model: formatFallbackAlias(agent.fallbackSet as string, {
         projectId,
+        projectName: project.name,
         agentId: agent.id,
         agentName: agent.name,
         role: agent.role,
