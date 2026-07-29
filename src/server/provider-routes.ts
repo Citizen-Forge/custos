@@ -11,13 +11,14 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
 
   app.put("/admin/api/providers/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, priority, embeddingUrl } = req.body as {
+    const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, maxRequestBytes, priority, embeddingUrl } = req.body as {
       baseUrl: string;
       costType: "free" | "subscription" | "metered";
       models: { name: string; enabled: boolean; pricing?: PricingConfig | null }[];
       apiKey?: string | null;
       maxConcurrent?: number | null;
       rpmLimit?: number | null;
+      maxRequestBytes?: number | null;
       priority?: Priority | null;
       embeddingUrl?: string | null;
     };
@@ -34,6 +35,11 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
         (!Number.isInteger(rpmLimit) || rpmLimit < 1)) {
       reply.code(400);
       return { error: "rpmLimit must be a positive integer (set to null for unlimited)" };
+    }
+    if (maxRequestBytes !== undefined && maxRequestBytes !== null &&
+        (!Number.isInteger(maxRequestBytes) || maxRequestBytes < 1024)) {
+      reply.code(400);
+      return { error: "maxRequestBytes must be a positive integer >= 1024 (set to null for unlimited)" };
     }
     if (priority !== undefined && priority !== null && priority !== "interactive" && priority !== "background") {
       reply.code(400);
@@ -61,6 +67,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
           apiKey: apiKey || undefined,
           maxConcurrent: maxConcurrent ?? undefined,
           rpmLimit: rpmLimit ?? undefined,
+          maxRequestBytes: maxRequestBytes ?? undefined,
           priority: priority ?? undefined,
           embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
         },
@@ -191,13 +198,14 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
 
   app.put("/admin/api/instances/:name", async (req, reply) => {
     const { name } = req.params as { name: string };
-    const { baseUrl, model, apiKey, pricing, maxConcurrent, priority, rpmLimit, embeddingUrl } = req.body as {
+    const { baseUrl, model, apiKey, pricing, maxConcurrent, priority, rpmLimit, maxRequestBytes, embeddingUrl } = req.body as {
       baseUrl: string;
       model: string;
       apiKey?: string | null;
       pricing?: PricingConfig | null;
       maxConcurrent?: number | null;
       rpmLimit?: number | null;
+      maxRequestBytes?: number | null;
       priority?: Priority | null;
       embeddingUrl?: string | null;
     };
@@ -214,6 +222,11 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
         (!Number.isInteger(rpmLimit) || rpmLimit < 1)) {
       reply.code(400);
       return { error: "rpmLimit must be a positive integer (set to null for unlimited)" };
+    }
+    if (maxRequestBytes !== undefined && maxRequestBytes !== null &&
+        (!Number.isInteger(maxRequestBytes) || maxRequestBytes < 1024)) {
+      reply.code(400);
+      return { error: "maxRequestBytes must be a positive integer >= 1024 (set to null for unlimited)" };
     }
     if (priority !== undefined && priority !== null && priority !== "interactive" && priority !== "background") {
       reply.code(400);
@@ -239,6 +252,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
           apiKey: apiKey || undefined,
           maxConcurrent: maxConcurrent ?? undefined,
           rpmLimit: rpmLimit ?? undefined,
+          maxRequestBytes: maxRequestBytes ?? undefined,
           priority: priority ?? undefined,
           embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
         },

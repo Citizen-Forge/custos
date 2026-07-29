@@ -12,12 +12,20 @@ import { primaryPick } from "../pm/agents.js";
 // prefix that provider needs (matches how OpenAI client SDKs configure
 // `base_url`). Tool-calling fidelity varies by provider and hasn't been
 // individually verified against each one beyond Ollama.
-export const PROVIDER_PRESETS = [
-  { id: "ollama", label: "Ollama (local)", baseUrl: "http://localhost:11434/v1", needsApiKey: false },
+//
+// `defaults` carries the field values that should land on a newly-added
+// provider derived from this preset. The Add form reads from this object
+// when the operator picks a preset so they don't have to re-enter
+// well-known tuning values; the Edit form leaves them alone (operators
+// usually know what they set). Groq specifically defaults to a 32 MB
+// request cap because Groq hard-rejects larger bodies with the
+// misleading "accumulated images and attachments" message.
+export const PROVIDER_PRESETS: Array<{ id: string; label: string; baseUrl: string; needsApiKey: boolean; defaults?: Partial<{ maxRequestBytes: number; rpmLimit: number; maxConcurrent: number; priority: "interactive" | "background" }> }> = [
+  { id: "ollama", label: "Ollama (local)", baseUrl: "http://localhost:11434/v1", needsApiKey: false, defaults: { maxConcurrent: 1, priority: "background" } },
   { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", needsApiKey: true },
   { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", needsApiKey: true },
-  { id: "gemini", label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", needsApiKey: true },
-  { id: "groq", label: "Groq", baseUrl: "https://api.groq.com/openai/v1", needsApiKey: true },
+  { id: "gemini", label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", needsApiKey: true, defaults: { rpmLimit: 10 } },
+  { id: "groq", label: "Groq", baseUrl: "https://api.groq.com/openai/v1", needsApiKey: true, defaults: { maxRequestBytes: 32 * 1024 * 1024 } },
   { id: "mistral", label: "Mistral", baseUrl: "https://api.mistral.ai/v1", needsApiKey: true },
   { id: "xai", label: "xAI (Grok)", baseUrl: "https://api.x.ai/v1", needsApiKey: true },
   { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", needsApiKey: true },
@@ -86,6 +94,7 @@ export async function describeProviders(runtime: Runtime) {
           rpmLimit: def.rpmLimit ?? null,
           priority: def.priority ?? null,
           emitLateMetadataDelta: def.emitLateMetadataDelta ?? null,
+          maxRequestBytes: def.maxRequestBytes ?? null,
         },
       ] as const;
     }),

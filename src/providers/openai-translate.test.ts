@@ -32,7 +32,7 @@ import assert from "node:assert/strict";
 import { fromOpenAIResponse, toOpenAIRequest } from "./openai-translate.js";
 import { translateStream } from "./openai-compatible.js";
 import { makeFakeResponse, readStream, parseSSEOutput } from "./streaming-harness.js";
-import type { AnthropicMessagesRequest, VendorMetadataDeltaEvent } from "../types.js";
+import type { AnthropicMessagesRequest, AnthropicMessage, VendorMetadataDeltaEvent } from "../types.js";
 
 describe("toOpenAIRequest -- vendor metadata emission", () => {
   it("forwards a tool_use carrier as per-tool-call extra_content plus message-level extra_body (Gemini)", () => {
@@ -958,5 +958,219 @@ describe("translateStream -- vendor metadata in content_block_start", () => {
       { google: { thought_signature: "LATE-FALLBACK-SIG" } },
       "fallback metadata chain (per-call -> delta-level) applies to the late path too",
     );
+  });
+});
+
+// Image preservation + per-provider size cap (fitRequestToSize).
+//
+// The pre-fix behavior was: `blockText` filtered to text-only blocks,
+// so anthropic image blocks were silently dropped on the way out to any
+// OpenAI-compatible upstream. Conversations with images that grew
+// beyond the upstream's request-size cap then failed with the upstream's
+// own error (Groq's "accumulated images and attachments" message is
+// particularly unhelpful). The fix preserves images as OpenAI
+// image_url parts and adds fitRequestToSize, which strips oldest inline
+// base64 images when the serialized body exceeds a per-provider cap.
+
+import {
+  fitRequestToSize,
+  isOpenAIImagePart,
+  type OpenAIContentPart,
+} from "./openai-translate.js";
+
+/** Build an N-message request with a few inline-base64 images of varying
+ *  sizes. Pure helper for the test cases below. */
+function buildRequestWithImages(
+  imageSizesBytes: number[],
+  textPerMessage: string = "x",
+): AnthropicMessagesRequest {
+  const messages = imageSizesBytes.map((size, mi) => {
+    const base64Pad = "A".repeat(Math.max(0, size - 100));
+    const blocks: unknown[] = [
+      { type: "text", text: `${textPerMessage} msg${mi}` },
+    ];
+    if (size > 0) {
+      blocks.push({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: base64Pad },
+      });
+    }
+    return { role: "user" as const, content: blocks as AnthropicMessage["content"] };
+  });
+  return {
+    model: "test-model",
+    messages,
+    max_tokens: 100,
+  };
+}
+
+describe("image preservation: Anthropic -> OpenAI translation", () => {
+  it("emits an image_url content part for an Anthropic image block (base64)", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "x",
+      max_tokens: 1,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "what's in this image?" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "AAA" } },
+        ],
+      }],
+    };
+    const openai = toOpenAIRequest(req, "x");
+    assert.equal(openai.messages.length, 1);
+    const content = openai.messages[0].content;
+    assert.ok(Array.isArray(content), "image-bearing message emits an array content");
+    // text part first, then image_url
+    const parts = content as OpenAIContentPart[];
+    assert.equal(parts.length, 2);
+    assert.equal(parts[0].type, "text");
+    assert.ok(isOpenAIImagePart(parts[1]));
+    const img = (parts[1] as { image_url: { url: string } }).image_url;
+    assert.ok(img.url.startsWith("data:image/png;base64,"), `url must be a data URI, got ${img.url.slice(0, 40)}...`);
+  });
+
+  it("emits an image_url content part for a remote URL image", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "x",
+      max_tokens: 1,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "url", url: "https://example.com/foo.png" } },
+        ],
+      }],
+    };
+    const openai = toOpenAIRequest(req, "x");
+    const parts = openai.messages[0].content as OpenAIContentPart[];
+    assert.ok(isOpenAIImagePart(parts[0]), "URL image becomes an image_url part");
+    assert.equal((parts[0] as { image_url: { url: string } }).image_url.url, "https://example.com/foo.png");
+  });
+
+  it("preserves images inside tool_result content", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "x",
+      max_tokens: 1,
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [
+              { type: "text", text: "tool returned this:" },
+              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "BBB" } },
+            ],
+          },
+        ],
+      }],
+    };
+    const openai = toOpenAIRequest(req, "x");
+    const toolMsg = openai.messages[0];
+    assert.equal(toolMsg.role, "tool");
+    assert.ok(Array.isArray(toolMsg.content));
+    const parts = toolMsg.content as OpenAIContentPart[];
+    assert.ok(parts.some(isOpenAIImagePart), "tool_result with image becomes a tool message with image_url");
+  });
+
+  it("text-only messages still emit a string content (legacy form preserved)", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "x",
+      max_tokens: 1,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    };
+    const openai = toOpenAIRequest(req, "x");
+    assert.equal(typeof openai.messages[0].content, "string", "text-only stays a string for compat");
+    assert.equal(openai.messages[0].content, "hi");
+  });
+});
+
+describe("fitRequestToSize", () => {
+  it("returns the request unchanged when already under the cap", () => {
+    const req = toOpenAIRequest(buildRequestWithImages([10, 10, 10]), "x");
+    const result = fitRequestToSize(req, 10_000_000);
+    assert.equal(result.stripped, 0);
+    assert.equal(result.stillOverLimit, false);
+    assert.ok(result.initialBytes <= 10_000_000);
+    assert.equal(result.finalBytes, result.initialBytes);
+  });
+
+  it("strips oldest image until the body fits when over cap", () => {
+    // 3 messages, each with a ~2KB image. Cap = 1.5KB total. Should
+    // strip at least 2 of the 3 images to fit.
+    const req = toOpenAIRequest(buildRequestWithImages([2048, 2048, 2048]), "x");
+    const cap = 1500;
+    const result = fitRequestToSize(req, cap);
+    assert.ok(result.stripped > 0, "must strip when over cap");
+    assert.equal(result.stillOverLimit, false, "must fit after stripping");
+    assert.ok(result.finalBytes <= cap, `finalBytes ${result.finalBytes} must be <= cap ${cap}`);
+    // Oldest images are stripped first -- verify by examining messages.
+    // After stripping, the OLDEST messages' image parts (indices 0
+    // and 1) become placeholder text, leaving message[2]'s image intact.
+    const last = (result.request.messages[2].content as OpenAIContentPart[]);
+    assert.ok(last.some(isOpenAIImagePart), "newest message's image is preserved");
+  });
+
+  it("strips multiple images from the SAME message when one isn't enough", () => {
+    // One message with three large images -- regression test for the
+    // bug where the inner loop incorrectly continued messageLoop after
+    // one strip, skipping remaining images in the same message.
+    const req: AnthropicMessagesRequest = {
+      model: "x",
+      max_tokens: 1,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "t" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(2000) } },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "B".repeat(2000) } },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "C".repeat(2000) } },
+        ],
+      }],
+    };
+    const openai = toOpenAIRequest(req, "x");
+    const result = fitRequestToSize(openai, 1500);
+    assert.ok(result.stripped >= 2, `must strip at least 2 of 3 images, got ${result.stripped}`);
+    assert.equal(result.stillOverLimit, false);
+    assert.ok(result.finalBytes <= 1500);
+  });
+
+  it("returns stillOverLimit=true when no images are present but the request is still over cap", () => {
+    // Pure text request -- can't strip anything.
+    const req: AnthropicMessagesRequest = {
+      model: "x",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "x".repeat(5000) }],
+    };
+    const openai = toOpenAIRequest(req, "x");
+    const result = fitRequestToSize(openai, 100);
+    assert.equal(result.stripped, 0);
+    assert.equal(result.stillOverLimit, true);
+  });
+
+  it("URL-only image references are not stripped (already small)", () => {
+    // 5 messages each with a URL-only image -- URL strings are tiny so
+    // no stripping should happen for a reasonable cap.
+    const req: AnthropicMessagesRequest = {
+      model: "x",
+      max_tokens: 1,
+      messages: Array.from({ length: 5 }).map((_, i) => ({
+        role: "user" as const,
+        content: [{
+          type: "image",
+          source: { type: "url", url: `https://example.com/img${i}.png` },
+        }],
+      })),
+    };
+    const openai = toOpenAIRequest(req, "x");
+    const result = fitRequestToSize(openai, 50_000);
+    assert.equal(result.stripped, 0, "URL-only images stay -- only base64 data URIs are stripped");
+  });
+
+  it("clones the request so the caller's reference is untouched", () => {
+    const req = toOpenAIRequest(buildRequestWithImages([4096, 4096, 4096]), "x");
+    const beforeJson = JSON.stringify(req);
+    fitRequestToSize(req, 1500);
+    assert.equal(JSON.stringify(req), beforeJson, "original request must not be mutated");
   });
 });

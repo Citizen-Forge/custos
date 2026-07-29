@@ -385,6 +385,7 @@ export class Runtime {
         rpmLimit: providerDef.rpmLimit,
         priority: providerDef.priority,
         emitLateMetadataDelta: providerDef.emitLateMetadataDelta,
+        maxRequestBytes: providerDef.maxRequestBytes,
       };
       const inner = new OpenAICompatibleProvider(name, instanceConfig);
       if (providerDef.maxConcurrent || providerDef.rpmLimit) {
@@ -447,6 +448,7 @@ export class Runtime {
         rpmLimit: undefined,
         priority: providerDef.priority,
         emitLateMetadataDelta: providerDef.emitLateMetadataDelta,
+        maxRequestBytes: providerDef.maxRequestBytes,
       };
       bareProviders[name] = new OpenAICompatibleProvider(name, instanceConfig);
       stateMap.register(name, {

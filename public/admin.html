@@ -284,6 +284,13 @@ function renderModelCheckboxes(container, models, enabledSet) {
 //   - a positive integer otherwise (== "throttle on, capped at N")
 // `null` on the wire maps to an omitted `maxConcurrent` on config.json, so an
 // unlimited instance round-trips cleanly through saveConfig -> loadConfig.
+function formatBytes(n) {
+  if (n == null) return "—";
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(n % (1024 * 1024) === 0 ? 0 : 1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(n % 1024 === 0 ? 0 : 1) + " KB";
+  return n + " B";
+}
+
 function parseThrottle(input) {
   const raw = input.value.trim();
   const value = raw ? Number(raw) : null;
@@ -513,6 +520,10 @@ function enterEditRow(row, name, prov) {
   // --- RPM limit ---
   const rpmInput = el("input", { type: "number", min: "1", step: "1", value: prov.rpmLimit ?? "", placeholder: "Unlimited" });
 
+  // --- Max request bytes (Groq-style upstream caps, etc.) ---
+  const maxRequestBytesInput = el("input", { type: "number", min: "1024", step: "1", value: prov.maxRequestBytes ?? "", placeholder: "Unlimited (bytes)" });
+  maxRequestBytesInput.title = "Hard cap on serialized request body. Set to 33554432 for Groq (32MB).";
+
   // --- Priority selector ---
   const prioritySelect = el("select", {}, [
     el("option", { value: "interactive", text: "Interactive" }),
@@ -539,6 +550,9 @@ function enterEditRow(row, name, prov) {
     el("label", { text: "RPM limit" }),
     rpmInput,
     el("span", { class: "small", text: "requests/min (set to 10 for Gemini Free)" }),
+    el("label", { text: "Max bytes" }),
+    maxRequestBytesInput,
+    el("span", { class: "small", text: "request body cap (Groq = 33554432 = 32MB, blank = unlimited)" }),
   ]));
   form.appendChild(el("div", { class: "row" }, [
     el("label", { text: "Priority" }),
@@ -626,6 +640,12 @@ function enterEditRow(row, name, prov) {
       showToast("RPM limit must be a positive integer (or blank for unlimited)", true);
       return;
     }
+    const maxBytesRaw = maxRequestBytesInput.value.trim();
+    const maxBytesVal = maxBytesRaw ? Number(maxBytesRaw) : null;
+    if (maxBytesVal !== null && (!Number.isInteger(maxBytesVal) || maxBytesVal < 1024)) {
+      showToast("Max bytes must be a positive integer >= 1024 (or blank for unlimited)", true);
+      return;
+    }
     const hasPricing = inputPriceInput.value || outputPriceInput.value;
     const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : null;
     const models = readModelCheckboxes(modelCheckboxContainer, pricing);
@@ -642,6 +662,7 @@ function enterEditRow(row, name, prov) {
         apiKey: keyInput.value || null,
         maxConcurrent: throttle,
         rpmLimit: rpmVal,
+        maxRequestBytes: maxBytesVal,
         priority: prioritySelect.value,
         embeddingUrl: embeddingUrlInput.value || null,
       },
@@ -763,11 +784,12 @@ function renderProvidersPanel() {
     el("col", { style: "width: 12%;" }),
   ]));
   table.appendChild(el("tr", {}, [
-    el("th", { text: "Provider" }), el("th", { text: "Base URL" }), el("th", { text: "Cost" }), el("th", { text: "API key" }), el("th", { text: "Throttle" }), el("th", { text: "RPM" }), el("th", { text: "Priority" }), el("th", { text: "Actions" }),
+    el("th", { text: "Provider" }), el("th", { text: "Base URL" }), el("th", { text: "Cost" }), el("th", { text: "API key" }), el("th", { text: "Throttle" }), el("th", { text: "RPM" }), el("th", { text: "Max bytes" }), el("th", { text: "Priority" }), el("th", { text: "Actions" }),
   ]));
   for (const [name, prov] of Object.entries(state.providers)) {
     const throttleText = prov.maxConcurrent == null ? "—" : String(prov.maxConcurrent);
     const rpmText = prov.rpmLimit == null ? "—" : String(prov.rpmLimit);
+    const maxBytesText = prov.maxRequestBytes == null ? "—" : formatBytes(prov.maxRequestBytes);
     const priorityText = prov.priority == null ? "—" : (prov.priority === "interactive" ? "Interactive" : "Background");
     const costType = prov.costType || "free";
     const costText = { free: "Free", subscription: "Sub", metered: "Metered" }[costType] || costType;
@@ -795,6 +817,7 @@ function renderProvidersPanel() {
       el("td", { class: prov.apiKeyConfigured ? "" : "muted", text: prov.apiKeyConfigured ? prov.apiKeyMasked : "—" }),
       el("td", { class: prov.maxConcurrent == null ? "muted" : "", text: throttleText }),
       el("td", { class: prov.rpmLimit == null ? "muted" : "", text: rpmText }),
+      el("td", { class: prov.maxRequestBytes == null ? "muted" : "", text: maxBytesText, title: prov.maxRequestBytes == null ? "" : `${prov.maxRequestBytes} bytes` }),
       el("td", { class: prov.priority == null ? "muted" : "", text: priorityText }),
       el("td", { class: "actions-cell" }, [
         el("button", { class: "row-btn", text: "Test", onclick: async (ev) => {
@@ -901,12 +924,27 @@ function renderProvidersPanel() {
   const throttleInput = el("input", { type: "number", min: "1", step: "1", placeholder: "Unlimited" });
 
   // --- RPM limit (new!) ---
-  const rpmInput = el("input", { type: "number", min: "1", step: "1", value: "10", placeholder: "RPM limit" });
-  // Auto-fill RPM to 10 for known rate-limited presets.
-  function autoFillRpm(presetId) {
-    if (presetId === "gemini") { rpmInput.value = "10"; }
-    else if (presetId.startsWith("ollama")) { rpmInput.value = ""; }
-    else { rpmInput.value = ""; }
+  const rpmInput = el("input", { type: "number", min: "1", step: "1", value: "", placeholder: "RPM limit" });
+  // Max request bytes cap (e.g. Groq hard-caps at 32 MB). Blank = unlimited.
+  const maxRequestBytesInput = el("input", { type: "number", min: "1", step: "1", value: "", placeholder: "Unlimited (bytes)" });
+  maxRequestBytesInput.title = "Hard cap on serialized request body. Set to 33554432 for Groq (32MB).";
+  // Apply a preset's defaults to every corresponding field on a single
+  // helper, so adding a new preset default doesn't require touching
+  // multiple hand-rolled auto-fill switches. Each preset declares its
+  // own field set under PROVIDER_PRESETS[i].defaults (server-side).
+  function autoFillFromPreset(presetId) {
+    const preset = state.providerPresets.find((p) => p.id === presetId);
+    const defaults = preset?.defaults ?? {};
+    rpmInput.value = defaults.rpmLimit ?? "";
+    maxRequestBytesInput.value = defaults.maxRequestBytes ?? "";
+    if (typeof defaults.maxConcurrent === "number") {
+      throttleInput.value = String(defaults.maxConcurrent);
+      throttleInput.placeholder = `${defaults.maxConcurrent} (preset default)`;
+    } else {
+      throttleInput.value = "";
+      throttleInput.placeholder = "Unlimited";
+    }
+    prioritySelect.value = defaults.priority ?? "interactive";
   }
 
   // --- Priority selector ---
@@ -932,16 +970,7 @@ function renderProvidersPanel() {
     const preset = state.providerPresets.find((p) => p.id === ev.target.value);
     if (preset && preset.id !== "custom") urlInput.value = preset.baseUrl;
     if (preset && !nameInput.value) nameInput.value = preset.id;
-    autoFillRpm(preset ? preset.id : "");
-    if (preset && preset.id.startsWith("ollama")) {
-      throttleInput.value = "1";
-      throttleInput.placeholder = "1 (Ollama preset)";
-      prioritySelect.value = "background";
-    } else if (preset && preset.id !== "custom") {
-      throttleInput.value = "";
-      throttleInput.placeholder = "Unlimited";
-      prioritySelect.value = "interactive";
-    }
+    autoFillFromPreset(preset ? preset.id : "");
     // Auto-scan models for known presets so models appear immediately.
     autoScanModels();
   }});
@@ -976,6 +1005,9 @@ function renderProvidersPanel() {
     el("label", { text: "RPM" }),
     rpmInput,
     el("span", { class: "small", text: "req/min (Gemini Free = 10, blank = unlimited)" }),
+    el("label", { text: "Max bytes" }),
+    maxRequestBytesInput,
+    el("span", { class: "small", text: "request body cap (Groq = 33554432 = 32MB, blank = unlimited)" }),
   ]);
 
   const rowPriority = el("div", { class: "row" }, [
@@ -1023,6 +1055,12 @@ function renderProvidersPanel() {
       const pricing = hasPricing ? { inputPerMillion: Number(inputPriceInput.value) || 0, outputPerMillion: Number(outputPriceInput.value) || 0 } : null;
       const models = readModelCheckboxes(modelCheckboxContainer, pricing);
       if (!models.length) return showToast("Enable at least one model", true);
+      const maxBytesRaw = maxRequestBytesInput.value.trim();
+      const maxBytesVal = maxBytesRaw ? Number(maxBytesRaw) : null;
+      if (maxBytesVal !== null && (!Number.isInteger(maxBytesVal) || maxBytesVal < 1)) {
+        showToast("Max request bytes must be a positive integer (or blank for unlimited)", true);
+        return;
+      }
       reloadAfter(api(`/admin/api/providers/${encodeURIComponent(nameInput.value)}`, {
         method: "PUT",
         body: {
@@ -1034,6 +1072,7 @@ function renderProvidersPanel() {
           rpmLimit: rpmVal,
           priority: prioritySelect.value,
           embeddingUrl: embeddingUrlInput.value || null,
+          maxRequestBytes: maxBytesVal,
         },
       }), "Provider saved");
     }}),

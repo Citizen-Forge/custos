@@ -128,6 +128,17 @@ export interface ProviderDef {
    *  the global embeddings agent's `embeddingBaseUrl` field still wins
    *  over this when both are present. */
   embeddingUrl?: string;
+  /** Maximum size of a single /chat/completions request body (UTF-8
+   *  bytes). When set, the OpenAI-compatible provider strips the
+   *  oldest inline-base64 image parts until the body fits, then
+   *  returns a 413 if still over the cap (the upstream's own error
+   *  would be less specific). Set for tightly-capped hosts: Groq
+   *  is 32 MB, OpenRouter free tier varies by model. Leave unset
+   *  (no cap) for hosts that accept the full request -- Anthropic,
+   *  OpenAI API key, Mistral, etc. Carried through
+   *  `migrateInstanceToProvider` so the old `openaiCompatibleInstances`
+   *  shape keeps the value when migrating to the new shape. */
+  maxRequestBytes?: number;
 }
 
 export interface GatewayConfig {
@@ -292,6 +303,7 @@ function migrateInstanceToProvider(name: string, instance: OpenAICompatibleInsta
     maxConcurrent: instance.maxConcurrent,
     priority: instance.priority,
     emitLateMetadataDelta: instance.emitLateMetadataDelta,
+    maxRequestBytes: instance.maxRequestBytes,
   };
 }
 

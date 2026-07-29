@@ -1,5 +1,5 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type VendorMetadata } from "../types.js";
-import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf } from "./openai-translate.js";
+import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf, fitRequestToSize } from "./openai-translate.js";
 import { parseRetryAfterMs } from "./retry-header.js";
 import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
@@ -55,6 +55,19 @@ export interface OpenAICompatibleInstanceConfig {
    * still-open tool_use block. See types.ts VendorMetadataDeltaEvent
    * for the wire shape pinned by the streaming tests. */
   emitLateMetadataDelta?: boolean;
+  /** Maximum size, in bytes UTF-8, of a single /chat/completions request
+   *  body sent to this upstream. When set, `complete()` measures the
+   *  serialized OpenAI request and, if over the cap, replaces the
+   *  oldest inline-base64 image parts with a text placeholder until
+   *  the body fits. Set this for providers with smaller upstream
+   *  limits -- Groq hard-caps at 32 MB, OpenRouter free-tier has
+   *  varying per-model caps. Leaving unset keeps every image in full,
+   *  which is correct for upstream-tolerant hosts (Anthropic, OpenAI
+   *  API key, Mistral). The fit is purely best-effort: a request with
+   *  no inline images that's still over the limit fails loud so the
+   *  upstream's error surfaces to the operator instead of being
+   *  silently mangled. */
+  maxRequestBytes?: number;
 }
 
 /**
@@ -73,7 +86,41 @@ export class OpenAICompatibleProvider implements Provider {
   async complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
     // clientBetaHeader is Anthropic-specific and intentionally ignored here.
     const { signal, modelOverride } = options ?? {};
-    const openaiRequest = toOpenAIRequest(request, modelOverride ?? this.config.model);
+    let openaiRequest = toOpenAIRequest(request, modelOverride ?? this.config.model);
+
+    // Per-instance request size cap (see OpenAICompatibleInstanceConfig.maxRequestBytes).
+    // When configured, the request is fitted by stripping oldest inline-base64 image parts.
+    // A request that's still over the cap after all stripping has nothing left to drop
+    // (no images, or all remaining images are tiny URL references); surface a clear 413
+    // to claude-code rather than silently shipping an over-limit body the upstream will
+    // reject with its own generic message -- Groq's "accumulated images and attachments"
+    // error in particular doesn't tell the operator which conversation to compact.
+    if (this.config.maxRequestBytes !== undefined) {
+      const fit = fitRequestToSize(openaiRequest, this.config.maxRequestBytes);
+      if (fit.stripped > 0) {
+        // Keep an audit trail in the activity log so the operator can
+        // tell why a conversation came back smaller than claude-code
+        // sent it. Looks intimidating on stderr when working as designed
+        // (the strip is the only reason the request fit); quiet under
+        // the happy path where the body was already under the cap.
+        console.log(`[${this.name}] stripped ${fit.stripped} image(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)`);
+      }
+      openaiRequest = fit.request;
+      if (fit.stillOverLimit) {
+        return {
+          status: 413,
+          headers: new Headers({ "content-type": "application/json" }),
+          body: new Blob([JSON.stringify({
+            type: "error",
+            error: {
+              type: "request_too_large",
+              message: `${this.name}: request is ${fit.finalBytes}B after stripping all inline images, exceeding the ${this.config.maxRequestBytes}B cap. Compact the conversation or attach smaller images.`,
+            },
+          })]).stream(),
+        };
+      }
+    }
+
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) headers.authorization = `Bearer ${this.config.apiKey}`;
 
