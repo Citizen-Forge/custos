@@ -14,7 +14,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
     const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, maxRequestBytes, priority, embeddingUrl } = req.body as {
       baseUrl: string;
       costType: "free" | "subscription" | "metered";
-      models: { name: string; enabled: boolean; pricing?: PricingConfig | null; maxOutputTokens?: number | null }[];
+      models: { name: string; enabled: boolean; pricing?: PricingConfig | null; maxOutputTokens?: number | null; maxContextWindow?: number | null }[];
       apiKey?: string | null;
       maxConcurrent?: number | null;
       rpmLimit?: number | null;
@@ -69,6 +69,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
               enabled: m.enabled,
               ...(m.pricing ? { pricing: m.pricing } : {}),
               ...(m.maxOutputTokens !== undefined && m.maxOutputTokens !== null ? { maxOutputTokens: m.maxOutputTokens } : {}),
+              ...(m.maxContextWindow !== undefined && m.maxContextWindow !== null ? { maxContextWindow: m.maxContextWindow } : {}),
             })),
             apiKey: resolveApiKey(apiKey, cfg.providers?.[name]?.apiKey),
             maxConcurrent: resolveOptionalInt(maxConcurrent, cfg.providers?.[name]?.maxConcurrent),
@@ -184,7 +185,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
    *  sub-row. Fields not present in the body are left unchanged. */
   app.patch("/admin/api/providers/:name/models/:model", async (req, reply) => {
     const { name, model: modelName } = req.params as { name: string; model: string };
-    const { enabled, maxOutputTokens } = req.body as { enabled?: boolean; maxOutputTokens?: number | null };
+    const { enabled, maxOutputTokens, maxContextWindow } = req.body as { enabled?: boolean; maxOutputTokens?: number | null; maxContextWindow?: number | null };
     if (enabled !== undefined && typeof enabled !== "boolean") {
       reply.code(400);
       return { error: "enabled must be a boolean" };
@@ -193,6 +194,11 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
         (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1)) {
       reply.code(400);
       return { error: "maxOutputTokens must be a positive integer (or null for unlimited)" };
+    }
+    if (maxContextWindow !== undefined && maxContextWindow !== null &&
+        (!Number.isInteger(maxContextWindow) || maxContextWindow < 1)) {
+      reply.code(400);
+      return { error: "maxContextWindow must be a positive integer (or null for unlimited)" };
     }
     const provider = runtime.config.providers?.[name];
     if (!provider) { reply.code(404); return { error: `provider "${name}" not found` }; }
@@ -207,6 +213,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       const updated = { ...models[idx] };
       if (enabled !== undefined) updated.enabled = enabled;
       if (maxOutputTokens !== undefined) updated.maxOutputTokens = maxOutputTokens ?? undefined;
+      if (maxContextWindow !== undefined) updated.maxContextWindow = maxContextWindow ?? undefined;
       models[idx] = updated;
       return { ...cfg, providers: { ...cfg.providers, [name]: { ...target, models } } };
     });

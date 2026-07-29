@@ -79,7 +79,7 @@ export interface OpenAICompatibleInstanceConfig {
    * when `modelOverride` (via `CompleteOptions`) supplies a model
    * different than the default `model`. Populated at provider
    * construction from `ProviderDef.models` in `runtime.ts`. */
-  models?: Record<string, { maxOutputTokens?: number }>;
+  models?: Record<string, { maxOutputTokens?: number; maxContextWindow?: number }>;
 }
 
 /**
@@ -112,6 +112,20 @@ export class OpenAICompatibleProvider implements Provider {
     const modelCfg = this.config.models?.[effectiveModel];
     if (modelCfg?.maxOutputTokens !== undefined && openaiRequest.max_tokens !== undefined) {
       openaiRequest.max_tokens = Math.min(openaiRequest.max_tokens, modelCfg.maxOutputTokens);
+    }
+
+    // Warn when the serialized request exceeds the model's context window.
+    // Token count is estimated from bytes at ~3 chars per token (a
+    // reasonable approximation for mixed JSON + text). This is advisory
+    // only — the request is still sent because the upstream enforces its
+    // own limit and the estimate is approximate. Logged at `warn` level
+    // so it reaches the admin panel and the docker logs.
+    if (modelCfg?.maxContextWindow !== undefined) {
+      const estimatedBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
+      const estimatedTokens = Math.ceil(estimatedBytes / 3);
+      if (estimatedTokens > modelCfg.maxContextWindow) {
+        console.warn(`[${this.name}] model ${effectiveModel}: estimated ${estimatedTokens} tokens exceeds ${modelCfg.maxContextWindow} context window (${estimatedBytes}B serialized body)`);
+      }
     }
 
     // Per-instance request size cap (see OpenAICompatibleInstanceConfig.maxRequestBytes).

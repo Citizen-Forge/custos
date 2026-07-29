@@ -88,6 +88,14 @@ export interface ModelDef {
    * provider (e.g. Groq's Qwen 3.6 at 16384 vs Llama 3.1 at 8192) have
    * different per-model caps. Omit to allow any value the caller sends. */
   maxOutputTokens?: number;
+  /** Maximum total context (input + output) this model supports. When
+   * set, the provider estimates the token count of the serialized request
+   * and logs a warning if it exceeds this limit. Unlike `maxOutputTokens`
+   * this is purely advisory — the request is still sent because the
+   * upstream may enforce its own limit. Different models on the same
+   * provider have different context windows (e.g. Groq's Qwen 3.6 at
+   * 16384 vs Llama 3.1 at 8192 tokens). Omit to skip the check. */
+  maxContextWindow?: number;
 }
 
 /** Top-level provider abstraction. Replaces the flat

@@ -478,11 +478,12 @@ export interface FallbackSetEntryHealth {
       // Build per-model settings map so the provider can resolve
       // maxOutputTokens (and any future per-model tuning fields) at
       // dispatch time when modelOverride selects a non-default model.
-      const modelSettings: Record<string, { maxOutputTokens?: number }> = {};
+      const modelSettings: Record<string, { maxOutputTokens?: number; maxContextWindow?: number }> = {};
       for (const m of providerDef.models) {
-        if (m.maxOutputTokens !== undefined) {
-          modelSettings[m.name] = { maxOutputTokens: m.maxOutputTokens };
-        }
+        const entry: { maxOutputTokens?: number; maxContextWindow?: number } = {};
+        if (m.maxOutputTokens !== undefined) entry.maxOutputTokens = m.maxOutputTokens;
+        if (m.maxContextWindow !== undefined) entry.maxContextWindow = m.maxContextWindow;
+        if (Object.keys(entry).length > 0) modelSettings[m.name] = entry;
       }
       const instanceConfig = {
         baseUrl: providerDef.baseUrl,

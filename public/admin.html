@@ -934,6 +934,42 @@ function renderProvidersPanel() {
         }, 800);
       };
       modelTd.appendChild(maxTokenInput);
+      // Inline maxContextWindow input — warns when the estimated
+      // token count (bytes / 3) exceeds this value. Advisory only;
+      // the request is still sent. Different models on the same
+      // provider (e.g. Groq's various models with 16384 vs 8192
+      // context windows) have different limits.
+      modelTd.appendChild(el("span", { class: "small", style: "margin-left: 8px; font-size: 11px;", text: "ctx:" }));
+      const ctxWindowInput = el("input", {
+        type: "number",
+        min: "1",
+        step: "1",
+        style: "width: 70px; font-size: 11px; padding: 2px 5px; margin-left: 3px;",
+        value: model.maxContextWindow ?? "",
+        placeholder: "unlimited",
+        title: "Maximum total context (input + output) tokens this model supports. Estimated from serialized body bytes / 3. Blank = skip check.",
+      });
+      let ctxSaveTimeout = null;
+      ctxWindowInput.oninput = () => {
+        if (ctxSaveTimeout) clearTimeout(ctxSaveTimeout);
+        ctxSaveTimeout = setTimeout(async () => {
+          const raw = ctxWindowInput.value.trim();
+          const val = raw ? Number(raw) : null;
+          if (val !== null && (!Number.isInteger(val) || val < 1)) {
+            showToast("context window must be a positive integer (or blank for unlimited)", true);
+            return;
+          }
+          try {
+            await api(`/admin/api/providers/${encodeURIComponent(name)}/models/${encodeURIComponent(model.name)}`, {
+              method: "PATCH",
+              body: { maxContextWindow: val },
+            });
+          } catch (err) {
+            showToast(err.message, true);
+          }
+        }, 800);
+      };
+      modelTd.appendChild(ctxWindowInput);
       modelRow.appendChild(modelTd);
       table.appendChild(modelRow);
     }
