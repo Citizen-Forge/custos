@@ -21,7 +21,7 @@
 #     git pull
 #     git pull
 #     docker build -t custos-gateway:local .
-#     docker tag custos-gateway:local <IMAGE>:<TAG>
+# Compose references custos-gateway:local directly, so no tag step needed.
 #     docker compose up -d --no-deps gateway
 #     docker compose up -d --no-deps gateway
 #
@@ -229,12 +229,7 @@ build_local() {
     return 1
   fi
 
-  # Tag to match what docker-compose.yml expects.
-  log "tagging as ${IMAGE}:${TAG}..."
-  docker tag custos-gateway:local "${IMAGE}:${TAG}" >>"$LOG" 2>&1 || {
-    log "ERROR: docker tag failed"
-    return 1
-  }
+  # Compose references custos-gateway:local directly, no tag step needed.
 
   printf '%s' "$head"
 }
