@@ -318,8 +318,43 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
         reply.code(502);
         return { error: `HTTP ${res.status} from ${baseUrl}/models` };
       }
-      const json = (await res.json()) as { data?: { id: string; owned_by?: string; created?: number }[] };
-      return { models: (json.data ?? []).map((m) => ({ id: m.id, owned_by: m.owned_by ?? null, created: m.created ?? null })) };
+      const json = (await res.json()) as {
+        data?: Record<string, unknown>[];
+      };
+      return {
+        models: (json.data ?? []).map((m) => {
+          const id = String(m.id ?? m.name ?? "");
+          // Extract model metadata from fields used by different providers:
+          //   - Groq returns "context_window" and "max_completion_tokens" per model
+          //   - OpenRouter returns "context_length" and "pricing" per model
+          //   - Ollama returns details via /api/tags (different endpoint) so its
+          //     OpenAI-compat /v1/models response may have no metadata
+          //   - OpenAI returns only "owned_by" and "created" — no per-model caps
+          // Return whatever the upstream exposes as an opaque `inferred` block
+          // so the admin UI can auto-populate maxOutputTokens/maxContextWindow.
+          const inferred: { maxOutputTokens?: number; maxContextWindow?: number } = {};
+          // Groq-style
+          if (typeof m.context_window === "number") inferred.maxContextWindow = m.context_window;
+          if (typeof m.max_completion_tokens === "number") inferred.maxOutputTokens = m.max_completion_tokens;
+          // OpenRouter-style
+          if (typeof m.context_length === "number") inferred.maxContextWindow = m.context_length;
+          // Generic — some OpenAI-compat listings include a flat "max_tokens" field
+          if (typeof m.max_tokens === "number" && inferred.maxOutputTokens === undefined) {
+            inferred.maxOutputTokens = m.max_tokens;
+          }
+          // Pricing — OpenRouter returns { input, output } per-model
+          const pricing = m.pricing && typeof m.pricing === "object"
+            ? { inputPerMillion: Number((m.pricing as Record<string, unknown>).input ?? 0), outputPerMillion: Number((m.pricing as Record<string, unknown>).output ?? 0) }
+            : undefined;
+          return {
+            id,
+            owned_by: m.owned_by ?? null,
+            created: m.created ?? null,
+            inferred: Object.keys(inferred).length > 0 ? inferred : undefined,
+            ...(pricing ? { pricing } : {}),
+          };
+        }),
+      };
     } catch (err) {
       reply.code(502);
       return { error: `couldn't reach ${baseUrl}: ${(err as Error).message}` };

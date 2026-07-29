@@ -256,13 +256,16 @@ function showToast(message, isError = false) {
 }
 
 // Renders a set of model checkboxes inside `container`. `models` is an
-// array of { id, owned_by?, created? } from the probe endpoint. `enabledSet`
-// is a Set of model names that should be pre-checked. Each model gets a
-// checkbox + label. New models (not in enabledSet) start unchecked.
-// The checkboxes are stored on `container.checkboxes` as a Map<name, input>.
+// array of { id, owned_by?, created?, inferred? } from the probe endpoint.
+// `enabledSet` is a Set of model names that should be pre-checked. Each
+// model gets a checkbox + label + optional inferred-capacity hint. New
+// models (not in enabledSet) start unchecked.
+// The checkboxes are stored on `container.checkboxes` as a Map<name, input>
+// and the inferred metadata is stored on `container.modelMeta` as a Map<name, object>.
 function renderModelCheckboxes(container, models, enabledSet) {
   container.innerHTML = "";
   container.checkboxes = new Map();
+  container.modelMeta = new Map();
   if (!models || !models.length) {
     container.appendChild(el("div", { class: "small", text: "No models found. Enter model names manually or scan again." }));
     return;
@@ -276,7 +279,24 @@ function renderModelCheckboxes(container, models, enabledSet) {
     });
     const cb = el("input", { type: "checkbox", checked: checked ? "checked" : undefined });
     label.appendChild(cb);
+    // Show model name
     label.appendChild(el("span", { text: id }));
+    // Show inferred capacity hint as a muted badge, with a tooltip
+    // so the operator can see what values will auto-populate.
+    const inf = model.inferred;
+    if (inf && (inf.maxOutputTokens || inf.maxContextWindow)) {
+      const parts = [];
+      if (inf.maxOutputTokens) parts.push(`out:${inf.maxOutputTokens}`);
+      if (inf.maxContextWindow) parts.push(`ctx:${inf.maxContextWindow}`);
+      const chip = el("span", {
+        style: "font-size: 10px; color: var(--accent); opacity: 0.7; margin-left: 3px;",
+        text: parts.join(" "),
+        title: `Auto-detected: maxOutputTokens=${inf.maxOutputTokens ?? "?"}, maxContextWindow=${inf.maxContextWindow ?? "?"}. Adjust after save in the model sub-rows.`,
+      });
+      label.appendChild(chip);
+    }
+    // Store inferred metadata so readModelCheckboxes can include it.
+    container.modelMeta.set(id, { maxOutputTokens: inf?.maxOutputTokens, maxContextWindow: inf?.maxContextWindow });
     container.checkboxes.set(id, cb);
     grid.appendChild(label);
   }
@@ -307,15 +327,21 @@ function parseThrottle(input) {
 }
 
 // Reads model checkboxes from a container rendered by renderModelCheckboxes.
-// Returns an array of { name, enabled } objects for the provider PUT body.
+// Returns an array of { name, enabled, maxOutputTokens?, maxContextWindow? }
+// objects for the provider PUT body. Inferred metadata from the probe
+// endpoint is included when present so the backend auto-populates the
+// per-model capacity fields without the operator having to type them.
 function readModelCheckboxes(container, pricing) {
   if (!container.checkboxes || container.checkboxes.size === 0) return [];
   const models = [];
   let first = true;
   for (const [name, cb] of container.checkboxes) {
+    const meta = container.modelMeta?.get(name);
     models.push({
       name,
       enabled: cb.checked,
+      ...(meta?.maxOutputTokens != null ? { maxOutputTokens: meta.maxOutputTokens } : {}),
+      ...(meta?.maxContextWindow != null ? { maxContextWindow: meta.maxContextWindow } : {}),
       ...(first && pricing ? { pricing } : {}),
     });
     first = false;
