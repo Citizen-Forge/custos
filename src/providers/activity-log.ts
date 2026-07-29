@@ -83,6 +83,13 @@ export interface DispatchContext {
   agentName?: string;
   role?: string;
   fallbackSet?: string;
+  /** Routing discriminator: how this request entered the GlobalQueue.
+   *  Makes the activity panel able to group events by route shape
+   *  (pinned / fallback / general) without having to thread it through
+   *  from `x-custos-*` response headers. The queue's recordEvent
+   *  spreads DispatchContext onto every event it emits, so adding the
+   *  field here is enough — no changes needed to ActivityLog. */
+  route?: "pinned" | "fallback" | "general";
 }
 
 const MAX_EVENTS = 200;

@@ -13,7 +13,43 @@ import { createUserPromptSubmitHandler, type UserPromptSubmitInput } from "../me
 import { reconstructFromAnthropicSSE } from "../memory/stream-reconstruct.js";
 import { parseModelAlias } from "../providers/model-alias.js";
 import type { CompleteOptions } from "../providers/types.js";
+import type { FallbackTarget, QueueContext } from "../providers/global-queue.js";
+import type { GatewayConfig } from "../config.js";
 import type { RemoteSessionManager } from "../remote/session-manager.js";
+
+/** Builds the dispatch chain for the legacy `general` task's priority list.
+ *  Every branch of `/v1/messages` flows through the GlobalQueue now, so the
+ *  priority list is reshaped into a `FallbackTarget[]` rather than being
+ *  handed to the old ProviderRouter. Anthropic entries inherit the body's
+ *  own model since AnthropicProvider reads modelOverride → request.model;
+ *  OpenAI-compat entries need an explicit model from the provider's
+ *  configured default (the first enabled model, falling back to the first
+ *  one declared) because modelOverride drives the upstream request's model
+ *  field for those providers. The chain order matches `config.tasks.general`
+ *  priority order, since that's what the legacy router honored.
+ *
+ *  Misconfigured entries (legacy `openaiCompatibleInstances` shape, a
+ *  typo, an empty `models: []`) are skipped silently — the alternative
+ *  is to dispatch with `model: "unknown"` and surface the upstream's
+ *  400/404 to the operator, which reads as a runtime bug. Returning an
+ *  empty chain is the caller's signal that there's nothing dispatchable;
+ *  `routes.ts` translates that into a ProviderUnavailableError so the
+ *  request surfaces a coherent error instead of parking forever in the
+ *  queue's enqueue path. */
+function generalChain(body: AnthropicMessagesRequest, config: GatewayConfig): FallbackTarget[] {
+  const out: FallbackTarget[] = [];
+  for (const entry of config.tasks.general) {
+    if (entry.provider === "anthropic") {
+      out.push({ provider: "anthropic", model: body.model });
+      continue;
+    }
+    const providerDef = config.providers?.[entry.provider];
+    const def = providerDef?.models.find((m) => m.enabled) ?? providerDef?.models[0];
+    if (!def) continue;  // provider isn't properly configured for chat — skip rather than dispatch with model "unknown"
+    out.push({ provider: entry.provider, model: def.name });
+  }
+  return out;
+}
 
 export interface RouteDeps {
   runtime: Runtime;
@@ -59,59 +95,87 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     // (see providers/model-alias.ts for the parser).
     const alias = parseModelAlias(body.model);
     const options: CompleteOptions = { clientBetaHeader };
+
+    // Every branch below dispatches via the GlobalQueue. Three chain
+    // shapes feed it:
+    //   - pinned: single-entry chain carrying the explicit (provider, model)
+    //   - fallback: chain from the named fallback set's provider list
+    //   - general (no alias): chain derived from `config.tasks.general`'s
+    //                          priority order, with anthropic entries
+    //                          inheriting body.model (see generalChain's
+    //                          docstring).
+    // The queue handles the rest: availability checks per-provider
+    // (cooldown / breaker / capacity / RPM via ProviderStateMap),
+    // per-request failover within the chain when the dispatched entry
+    // throws ProviderUnavailableError, and queueing when no chain
+    // entry can accept a request right now. The legacy ProviderRouter
+    // path is no longer reachable from /v1/messages -- it's still wired
+    // into the runtime, since complete() callers outside /v1/messages
+    // depend on it (memory curator, permission classifier, etc).
+    const queue = deps.runtime.globalQueue;
+    if (!queue) throw new Error("GlobalQueue not initialized");
+
+    let chain: FallbackTarget[];
+    let dispatchContext: QueueContext | undefined;
     if (alias?.type === "pinned") {
+      // A PM agent pins its own provider/model via `custos:<provider>/<model>`
+      // (see providers/model-alias.ts) -- the alias is unwrapped so the
+      // upstream only sees the real model name. The single-entry chain
+      // bypasses failover (one provider, no fallthrough) but still goes
+      // through the queue so the dispatch event lands in the activity
+      // log and the provider's concurrency / RPM limits are honored.
+      reply.header("x-custos-pinned", `${alias.providerKey}/${alias.model}`);
+      chain = [{ provider: alias.providerKey, model: alias.model }];
       body.model = alias.model;
-      options.modelOverride = alias.model;
+      dispatchContext = { route: "pinned" };
+    } else if (alias?.type === "fallback") {
+      // The agent is configured with a fallback set (named list of
+      // provider+model pairs). Route through the GlobalQueue so each
+      // request in this claude subprocess gets per-request failover:
+      // if provider A 429s, the GlobalQueue tries provider B from the
+      // same set before surfacing the error. The model sent to the
+      // upstream is the one from whichever entry matches -- the queue
+      // passes it as modelOverride in CompleteOptions.
+      reply.header("x-custos-fallback", alias.fallbackSet);
+      const set = deps.runtime.config.fallbackSets?.[alias.fallbackSet];
+      if (!set || !set.providers.length) {
+        throw new ProviderUnavailableError(`Fallback set "${alias.fallbackSet}" is not configured or is empty`);
+      }
+      chain = set.providers.map((p) => ({ provider: p.provider, model: p.model }));
+      // Set a sensible default model for the body before routing.
+      // The GlobalQueue will override this via modelOverride if it
+      // dispatches to a different provider, but the body field needs
+      // a real value for the ingestion pipeline and for providers
+      // that don't support modelOverride.
+      body.model = deps.runtime.fallbackDefaultModel(alias.fallbackSet);
+      // Lift caller context (project, agent) from the alias suffix
+      // so dispatch events land in the activity log attributed to
+      // the right project/agent row. The fallback set name itself
+      // is also carried so events without caller context still
+      // identify which chain was routed through. The `route` field
+      // lets the activity panel discriminate fallback traffic from
+      // pinned/general even when the alias context is empty.
+      dispatchContext = alias.context
+        ? { ...alias.context, fallbackSet: alias.fallbackSet, route: "fallback" }
+        : { fallbackSet: alias.fallbackSet, route: "fallback" };
+    } else {
+      // No alias: build the dispatch chain from `config.tasks.general`'s
+      // priority list. Anthropic entries inherit body.model; OpenAI-compat
+      // entries get a configured default model (generalChain's docstring).
+      // Empty chains (a misconfigured priority list) surface as a
+      // ProviderUnavailableError rather than parking the request in the
+      // queue's enqueue path waiting for an exit that never comes.
+      reply.header("x-custos-general", "true");
+      chain = generalChain(body, deps.runtime.config);
+      if (chain.length === 0) {
+        throw new ProviderUnavailableError("general: no providers in config.tasks.general had a usable default model");
+      }
+      dispatchContext = { route: "general" };
     }
 
     let providerResponse;
     try {
-      if (alias?.type === "pinned") {
-        // A PM agent pins its own provider/model via `custos:<provider>/<model>`
-        // (see providers/model-alias.ts) -- that choice wins over the general
-        // task ordering. The alias is unwrapped so the upstream only sees the
-        // real model name.
-        reply.header("x-custos-pinned", `${alias.providerKey}/${alias.model}`);
-        providerResponse = await deps.runtime.router.completeWithEntries(
-          [{ provider: alias.providerKey, priority: 1 }],
-          body,
-          options,
-          `pinned provider "${alias.providerKey}"`,
-        );
-      } else if (alias?.type === "fallback") {
-        // The agent is configured with a fallback set (named list of
-        // provider+model pairs). Route through the GlobalQueue so each
-        // request in this claude subprocess gets per-request failover:
-        // if provider A 429s, the GlobalQueue tries provider B from the
-        // same set before surfacing the error. The model sent to the
-        // upstream is the one from whichever entry matches -- the queue
-        // passes it as modelOverride in CompleteOptions.
-        reply.header("x-custos-fallback", alias.fallbackSet);
-        // Set a sensible default model for the body before routing.
-        // The GlobalQueue will override this via modelOverride if it
-        // dispatches to a different provider, but the body field needs
-        // a real value for the ingestion pipeline and for providers
-        // that don't support modelOverride.
-        body.model = deps.runtime.fallbackDefaultModel(alias.fallbackSet);
-        // Lift caller context (project, agent) from the alias suffix
-        // so dispatch events land in the activity log attributed to
-        // the right project/agent row. The fallback set name itself
-        // is also carried so events without caller context still
-        // identify which chain was routed through.
-        const dispatchContext = alias.context
-          ? { ...alias.context, fallbackSet: alias.fallbackSet }
-          : { fallbackSet: alias.fallbackSet };
-        providerResponse = await deps.runtime.completeWithFallback(
-          alias.fallbackSet,
-          body,
-          options,
-          dispatchContext,
-        );
-      } else {
-        // No alias: use the `general` task's configured priority list
-        // (from `config.tasks.general`).
-        providerResponse = await deps.runtime.router.complete("general", body, options);
-      }
+      providerResponse = await queue.complete(chain, body, options, dispatchContext);
     } catch (err) {
       const message = err instanceof ProviderUnavailableError ? err.message : "internal gateway error";
       reply.code(err instanceof ProviderUnavailableError ? 503 : 500);
