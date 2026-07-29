@@ -427,6 +427,13 @@ export interface FitRequestResult {
    *  when the request fit unchanged; positive when the strip path ran.
    *  Operators see this in the activity log per dispatch. */
   stripped: number;
+  /** Number of complete conversation turns removed from the request
+   *  to fit the size limit. Zero when text truncation wasn't needed;
+   *  positive when the fit path dropped older messages. Distinct from
+   *  `stripped` which only counts image replacements — both can be
+   *  non-zero when the conversation has images AND text that push the
+   *  body over the limit. */
+  truncatedMessages: number;
   /** True when the strip path ran but the body is still over
    *  `maxBytes` because nothing was strippable (no images left, or all
    *  remaining images are URL-only and already small). Caller should
@@ -467,7 +474,7 @@ export interface FitRequestResult {
 export function fitRequestToSize(req: OpenAIRequest, maxBytes: number): FitRequestResult {
   const initialBytes = serializeRequestBytes(req);
   if (initialBytes <= maxBytes) {
-    return { request: req, stripped: 0, stillOverLimit: false, initialBytes, finalBytes: initialBytes };
+    return { request: req, stripped: 0, truncatedMessages: 0, stillOverLimit: false, initialBytes, finalBytes: initialBytes };
   }
 
   // Collect every strippable (msgIdx, partIdx) in oldest-first order.
@@ -485,8 +492,17 @@ export function fitRequestToSize(req: OpenAIRequest, maxBytes: number): FitReque
     }
   }
 
+  // No inline-base64 images to strip. Fall through to text truncation:
+  // remove the oldest complete turns (everything after the system prompt
+  // and before the most recent user message) until the body fits. This
+  // matches the heuristic the Groq error suggests ("compact the conversation")
+  // and lets long-running agent conversations keep making progress even
+  // when the accumulated text of tool results and code blocks exceeds the
+  // provider's request-size cap.
   if (targets.length === 0) {
-    return { request: req, stripped: 0, stillOverLimit: true, initialBytes, finalBytes: initialBytes };
+    const truncated = truncateOldestMessages(req, initialBytes, maxBytes);
+    if (truncated) return truncated;
+    return { request: req, stripped: 0, truncatedMessages: 0, stillOverLimit: true, initialBytes, finalBytes: initialBytes };
   }
 
   // Walk targets oldest-first, accumulating byte savings. As soon as
@@ -508,11 +524,68 @@ export function fitRequestToSize(req: OpenAIRequest, maxBytes: number): FitReque
   }
 
   const finalBytes = serializeRequestBytes(cloned);
+  if (finalBytes <= maxBytes) {
+    return {
+      request: cloned,
+      stripped,
+      truncatedMessages: 0,
+      stillOverLimit: false,
+      initialBytes,
+      finalBytes,
+    };
+  }
+
+  // Stripped all images but still over the limit. Try text truncation
+  // as a last resort — remove oldest turns until the body fits.
+  const truncated = truncateOldestMessages(cloned, finalBytes, maxBytes);
+  if (truncated) return { ...truncated, stripped };
+
   return {
     request: cloned,
     stripped,
-    stillOverLimit: finalBytes > maxBytes,
+    truncatedMessages: 0,
+    stillOverLimit: true,
     initialBytes,
+    finalBytes,
+  };
+}
+
+/** Remove the oldest complete turns (everything after the system prompt
+ *  and before the most recent user message) from an OpenAI request until
+ *  its serialized body fits `maxBytes`. Returns a FitRequestResult when
+ *  truncation succeeds (stillOverLimit can still be true if even the
+ *  most recent turn alone exceeds the limit), or undefined when the
+ *  request has no messages to trim (only system + one user message).
+ *  The system prompt at index 0 is always preserved. */
+function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxBytes: number): FitRequestResult | undefined {
+  // Need at least system (0) + one user message to have anything to trim.
+  // If we only have 2 messages (system + user), there's nothing old to drop.
+  if (req.messages.length < 3) return undefined;
+
+  // Find the last user message — this is the current turn. Keep it
+  // and everything after it (assistant response, tool results).
+  let lastUserIdx = -1;
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    if (req.messages[i].role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx <= 1) return undefined;  // nothing between system and this user
+
+  const removedCount = lastUserIdx - 1;
+  const clone: OpenAIRequest = JSON.parse(JSON.stringify(req));
+  // Remove messages from index 1 up to (but not including) lastUserIdx.
+  // Index 0 is the system prompt, which we keep.
+  clone.messages.splice(1, removedCount);
+
+  const finalBytes = serializeRequestBytes(clone);
+  return {
+    request: clone,
+    stripped: 0,
+    truncatedMessages: removedCount,
+    stillOverLimit: finalBytes > maxBytes,
+    initialBytes: currentBytes,
     finalBytes,
   };
 }

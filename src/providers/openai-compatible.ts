@@ -106,7 +106,21 @@ export class OpenAICompatibleProvider implements Provider {
         console.log(`[${this.name}] stripped ${fit.stripped} image(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)`);
       }
       openaiRequest = fit.request;
+      if (fit.stripped > 0) {
+        console.log(`[${this.name}] stripped ${fit.stripped} image(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)`);
+      }
+      if (fit.truncatedMessages > 0) {
+        console.log(`[${this.name}] truncated ${fit.truncatedMessages} old message(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)`);
+      }
+      openaiRequest = fit.request;
       if (fit.stillOverLimit) {
+        const hadImages = fit.stripped > 0;
+        const hadTruncation = fit.truncatedMessages > 0;
+        let detail = "";
+        if (hadImages && hadTruncation) detail = "after stripping all images and removing oldest turns";
+        else if (hadImages) detail = "after stripping all inline images";
+        else if (hadTruncation) detail = "after removing oldest conversation turns";
+        else detail = "";
         return {
           status: 413,
           headers: new Headers({ "content-type": "application/json" }),
@@ -114,7 +128,7 @@ export class OpenAICompatibleProvider implements Provider {
             type: "error",
             error: {
               type: "request_too_large",
-              message: `${this.name}: request is ${fit.finalBytes}B after stripping all inline images, exceeding the ${this.config.maxRequestBytes}B cap. Compact the conversation or attach smaller images.`,
+              message: `${this.name}: request is ${fit.finalBytes}B ${detail}exceeding the ${this.config.maxRequestBytes}B cap. Compact the conversation or use a provider with a larger limit.`,
             },
           })]).stream(),
         };
