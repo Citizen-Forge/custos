@@ -243,8 +243,16 @@ const DEFAULT_CONFIG: GatewayConfig = {
     // embeddings global agent defaults to this set; operators on a
     // different embedding provider can override via the Global Services
     // panel.
+    //
+    // The default provider at http://localhost:11434/v1 is reachable when
+    // Ollama runs on the same Docker host as the gateway (the container's
+    // localhost resolves to the host when using --network host). When
+    // Ollama runs on a separate machine (the canonical remote-Ollama
+    // scenario), operators must either change the "ollama" provider's
+    // baseUrl to the reachable host, or reassign the embeddings global
+    // agent's fallbackSet to a provider that points at that host.
     "embeddings": {
-      name: "Embeddings (Ollama)",
+      name: "Embeddings",
       description: "Vector embeddings for the memory store. Uses Ollama's native embedding endpoint, which requires an embedding-capable model (nomic-embed-text, mxbai-embed-large). Do not point this set at a chat model.",
       providers: [{ provider: "ollama", model: "nomic-embed-text" }],
     },
