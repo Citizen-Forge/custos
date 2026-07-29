@@ -804,6 +804,61 @@ function renderProvidersPanel() {
 
   section.appendChild(anthSection);
 
+  // --- Bulk re-scan button ---
+  const rescanAllBtn = el("button", {
+    style: "font-size: 12px; padding: 5px 10px; margin-bottom: 10px;",
+    text: "⟳ Re-scan all providers",
+    title: "Probe every provider's /v1/models endpoint and auto-populate any missing maxOutputTokens / maxContextWindow via per-model PATCH calls.",
+    onclick: async () => {
+      rescanAllBtn.disabled = true;
+      rescanAllBtn.textContent = "↻ Scanning...";
+      let succeeded = 0;
+      let failed = 0;
+      let patched = 0;
+      for (const [name, prov] of Object.entries(state.providers)) {
+        try {
+          const result = await api(`/admin/api/providers/${encodeURIComponent(name)}/probe-models`, { method: "POST" });
+          succeeded++;
+          // PATCH any model whose inferred metadata is present but the
+          // stored config has no maxOutputTokens or maxContextWindow set.
+          for (const m of result.models || []) {
+            if (!m.inferred) continue;
+            const stored = (prov.models || []).find((sm) => sm.name === m.id);
+            if (!stored) continue;
+            const patchBody = {};
+            if (m.inferred.maxOutputTokens != null && stored.maxOutputTokens == null) {
+              patchBody.maxOutputTokens = m.inferred.maxOutputTokens;
+            }
+            if (m.inferred.maxContextWindow != null && stored.maxContextWindow == null) {
+              patchBody.maxContextWindow = m.inferred.maxContextWindow;
+            }
+            if (Object.keys(patchBody).length > 0) {
+              try {
+                await api(`/admin/api/providers/${encodeURIComponent(name)}/models/${encodeURIComponent(m.id)}`, {
+                  method: "PATCH",
+                  body: patchBody,
+                });
+                patched++;
+              } catch {
+                // Per-model PATCH failure shouldn't abort the whole scan.
+              }
+            }
+          }
+        } catch {
+          failed++;
+        }
+      }
+      const msg = patched > 0
+        ? `Re-scanned ${succeeded} provider(s), ${failed} failed, auto-populated ${patched} model capacity value(s)`
+        : `Re-scanned ${succeeded} provider(s), ${failed} failed (no new model capacities detected)`;
+      showToast(msg);
+      rescanAllBtn.disabled = false;
+      rescanAllBtn.textContent = "⟳ Re-scan all providers";
+      await loadState();
+    },
+  });
+  section.appendChild(rescanAllBtn);
+
   const table = el("table", { class: "providers-table" });
   table.appendChild(el("colgroup", {}, [
     el("col", { style: "width: 19%;" }),

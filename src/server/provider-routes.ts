@@ -6,6 +6,40 @@ import { findInstanceUsages, resolveApiKey, resolveOptionalInt, updateConfig } f
 import { planEmbeddingProbe, resolveEmbeddingHost } from "../providers/embedding-url.js";
 import { getGlobalAgent } from "../pm/global-agents.js";
 
+/** Shared model-metadata enrichment. Given a raw upstream model object
+ *  from any provider's /v1/models response, extract known fields across
+ *  different provider schemas and return the `inferred` capacity block
+ *  plus any `pricing`. Shared between the unsaved-instance probe
+ *  (POST /admin/api/instances/probe-models) and the saved-provider probe
+ *  (POST /admin/api/providers/:name/probe-models) so the inference logic
+ *  lives in one place and doesn't drift. */
+function enrichModel(m: Record<string, unknown>): {
+  id: string;
+  owned_by: unknown;
+  created: unknown;
+  inferred?: { maxOutputTokens?: number; maxContextWindow?: number };
+  pricing?: { inputPerMillion: number; outputPerMillion: number };
+} {
+  const id = String(m.id ?? m.name ?? "");
+  const inferred: { maxOutputTokens?: number; maxContextWindow?: number } = {};
+  if (typeof m.context_window === "number") inferred.maxContextWindow = m.context_window;
+  if (typeof m.max_completion_tokens === "number") inferred.maxOutputTokens = m.max_completion_tokens;
+  if (typeof m.context_length === "number") inferred.maxContextWindow = m.context_length;
+  if (typeof m.max_tokens === "number" && inferred.maxOutputTokens === undefined) {
+    inferred.maxOutputTokens = m.max_tokens;
+  }
+  const pricing = m.pricing && typeof m.pricing === "object"
+    ? { inputPerMillion: Number((m.pricing as Record<string, unknown>).input ?? 0), outputPerMillion: Number((m.pricing as Record<string, unknown>).output ?? 0) }
+    : undefined;
+  return {
+    id,
+    owned_by: m.owned_by ?? null,
+    created: m.created ?? null,
+    inferred: Object.keys(inferred).length > 0 ? inferred : undefined,
+    ...(pricing ? { pricing } : {}),
+  };
+}
+
 export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): void {
   // -- Provider instances (new providers shape) --------------------------
 
@@ -116,6 +150,35 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
     } catch (err) {
       reply.code(502);
       return { ok: false, error: (err as Error).message };
+    }
+  });
+
+  /** Proxied model scan: fires a server-side request to the provider's
+   *  /v1/models endpoint using the STORED API key from config, so the
+   *  browser can re-scan models for auth-required providers (Groq, Gemini,
+   *  OpenRouter) without exposing their keys to the frontend. Returns the
+   *  same enriched shape as POST /admin/api/instances/probe-models but
+   *  reads credentials from the saved config rather than from the request
+   *  body — intended for the bulk "Re-scan all providers" button. */
+  app.post("/admin/api/providers/:name/probe-models", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const provider = runtime.config.providers?.[name];
+    if (!provider) { reply.code(404); return { error: `provider "${name}" not found` }; }
+    try {
+      const headers: Record<string, string> = {};
+      if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
+      const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/models`, { headers, signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) {
+        reply.code(502);
+        return { error: `HTTP ${res.status} from ${provider.baseUrl}/models` };
+      }
+      const json = (await res.json()) as { data?: Record<string, unknown>[] };
+      return {
+        models: (json.data ?? []).map((m) => enrichModel(m)),
+      };
+    } catch (err) {
+      reply.code(502);
+      return { error: `couldn't reach ${provider.baseUrl}: ${(err as Error).message}` };
     }
   });
 
@@ -322,38 +385,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
         data?: Record<string, unknown>[];
       };
       return {
-        models: (json.data ?? []).map((m) => {
-          const id = String(m.id ?? m.name ?? "");
-          // Extract model metadata from fields used by different providers:
-          //   - Groq returns "context_window" and "max_completion_tokens" per model
-          //   - OpenRouter returns "context_length" and "pricing" per model
-          //   - Ollama returns details via /api/tags (different endpoint) so its
-          //     OpenAI-compat /v1/models response may have no metadata
-          //   - OpenAI returns only "owned_by" and "created" — no per-model caps
-          // Return whatever the upstream exposes as an opaque `inferred` block
-          // so the admin UI can auto-populate maxOutputTokens/maxContextWindow.
-          const inferred: { maxOutputTokens?: number; maxContextWindow?: number } = {};
-          // Groq-style
-          if (typeof m.context_window === "number") inferred.maxContextWindow = m.context_window;
-          if (typeof m.max_completion_tokens === "number") inferred.maxOutputTokens = m.max_completion_tokens;
-          // OpenRouter-style
-          if (typeof m.context_length === "number") inferred.maxContextWindow = m.context_length;
-          // Generic — some OpenAI-compat listings include a flat "max_tokens" field
-          if (typeof m.max_tokens === "number" && inferred.maxOutputTokens === undefined) {
-            inferred.maxOutputTokens = m.max_tokens;
-          }
-          // Pricing — OpenRouter returns { input, output } per-model
-          const pricing = m.pricing && typeof m.pricing === "object"
-            ? { inputPerMillion: Number((m.pricing as Record<string, unknown>).input ?? 0), outputPerMillion: Number((m.pricing as Record<string, unknown>).output ?? 0) }
-            : undefined;
-          return {
-            id,
-            owned_by: m.owned_by ?? null,
-            created: m.created ?? null,
-            inferred: Object.keys(inferred).length > 0 ? inferred : undefined,
-            ...(pricing ? { pricing } : {}),
-          };
-        }),
+        models: (json.data ?? []).map((m) => enrichModel(m)),
       };
     } catch (err) {
       reply.code(502);
