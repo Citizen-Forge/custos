@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ActivityResponse, AgentDef, AgentsResponse, CustosProject, FallbackSetOption, ProviderOption } from '@shared/types'
 import { useCall, relativeTime } from '../api'
 import Avatar, { agentLabel } from './Avatar'
-import AgentModelSelect, { parseModelSelectValue } from './AgentModelSelect'
+import AgentModelSelect, { isOrphaned, parseModelSelectValue } from './AgentModelSelect'
 
 /**
  * Agent roster and run activity — the team that works on this project, who's
@@ -45,6 +45,17 @@ export default function TeamTab({
     refresh()
   }
 
+  /** Flips pmConfigured to false so the PM re-runs on the next tick and
+   *  picks a valid fallback set for every agent in the project. Used as
+   *  the recovery path for orphaned agents (the dropdown's "[orphaned:
+   *  <name>] — Reset PM to recover" hint points here). The endpoint
+   *  doesn't immediately re-assign; the orchestrator's existing 20s
+   *  tick reads !pmConfigured and triggers assignModels() on its own. */
+  async function resetProjectPM(): Promise<void> {
+    await call('POST', `/admin/api/projects/${project.id}/reset-pm`)
+    refresh()
+  }
+
   /** Adapter from the AgentModelSelect's value-format-onChange back to the
    *  PATCH body. The select emits `set::<name>` or `model::<provider>::<model>`;
    *  parseModelSelectValue decodes it into a typed ModelPatch (a
@@ -76,15 +87,32 @@ export default function TeamTab({
                 <span className="badge">{agent.role}</span>
                 {agent.createdBy === 'engineering-manager' && <span className="badge">EM-created</span>}
               </div>
-              <label className="field inline">
-                <span>Model</span>
-                <AgentModelSelect
-                  agent={agent}
-                  fallbackSets={fallbackSets}
-                  providerOptions={providerOptions}
-                  onChange={(value) => onModelChange(agent, value)}
-                />
-              </label>
+              {/* The label wraps only the select so a click on the button
+                  doesn't focus the dropdown as a side effect. The button
+                  sits outside the label but inside the same row. */}
+              <div className="field inline">
+                <label>
+                  <span>Model</span>
+                  <AgentModelSelect
+                    agent={agent}
+                    fallbackSets={fallbackSets}
+                    providerOptions={providerOptions}
+                    onChange={(value) => onModelChange(agent, value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className={isOrphaned(agent, fallbackSets) ? 'primary' : ''}
+                  onClick={() => void resetProjectPM()}
+                  title={
+                    isOrphaned(agent, fallbackSets)
+                      ? 'Reset the Project Manager so it re-runs and picks a valid fallback set on the next tick (~20s). Flips pmConfigured for the entire project; all roles get re-evaluated, not just this one.'
+                      : 'Re-run the Project Manager to re-evaluate fallback-set assignments for every role (flips pmConfigured for the whole project; recovery happens on the next tick, ~20s).'
+                  }
+                >
+                  {isOrphaned(agent, fallbackSets) ? 'Recover' : 'Reset PM'}
+                </button>
+              </div>
               {agent.specialty && <div className="agent-specialty">{agent.specialty}</div>}
               <div className="agent-stats">
                 {agent.stats.assigned} assigned · {agent.stats.completed} done · {agent.stats.qaRejections} bounced · $

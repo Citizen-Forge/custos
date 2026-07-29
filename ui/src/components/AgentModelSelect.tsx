@@ -137,6 +137,16 @@ function modelSelectValue(agent: AgentDef): string {
   return `model::${agent.providerKey}::${agent.model}`;
 }
 
+/** True when the agent's fallbackSet is set but the set is no longer in
+ *  `fallbackSets` — the migration's orphanSet branch leaves the field
+ *  untouched (only resets pmConfigured), so the runtime would dispatch
+ *  to a non-existent set and 503 on every request. Surfaced from here
+ *  so other surfaces (the Reset PM button in TeamTab, future edit
+ *  forms) can share the same predicate instead of duplicating it. */
+export function isOrphaned(agent: AgentDef, fallbackSets: Record<string, FallbackSetOption>): boolean {
+  return !!agent.fallbackSet && !fallbackSets[agent.fallbackSet];
+}
+
 /** Short label for a fallback set in the dropdown — the set name plus the
  *  first provider, with a "+N" tail when the chain has additional entries.
  *  The full chain (`provider/model → provider/model → ...`) lives in the
