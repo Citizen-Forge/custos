@@ -278,14 +278,21 @@ export class GlobalQueue {
       try {
         const response = await provider.complete(request, mergedOptions);
         this.state.recordSuccess(entry.provider);
+        // Non-2xx from the provider means the request was handled but
+        // not successfully — record "failed" rather than "succeeded"
+        // so the activity log reflects the true outcome. Still return
+        // the response so the caller can forward the error upstream
+        // and the claude -p subprocess can act on it.
+        const okStatus = response.status >= 200 && response.status < 300;
         this.recordEvent({
           requestId,
           timestamp: Date.now(),
-          outcome: "succeeded",
+          outcome: okStatus ? "succeeded" : "failed",
           queuedAt: startedAt,
           provider: entry.provider,
           model: entry.model,
           durationMs: Date.now() - startedAt,
+          ...(okStatus ? {} : { errorMessage: `HTTP ${response.status} from provider` }),
           ...context,
         });
         return { ...response, providerName: entry.provider };
@@ -573,14 +580,16 @@ export class GlobalQueue {
     try {
       const response = await provider.complete(request, options);
       this.state.recordSuccess(name);
+      const okStatus = response.status >= 200 && response.status < 300;
       this.recordEvent({
         requestId: entry.requestId,
         timestamp: Date.now(),
-        outcome: "succeeded",
+        outcome: okStatus ? "succeeded" : "failed",
         queuedAt: entry.queuedAt,
         provider: name,
         model: options?.modelOverride,
         durationMs: Date.now() - entry.queuedAt,
+        ...(okStatus ? {} : { errorMessage: `HTTP ${response.status} from provider` }),
         ...entry.context,
       });
       return { ...response, providerName: name };
