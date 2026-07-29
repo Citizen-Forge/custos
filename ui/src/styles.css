@@ -1360,6 +1360,58 @@ input[type='password'] {
 .now-working.idle::before {
   content: "○ ";
 }
+
+/* Click-through affordance for now-working rows that reference a live
+   work item. Cursor + subtle dim on hover so the row reads as a
+   button without adding an extra chrome element. The .ticket-highlight
+   pulse on the board-side target mirrors the same affordance. */
+.now-working.clickable {
+  cursor: pointer;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+.now-working.clickable:hover {
+  opacity: 0.85;
+  border-left-color: var(--accent);
+}
+.now-working.clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Brief pulse on the targeted ticket after a hash-driven jump. Fades
+   out over 3s so the operator's eye finds the row without leaving a
+   persistent outline cluttering the board long-term.
+   Gated behind prefers-reduced-motion: no-preference because the
+   1.015x scale + box-shadow pulse is exactly the kind of motion that
+   bothers users with vestibular disorders; respecting the OS-level
+   preference is a real accessibility win, not a cosmetic one. */
+/* Border-color lives OUTSIDE the prefers-reduced-motion gate so the
+   target row is visibly different in both motion-enabled and motion-
+   reduced modes. Only the pulse animation is opt-in. Without this
+   split, motion-reduced users would land on the row with no visual
+   signal at all. */
+.ticket-highlight {
+  border-color: var(--accent) !important;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ticket-highlight {
+    animation: ticket-highlight-pulse 3s ease-out forwards;
+  }
+  @keyframes ticket-highlight-pulse {
+    0% {
+      box-shadow: 0 0 0 0 rgba(91, 157, 217, 0.6);
+      transform: scale(1.015);
+    }
+    20% {
+      box-shadow: 0 0 0 4px rgba(91, 157, 217, 0.4);
+      transform: scale(1.015);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(91, 157, 217, 0);
+      transform: scale(1);
+    }
+  }
+}
 .running-head {
   display: flex;
   align-items: center;

@@ -21,6 +21,10 @@ export interface NowWorkingSummary {
   /** For "running": true if lastEventAt is older than the stall
    * threshold. For completed runs: always omitted. */
   isStalled?: boolean;
+  /** The work item ID the agent is operating on, or null if there's no
+   * ticket. Surfaced alongside workItemTitle so the UI can render a
+   * click-through link to the board without a second round-trip. */
+  workItemId?: string | null;
   /** Resolved work item title, or null if there is no workItemId. */
   workItemTitle?: string | null;
   /** True if workItemId was set but getWorkItem returned null. */
@@ -85,6 +89,10 @@ export function buildNowWorking(
         status: "running",
         runId: activeRun.id,
         isStalled: stalledSet.has(activeRun.id),
+        // workItemId is the click-through target on the Team tab; carrying
+        // it alongside the resolved title avoids a second round-trip
+        // when the operator clicks into the work item.
+        workItemId: hasWid ? activeRun.workItemId : null,
         workItemTitle: title ?? (hasWid ? `${activeRun.workItemId} (deleted)` : null),
         workItemDeleted: hasWid && title === null,
         currentAction: activeRun.currentAction ? activeRun.currentAction.slice(0, 120) : null,
@@ -101,6 +109,7 @@ export function buildNowWorking(
         summary = {
           status,
           runId: lastRun.id,
+          workItemId: hasWid ? lastRun.workItemId : null,
           workItemTitle: title ?? (hasWid ? `${lastRun.workItemId} (deleted)` : null),
           workItemDeleted: hasWid && title === null,
           summary: lastRun.summary ? lastRun.summary.slice(0, 120) : null,

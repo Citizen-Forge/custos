@@ -52,6 +52,24 @@ export default function ProjectView({ project, askText }: ProjectViewProps): Rea
     }
   }, [project.id])
 
+  // Hash-based cross-tab navigation. TeamTab sets
+  // `#board-ticket=<workItemId>` when the operator clicks a now-working
+  // row; this listener flips the project tab to the board so
+  // BoardTab's own hash listener can pick up the ticket id and scroll
+  // to / open the ticket. Hash (not state) because there is no React
+  // Router here and the URL is the only component-tree-spanning
+  // broadcast channel between sibling components.
+  useEffect(() => {
+    const onHash = (): void => {
+      if (window.location.hash.startsWith('#board-ticket=')) {
+        setTab('board')
+      }
+    }
+    window.addEventListener('hashchange', onHash)
+    onHash()
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
   useEffect(() => {
     if (!toast) return
     if (toastTimer.current) clearTimeout(toastTimer.current)

@@ -84,12 +84,43 @@ export default function TeamTab({
    *  agent card so a glance at the roster answers "what are they doing
    *  right now" without scrolling to the bottom activity panel. The
    *  server pre-resolves work-item titles and truncates long fields,
-   *  so this function is purely presentational. */
+   *  so this function is purely presentational.
+   *
+   *  Click-through: when `nw.workItemId` is set and the work item
+   *  hasn't been deleted, the row becomes a button that sets
+   *  `window.location.hash = 'board-ticket=<workItemId>'`. ProjectView's
+   *  hashchange listener flips the active tab to the board, and
+   *  BoardTab's listener opens the ticket + pulse-highlights it. URL
+   *  hash is the only component-tree-spanning broadcast channel here
+   *  -- there is no React Router, and the parent TeamTab / BoardTab
+   *  are siblings inside ProjectView. */
   function renderNowWorking(agentId: string, activityData: ActivityResponse | null): React.JSX.Element {
     const nw: NowWorkingSummary | undefined = activityData?.nowWorkingByAgent?.[agentId]
     if (!nw || nw.status === 'idle') {
       return <div className="now-working idle">Idle — waiting for dispatch</div>
     }
+
+    // Hoist the click-through affordance so the running branch and the
+    // completion branch share the SAME handler and the SAME
+    // disabled-deleted-ticket guard -- prevents the two branches from
+    // drifting over future edits.
+    const isLink = Boolean(nw.workItemId && !nw.workItemDeleted)
+    const onOpen = (): void => {
+      if (!nw.workItemId || nw.workItemDeleted) return
+      window.location.hash = `board-ticket=${nw.workItemId}`
+    }
+    const linkProps = isLink
+      ? {
+          onClick: onOpen,
+          role: 'button' as const,
+          tabIndex: 0,
+          onKeyDown: (e: React.KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() }
+          },
+          title: `Open ${nw.workItemTitle ?? 'work item'} on the board`,
+        }
+      : {}
+
     if (nw.status === 'running') {
       // Map server isStalled + client-computed wait window onto the
       // existing running-row classes so the CSS for state colors is
@@ -106,7 +137,10 @@ export default function TeamTab({
         stalled: <span className="badge stalled">no activity</span>,
       }[state]
       return (
-        <div className={`now-working running-row ${state}`}>
+        <div
+          {...linkProps}
+          className={`now-working running-row ${state}${isLink ? ' clickable' : ''}`}
+        >
           <div className="running-head">
             {stateBadge}
             <strong>{nw.workItemTitle ?? 'Project duties'}</strong>
@@ -126,12 +160,15 @@ export default function TeamTab({
         </div>
       )
     }
-    // status === 'succeeded' | 'failed' — show the most recent completion
+    // status === 'succeeded' | 'failed' -- show the most recent completion
     const outcomeBadge = nw.status === 'succeeded'
       ? <span className="badge succeeded">succeeded</span>
       : <span className="badge failed">failed</span>
     return (
-      <div className="now-working running-row">
+      <div
+        {...linkProps}
+        className={`now-working running-row${isLink ? ' clickable' : ''}`}
+      >
         <div className="running-head">
           {outcomeBadge}
           <strong>{nw.workItemTitle ?? 'Project duties'}</strong>

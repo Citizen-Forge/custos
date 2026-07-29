@@ -293,6 +293,11 @@ export interface NowWorkingSummary {
   /** For "running": true if lastEventAt is older than the stall threshold.
    * For completed runs: always false. */
   isStalled?: boolean;
+  /** The work item ID the agent is currently operating on (or null when
+   * not ticket-scoped). Surfaced alongside workItemTitle so the UI can
+   * render a click-through link to the board without a second
+   * round-trip. */
+  workItemId?: string | null;
   /** Resolved work item title, or null if there is no workItemId. */
   workItemTitle?: string | null;
   /** True if workItemId was set but getWorkItem returned null (the item
