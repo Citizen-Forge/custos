@@ -27,11 +27,16 @@ async function readExistingSettings(): Promise<Record<string, unknown>> {
   }
 }
 
-function buildHooks(hookPath: string, clientApiKey: string | undefined): Record<string, unknown> {
+function buildHooks(hookPath: string): Record<string, unknown> {
+  // Hook URLs no longer carry an `x-api-key` header. custos is no longer
+  // a Claude Code proxy, so the /hooks/* endpoints are reachable only
+  // from custos's own spawned subprocesses; client-auth-guard.ts is a
+  // no-op stub (see that file's header) and no shared secret travels
+  // across the wire. Auth gates that DO still apply (admin/remote/app
+  // session login) are unrelated to the hook surface.
   const baseUrl = `http://localhost:${PORT}`;
-  const headers = clientApiKey ? { "x-api-key": clientApiKey } : undefined;
   const hookEntry = (path: string, timeout: number) => ({
-    hooks: [{ type: "http", url: `${baseUrl}${path}`, timeout, ...(headers ? { headers } : {}) }],
+    hooks: [{ type: "http", url: `${baseUrl}${path}`, timeout }],
   });
   return {
     // 300s: the chat variant can block while a human approves/denies a
@@ -58,18 +63,18 @@ function buildHooks(hookPath: string, clientApiKey: string | undefined): Record<
  * Returns the path to pass as `--settings`, or null when the global file is
  * already the right one.
  */
-export async function ensureHeadlessSettingsFile(clientApiKey?: string, profile: HookProfile = "chat"): Promise<string | null> {
+export async function ensureHeadlessSettingsFile(profile: HookProfile = "chat"): Promise<string | null> {
   const existing = await readExistingSettings();
   const existingHooks = (existing.hooks as Record<string, unknown>) ?? {};
 
   if (profile === "chat") {
-    const merged = { ...existing, hooks: { ...existingHooks, ...buildHooks("/hooks/pretooluse-headless", clientApiKey) } };
+    const merged = { ...existing, hooks: { ...existingHooks, ...buildHooks("/hooks/pretooluse-headless") } };
     await mkdir(dirname(SETTINGS_PATH), { recursive: true });
     await writeFile(SETTINGS_PATH, JSON.stringify(merged, null, 2), "utf8");
     return null;
   }
 
-  const merged = { ...existing, hooks: { ...existingHooks, ...buildHooks("/hooks/pretooluse-agent", clientApiKey) } };
+  const merged = { ...existing, hooks: { ...existingHooks, ...buildHooks("/hooks/pretooluse-agent") } };
   await mkdir(dirname(AGENT_SETTINGS_PATH), { recursive: true });
   await writeFile(AGENT_SETTINGS_PATH, JSON.stringify(merged, null, 2), "utf8");
   return AGENT_SETTINGS_PATH;

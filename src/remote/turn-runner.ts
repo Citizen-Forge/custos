@@ -122,14 +122,27 @@ export interface RunTurnOptions {
 export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promise<void> {
   const { cwd, prompt, resumeSessionId, appendSystemPrompt, model, onEvent, signal } = options;
   await syncSpawnedSessionCredentials();
-  const settingsPath = await ensureHeadlessSettingsFile(runtime.config.clientApiKey, options.hookProfile ?? "chat");
+  const settingsPath = await ensureHeadlessSettingsFile(options.hookProfile ?? "chat");
 
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined) env[key] = value;
   }
+  // The spawned CLI always relays through the gateway -- the gateway
+  // is the only path to the upstream, regardless of provider. The
+  // /v1/messages handler dispatches via GlobalQueue + ProviderRouter so
+  // every call keeps the operator-visible metrics (cooldowns, RPM,
+  // fallback chains, queue depth) and goes through the same
+  // translation layer that lets OpenAI-compat providers participate.
+  // No `ANTHROPIC_API_KEY` is set here -- the gateway is internal-only
+  // (only the orchestrator's own subprocesses ever call it) so the
+  // shared-secret clientAuth gate is dead weight. The CLI authenticates
+  // against the upstream provider via its own credentials path
+  // (providerDef.apiKey for static keys, OAuth via
+  // ~/.claude/.credentials.json when syncSpawnedSessionCredentials
+  // populated it); either routes through the gateway's relay without
+  // carrying that auth back through ANTHROPIC_API_KEY.
   env.ANTHROPIC_BASE_URL = `http://localhost:${PORT}`;
-  if (runtime.config.clientApiKey) env.ANTHROPIC_API_KEY = runtime.config.clientApiKey;
   if (model) env.ANTHROPIC_MODEL = model;
   // Vault secrets last: they're the caller's explicit choice for this run,
   // and should win over anything the gateway process happens to inherit.
