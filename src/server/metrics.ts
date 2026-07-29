@@ -30,11 +30,21 @@ export function registerMetricsRoute(app: FastifyInstance, runtime: Runtime): vo
 
     for (const [providerName, p] of Object.entries(stats.providers)) {
       const labels = `{provider="${providerName}"}`;
+      // Derived fields: queuedTotal and slotsUtilization used to live on
+      // ProviderRuntimeStats as pre-computed properties; their inputs
+      // (queuedInteractive, queuedBackground, active, maxConcurrent) are
+      // what ProviderStateMap.snapshot() actually surfaces. Compute them
+      // inline here so the gauge names stay stable for downstream
+      // dashboards even though the runtime stats shape tightened. The
+      // addition is constant-cost per provider (sub-microsecond) so a
+      // /metrics scrape (typically every 15s) is unaffected.
+      const queuedTotal = p.queuedInteractive + p.queuedBackground;
+      const slotsUtilization = p.maxConcurrent > 0 ? p.active / p.maxConcurrent : 0;
       emitGauge(lines, emitted, "custos_throttle_active", labels, p.active);
       emitGauge(lines, emitted, "custos_throttle_queued_interactive", labels, p.queuedInteractive);
       emitGauge(lines, emitted, "custos_throttle_queued_background", labels, p.queuedBackground);
-      emitGauge(lines, emitted, "custos_throttle_queued_total", labels, p.queuedTotal);
-      emitGauge(lines, emitted, "custos_throttle_slots_utilization", labels, p.slotsUtilization);
+      emitGauge(lines, emitted, "custos_throttle_queued_total", labels, queuedTotal);
+      emitGauge(lines, emitted, "custos_throttle_slots_utilization", labels, slotsUtilization);
       emitGauge(lines, emitted, "custos_throttle_max_concurrent", labels, p.maxConcurrent);
       // 1 when cooldown is active, 0 when not (or undefined). The gauge
       // name includes the binary state so a PromQL query like

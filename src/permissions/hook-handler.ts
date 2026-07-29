@@ -42,7 +42,7 @@ export function createPreToolUseHandler(runtime: Runtime, askTracker: AskTracker
       return respond("allow", "safe read-only verb, no shell composition");
     }
 
-    const { decision, reason } = await classifyAction(runtime.router, input.tool_name, input.tool_input);
+    const { decision, reason } = await classifyAction(runtime, input.tool_name, input.tool_input);
     if (decision === "ask") {
       askTracker.recordAsk(input.session_id, input.tool_name, input.tool_input, reason);
     }

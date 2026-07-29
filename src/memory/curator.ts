@@ -1,6 +1,6 @@
 import { readFile, readdir, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ProviderRouter } from "../providers/router.js";
+import type { Runtime } from "../runtime.js";
 import type { EmbeddingConfig } from "./embeddings.js";
 import { embed } from "./embeddings.js";
 import { MemoryStore } from "./store.js";
@@ -102,13 +102,14 @@ function chunk(exchanges: string[]): string[] {
 /** Extracts and stores facts for one batch. Returns how many were stored.
  *
  * The model's choice is owned by the global agent with
- * systemRole === "memoryCurator" (see pm/global-agents.ts). Calling the
- * router with an explicit entries list — built from the global agent's
- * `providerKey` — is what keeps the curator going through the same
- * cooldown/throttle machinery a chat turn gets, instead of bypassing it
- * with a bare provider call. The task kind is still passed so a 429
- * surfaces to the model registry as a memory-curator cooldown rather than
- * a generic "no providers" error. */
+ * systemRole === "memoryCurator" (see pm/global-agents.ts). The curator
+ * dispatches through `runtime.completeViaProvider` — single-entry
+ * inline chain routed via the GlobalQueue — which keeps the curator on
+ * the same cooldown / breaker / RPM / concurrency surface as chat
+ * traffic rather than bypassing it with a bare provider call. The
+ * `"background"` priority tag is what puts the curator's queued
+ * requests behind any in-flight chat traffic on a saturated local
+ * Ollama — chat shouldn't have to wait behind a curator pass. */
 async function curateBatch(deps: CuratorDeps, file: string, batchText: string): Promise<number> {
   const agent = await getGlobalAgent("memoryCurator");
   if (!agent) {
@@ -119,23 +120,24 @@ async function curateBatch(deps: CuratorDeps, file: string, batchText: string): 
     console.warn("curator: no global agent with systemRole \"memoryCurator\"; skipping batch");
     return 0;
   }
-  // The curator is dispatched through `router.completeWithEntries`, which
-  // expects an explicit entries list. With the schema cleanup dropping
-  // `providerKey`/`model` from AgentDef, the only way to derive those is
-  // via the runtime's primaryPick helper — but curator runs on a
-  // ProviderRouter, not Runtime, so we read the active config off the
-  // router. The router holds the merged config (config + fileConfig) by
-  // contract; see providers/router.ts. Falling back to "unknown" lets
-  // an unconfigured curator surface a clear warning rather than silently
-  // dispatch to a stale disk value.
-  const config = deps.router.config;
+  // Resolve the dispatch target from the runtime's primaryPick (no
+  // router involved post-router-drop). primaryPick walks the agent's
+  // fallbackSet against ProviderStateMap and returns the first
+  // provider+model with a live slot. The runtime holds the merged
+  // config (config + fileConfig) by contract — `Runtime.config` is the
+  // public source of truth. Falling back to a skip-on-unconfigured-pick
+  // means a stale disk value (e.g. an agent whose fallbackSet points at
+  // a removed provider) surfaces as a clean warning rather than a
+  // silent wrong-provider dispatch.
+  const config = deps.runtime.config;
   const pick = primaryPick(agent, config);
   if (!pick) {
     console.warn(`curator: no primary pick for global agent "${agent.name}" (fallbackSet="${agent.fallbackSet ?? "<unset>"}"); skipping batch`);
     return 0;
   }
-  const res = await deps.router.completeWithEntries(
-    [{ provider: pick.providerKey, priority: 1 }],
+  const res = await deps.runtime.completeViaProvider(
+    pick.providerKey,
+    pick.model,
     {
       model: pick.model,
       system: EXTRACTION_SYSTEM_PROMPT,
@@ -143,8 +145,7 @@ async function curateBatch(deps: CuratorDeps, file: string, batchText: string): 
       messages: [{ role: "user", content: batchText }],
     },
     { priority: "background" },
-    `global agent "${agent.name}" (memoryCurator)`,
-    "memoryCurator",
+    { fallbackSet: agent.fallbackSet ?? undefined, projectId: undefined, agentId: agent.id, agentName: agent.name, role: "memoryCurator" },
   );
   const responseText = await new Response(res.body).text();
 
@@ -207,7 +208,7 @@ async function saveCursor(cursor: Cursor): Promise<void> {
 }
 
 export interface CuratorDeps {
-  router: ProviderRouter;
+  runtime: Runtime;
   store: MemoryStore;
   embedding: EmbeddingConfig | null;
 }

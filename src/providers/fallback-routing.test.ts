@@ -368,23 +368,6 @@ describe("HTTP /v1/messages fallback header", () => {
         providerName: "mock-provider",
       }),
       fallbackDefaultModel: (_setName: string) => "gemini-2.5-flash",
-      router: {
-        completeWithEntries: async () => ({
-          status: 200,
-          headers: new Headers(),
-          body: null,
-          providerName: "mock-router",
-        }),
-        complete: async () => ({
-          status: 200,
-          headers: new Headers(),
-          body: null,
-          providerName: "mock-general",
-        }),
-        cooldowns: () => ({}),
-        breakers: () => ({}),
-        setAvailabilityListener: () => {},
-      },
       providerState: new ProviderStateMap(),
       spendTracker: {
         record: async () => {},
@@ -427,20 +410,6 @@ describe("HTTP /v1/messages fallback header", () => {
         status: 200, headers: new Headers(), body: null, providerName: "mock",
       }),
       fallbackDefaultModel: () => "g",
-      router: {
-        completeWithEntries: async () => ({
-          status: 200,
-          headers: new Headers(),
-          body: new Blob([JSON.stringify({ content: [], model: "test" })]).stream(),
-          providerName: "anthropic",
-        }),
-        complete: async () => ({
-          status: 200, headers: new Headers(), body: null, providerName: "mock",
-        }),
-        cooldowns: () => ({}),
-        breakers: () => ({}),
-        setAvailabilityListener: () => {},
-      },
       providerState: new ProviderStateMap(),
       spendTracker: { record: async () => {}, projectSpend: () => ({ totalUsd: 0, budgetUsd: null }) },
       config: {},

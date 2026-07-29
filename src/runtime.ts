@@ -1,8 +1,6 @@
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
-import { ProviderRouter, type AvailabilityListener } from "./providers/router.js";
 import { SpendTracker } from "./providers/spend-tracker.js";
-import { ThrottledProvider, type ThrottleStats } from "./providers/throttle.js";
 import { GlobalQueue, type QueueContext } from "./providers/global-queue.js";
 import { ProviderStateMap } from "./providers/provider-state.js";
 import { ActivityLog, type DispatchContext } from "./providers/activity-log.js";
@@ -13,14 +11,31 @@ import type { EmbeddingConfig } from "./memory/embeddings.js";
 import { getGlobalAgent } from "./pm/global-agents.js";
 import { resolveEmbeddingHost } from "./providers/embedding-url.js";
 import * as agentStore from "./pm/agents.js";
+import { markProviderAvailable, markProviderUnavailable } from "./pm/model-registry.js";
 
 /** Per-provider runtime stats, used by the admin endpoint, the periodic
- * stats logger, and the threshold-alert monitor. Extends ThrottleStats
- * with the router-level cooldown overlay so callers see "why is this
- * provider skipped" alongside the throttle queue depth in one shape. */
-export interface ProviderRuntimeStats extends ThrottleStats {
-  /** ms epoch when the router cooldown expires; undefined when the
-   *  provider is currently available. */
+ * stats logger, and the threshold-alert monitor. Reads from
+ * ProviderStateMap.snapshot() directly -- the legacy overlay from
+ * ProviderRouter.cooldowns() is gone because ProviderRouter itself is
+ * gone (the queue's markCooling is the only source of cooling windows
+ * now, and ProviderStateMap exposes them via snapshot()). Shape still
+ * extends ThrottleStats for downstream consumers (`runtime-stats.ts`'s
+ * alert rules, the admin panel's per-provider cards) so the surface
+ * remains backward-compatible. */
+export interface ProviderRuntimeStats {
+  /** Per-provider throttle queue depth *background* — reads from
+   *  ProviderStateMap.queuedBackground. */
+  queuedBackground: number;
+  /** Per-provider throttle queue depth *interactive* — reads from
+   *  ProviderStateMap.queuedInteractive. */
+  queuedInteractive: number;
+  /** Currently in-flight requests. */
+  active: number;
+  /** Max concurrent in-flight requests. 0 = unlimited. */
+  maxConcurrent: number;
+  /** ms epoch when the provider's cooldown expires; undefined when
+   *  currently available. Mirrors ProviderStateMap.snapshot()
+   *  `coolingUntil` directly. */
   cooldownUntil?: number;
 }
 
@@ -97,10 +112,8 @@ export interface FallbackSetEntryHealth {
  * startup, so an admin-UI config change takes effect on the next request
  * instead of requiring a container restart. spendTracker is NOT rebuilt on
  * reload -- it's a long-lived ledger, not config-derived.
- */
-export class Runtime {
+ */export class Runtime {
   config!: GatewayConfig;
-  router!: ProviderRouter;
   /** Embedding target, now derived from the global embeddings agent
    *  (systemRole: "embeddings") rather than from a deprecated top-level
    *  `config.embeddingProvider` field. Null when no embeddings global
@@ -108,9 +121,14 @@ export class Runtime {
    *  dependent work rather than crashing. */
   embedding: EmbeddingConfig | null = null;
   readonly spendTracker = new SpendTracker();
-  private availabilityListener: AvailabilityListener | null = null;
   /** Global provider state map. Registered on reload, read by
-   *  GlobalQueue for availability checks. */
+   * GlobalQueue for availability checks. Source of truth for
+   * availability — cooldown / breaker / capacity / RPM gates the
+   * queue consults on every dispatch. Until the router drop (commit
+   * no longer tracking), this was the queue's private working set
+   * alongside the router's own CooldownTracker + CircuitBreaker. The
+   * ProviderRouter equivalents are gone; ProviderStateMap now owns
+   * the surface end-to-end. */
   readonly providerState = new ProviderStateMap();
   /** Ring-buffered activity log. The GlobalQueue writes
    *  queued/dispatched/fallback/succeeded/failed events into it; the
@@ -120,19 +138,14 @@ export class Runtime {
   readonly activityLog = new ActivityLog();
   /** Global queue replaces per-instance ThrottledProviders for
    *  centralized concurrency/RPM management and fallback-set-aware
-   *  dispatching. Created on reload, used by completeWithFallback. */
+   *  dispatching. Created on reload, used by completeWithFallback and
+   *  completeViaProvider. */
   private queue: GlobalQueue | null = null;
-  /** ThrottledProviders currently wired into this runtime. On reload we
-   * abortAll() each one so a config edit doesn't leave old in-flight
-   * requests continuing to do work against a runtime that's already
-   * switched shape underneath them. */
-  private readonly liveThrottles = new Set<ThrottledProvider>();
-
-  /** Survives config reloads, unlike the router it's attached to. */
-  setAvailabilityListener(listener: AvailabilityListener): void {
-    this.availabilityListener = listener;
-    this.router?.setAvailabilityListener(listener);
-  }
+  /** Unsubscribe handles for the ProviderStateMap → model-registry
+   *  availability listener chain. Re-bound on every reload so the
+   *  previous bindings (in case anyone else has registered listeners)
+   *  don't leak across reloads. */
+  private availabilityUnsubs: Array<() => void> = [];
 
   /** Best-guess default model for a fallback set (first entry's model).
    *  Used by the /v1/messages handler to set `body.model` before the
@@ -213,31 +226,55 @@ export class Runtime {
     return this.queue;
   }
 
-  /** Per-provider stats snapshot aggregating every live throttle plus
-   *  the router's cooldown state. Used by the admin stats endpoint,
-   *  the periodic stats logger, and the sustained-threshold alert
-   *  monitor. Returns a fresh object on every call -- no caching --
-   *  so callers always see live data. Guards against being called
-   *  before the first `reload()` completes (defensive: the definite
-   *  assignment assertion on `router!` means a premature call would
-   *  throw a TypeError instead of returning empty data). */
+  /** Dispatch a single provider+model call through the GlobalQueue. Used
+   *  by the memory curator and permission-classifier paths, both of which
+   *  resolve their dispatch target via `primaryPick(agent, config)` and
+   *  then send one request to that picked pair. Single-entry inline chain
+   *  — no per-request failover; the curator / classifier paths retry on
+   *  failure themselves if the response really didn't land. Returns the
+   *  same `{ ...response, providerName }` shape that
+   *  `completeWithFallback` returns so callers can swap from one to
+   *  the other with no call-shape changes. Mirrors the legacy
+   *  `router.completeWithEntries([{provider, priority:1}], ...)` shape
+   *  one-for-one — the priority resolution that used to live in the
+   *  router's per-entry loop is now explicitly passed via `options.priority`
+   *  by each caller (`"background"` for the curator, `"interactive"`
+   *  for the classifier). */
+  async completeViaProvider(
+    providerKey: string,
+    model: string,
+    request: AnthropicMessagesRequest,
+    options?: CompleteOptions,
+    context?: QueueContext,
+  ): Promise<ProviderResponse & { providerName: string }> {
+    if (!this.queue) throw new Error("GlobalQueue not initialized");
+    return this.queue.complete(
+      [{ provider: providerKey, model }],
+      request,
+      options,
+      context,
+    );
+  }
+
+  /** Per-provider stats snapshot aggregating ProviderStateMap.snapshot()
+   *  for live state (active / queued-by-priority / cooldown / rpm). Used
+   *  by the admin stats endpoint, the periodic stats logger, and the
+   *  sustained-threshold alert monitor. Returns a fresh object on every
+   *  call — no caching — so callers always see live data. The
+   *  ProviderRouter overlay is gone: the queue's `markCooling` is the
+   *  only source of cooling windows now, and ProviderStateMap surfaces
+   *  them via snapshot(). Falls back to an empty stats object when
+   *  called before the first `reload()` completes. */
   stats(): RuntimeStats {
-    if (!this.router) {
-      return { providers: {}, fallbackSets: {}, timestamp: Date.now() };
-    }
     const providers: Record<string, ProviderRuntimeStats> = {};
-    for (const t of this.liveThrottles) {
-      providers[t.name] = t.stats();
-    }
-    // Overlay router cooldown info onto each throttled provider's
-    // stats. Non-throttled providers that happen to be on cooldown
-    // (e.g. Anthropic with no maxConcurrent configured) won't show up
-    // here -- the cooldown map is read-only on this path, so existing
-    // throttle stats are never mutated to lose data.
-    const cooldowns = this.router.cooldowns();
-    for (const [name, until] of Object.entries(cooldowns)) {
-      const existing = providers[name];
-      if (existing) existing.cooldownUntil = until;
+    for (const [name, s] of Object.entries(this.providerState.snapshot())) {
+      providers[name] = {
+        active: s.active,
+        queuedBackground: s.queuedBackground,
+        queuedInteractive: s.queuedInteractive,
+        maxConcurrent: s.maxConcurrent,
+        cooldownUntil: s.coolingUntil ?? undefined,
+      };
     }
     return {
       providers,
@@ -291,7 +328,11 @@ export class Runtime {
           coolingUntil = snap.coolingUntil;
           breakerUntil = snap.breakerUntil;
           active = snap.active;
-          queued = snap.queued;
+          // Sum interactive + background so the UI's per-entry queue depth
+          // stays a single number it can render; the priority split is
+          // available at the top-level provider stats layer (where the
+          // alert rules read it), which is where the split is meaningful.
+          queued = snap.queuedInteractive + snap.queuedBackground;
           maxConcurrent = snap.maxConcurrent;
           rpmLimit = snap.rpmLimit;
           // Refill tokens the same way canAccept does so the reported
@@ -355,81 +396,41 @@ export class Runtime {
   async reload(): Promise<void> {
     const config = await loadConfig();
 
-    // Drop the old throttles before building new providers so any
-    // in-flight inner fetches stop promptly.
-    for (const old of this.liveThrottles) {
-      old.abortAll("runtime reload: config changed");
-    }
+    // Drop the old queue's in-flight work before re-registering providers
+    // so a config edit doesn't leave old requests continuing to do work
+    // against a runtime that's already switched shape underneath them.
+    if (this.queue) this.queue.abortAll("runtime reload: config changed");
 
-    // Build the router providers (uses ThrottledProvider wrappers for
-    // backward compat with existing task-based routing).
-    const routerProviders: Record<string, Provider> = {};
-    const newThrottles = new Set<ThrottledProvider>();
-    const routerAnthropicInner = new AnthropicProvider({ apiKey: config.anthropic?.apiKey });
-    if (config.anthropic?.maxConcurrent) {
-      const t = new ThrottledProvider(routerAnthropicInner, { maxConcurrent: config.anthropic.maxConcurrent });
-      routerProviders.anthropic = t;
-      newThrottles.add(t);
-    } else {
-      routerProviders.anthropic = routerAnthropicInner;
-    }
-    for (const [name, providerDef] of Object.entries(config.providers ?? {})) {
-      const defaultModel = providerDef.models.find((m) => m.enabled) ?? providerDef.models[0];
-      if (!defaultModel) continue;
-      const instanceConfig = {
-        baseUrl: providerDef.baseUrl,
-        model: defaultModel.name,
-        apiKey: providerDef.apiKey,
-        pricing: defaultModel.pricing,
-        maxConcurrent: providerDef.maxConcurrent,
-        rpmLimit: providerDef.rpmLimit,
-        priority: providerDef.priority,
-        emitLateMetadataDelta: providerDef.emitLateMetadataDelta,
-        maxRequestBytes: providerDef.maxRequestBytes,
-      };
-      const inner = new OpenAICompatibleProvider(name, instanceConfig);
-      if (providerDef.maxConcurrent || providerDef.rpmLimit) {
-        const opts: { maxConcurrent: number; rpmLimit?: number } = {
-          maxConcurrent: providerDef.maxConcurrent ?? 1,
-        };
-        if (providerDef.rpmLimit) opts.rpmLimit = providerDef.rpmLimit;
-        routerProviders[name] = new ThrottledProvider(inner, opts);
-        newThrottles.add(routerProviders[name] as ThrottledProvider);
-      } else {
-        routerProviders[name] = inner;
-      }
-    }
-    // Legacy instances.
-    for (const [name, instance] of Object.entries(config.openaiCompatibleInstances)) {
-      if (routerProviders[name]) continue;
-      const inner = new OpenAICompatibleProvider(name, instance);
-      if (instance.maxConcurrent || instance.rpmLimit) {
-        const opts: { maxConcurrent: number; rpmLimit?: number } = {
-          maxConcurrent: instance.maxConcurrent ?? 1,
-        };
-        if (instance.rpmLimit) opts.rpmLimit = instance.rpmLimit;
-        routerProviders[name] = new ThrottledProvider(inner, opts);
-        newThrottles.add(routerProviders[name] as ThrottledProvider);
-      } else {
-        routerProviders[name] = inner;
-      }
-    }
-
-    this.config = config;
-    this.router = new ProviderRouter(routerProviders, config, this.spendTracker);
-    this.liveThrottles.clear();
-    for (const t of newThrottles) this.liveThrottles.add(t);
-    if (this.availabilityListener) this.router.setAvailabilityListener(this.availabilityListener);
-
-    // Build bare providers for the GlobalQueue (no ThrottledProvider
-    // wrappers — GlobalQueue handles concurrency/RPM centrally via
-    // ProviderStateMap).
+    // Up until the router drop, the runtime constructed two parallel
+    // provider maps: a router-facing set with per-instance ThrottledProvider
+    // wrappers, and a queue-facing set of bare providers. The wrappers were
+    // duplicating per-instance state (concurrency / RPM) that the
+    // ProviderStateMap-owned queue now handles globally. After the drop
+    // there's only the bare set — single source of truth for "which
+    // providers can accept work right now" — and every dispatch surface
+    // (agents via `runtime.completeViaProvider`, global agents via
+    // `runtime.completeWithFallback`, /v1/messages via `runtime.globalQueue')
+    // reads from it.
     const bareProviders: Record<string, Provider> = {};
     const stateMap = this.providerState;
+
+    // Drop availability listeners from the previous load before
+    // re-registering on the freshly-built state map (idempotent if the
+    // state map reference is unchanged — `ProviderStateMap` is a new
+    // instance only on first construction; on reload it survives config
+    // changes but listeners need to be re-bound because the old state
+    // map wound down with the old providers).
+    for (const off of this.availabilityUnsubs) off();
+    this.availabilityUnsubs = [];
 
     // Anthropic
     const anthropicInner = new AnthropicProvider({ apiKey: config.anthropic?.apiKey });
     bareProviders.anthropic = anthropicInner;
+    // Anthropic parses its own reset headers from upstream
+    // (`anthropic-ratelimit-unified-5h-reset` etc.) — the provider's
+    // own cooldown handling is more precise than the global fallback
+    // would be. No `cooldownFallbackMs` override on AnthropicConfig,
+    // same as the legacy router's shape: Anthropic didn't get one.
     stateMap.register("anthropic", {
       maxConcurrent: config.anthropic?.maxConcurrent,
       rpmLimit: config.anthropic?.rpmLimit,
@@ -444,8 +445,8 @@ export class Runtime {
         model: defaultModel.name,
         apiKey: providerDef.apiKey,
         pricing: defaultModel.pricing,
-        maxConcurrent: undefined,
-        rpmLimit: undefined,
+        maxConcurrent: providerDef.maxConcurrent,
+        rpmLimit: providerDef.rpmLimit,
         priority: providerDef.priority,
         emitLateMetadataDelta: providerDef.emitLateMetadataDelta,
         maxRequestBytes: providerDef.maxRequestBytes,
@@ -458,7 +459,12 @@ export class Runtime {
       });
     }
 
-    // Legacy openaiCompatibleInstances (backward compat)
+    // Legacy openaiCompatibleInstances (backward compat). The legacy
+    // shape doesn't carry a `cooldownFallbackMs` field — operators on
+    // this path can migrate to the new `providers.<name>` shape if
+    // they need per-vendor cooldown defaults (e.g. setting Gemini
+    // Free to 5min or Ollama to 30s). Until then, the global 60s
+    // default kicks in.
     for (const [name, instance] of Object.entries(config.openaiCompatibleInstances)) {
       if (bareProviders[name]) continue;
       bareProviders[name] = new OpenAICompatibleProvider(name, instance);
@@ -468,6 +474,26 @@ export class Runtime {
       });
     }
 
+    // Wire the model registry's `markProviderAvailable` /
+    // `markProviderUnavailable` to the ProviderStateMap's lifecycle
+    // listeners so the registry's per-model availability list mirrors
+    // what ProviderStateMap knows. This replaces the old
+    // `runtime.setAvailabilityListener(...)` chain in index.ts — the
+    // listener body lived there before because ProviderRouter owned the
+    // listeners; with the router gone, the wiring is the runtime's
+    // responsibility, and the runtime is the only thing the boot path
+    // touches. Subscribing once per reload keeps the registry's data
+    // consistent across config edits without each caller having to
+    // remember.
+    this.availabilityUnsubs.push(
+      stateMap.onUnavailable((provider, retryAfterMs, reason) => {
+        void markProviderUnavailable(provider, retryAfterMs, reason);
+      }),
+      stateMap.onAvailable((provider) => {
+        void markProviderAvailable(provider);
+      }),
+    );
+
     // Create or update the GlobalQueue. Share the runtime's activity
     // log with the queue so dispatch events land in the same buffer the
     // admin endpoint reads from. On reload the queue gets the same log
@@ -475,7 +501,6 @@ export class Runtime {
     // rather than vanishing into a fresh buffer the admin panel would
     // have to discover.
     if (this.queue) {
-      this.queue.abortAll("runtime reload: config changed");
       this.queue.setProviders(bareProviders);
       this.queue.setStateMap(stateMap);
     } else {

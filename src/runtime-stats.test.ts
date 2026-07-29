@@ -11,18 +11,16 @@ import type { ProviderStateMap } from "./providers/provider-state.js";
 
 /** Convenience: build a minimal ProviderRuntimeStats. Only the fields
  * the default rules extract from (queuedInteractive, queuedBackground)
- * need non-zero values; the rest use safe defaults. */
+ * need non-zero values; the rest use safe defaults. `queuedTotal` and
+ * `slotsUtilization` were dropped from the type when the router dropped
+ * out of the runtime stats surface; their inputs (queuedInteractive +
+ * queuedBackground / active / maxConcurrent) are still here. */
 function provider(overrides: Partial<ProviderRuntimeStats>): ProviderRuntimeStats {
   return {
-    name: "test",
     active: 0,
     queuedInteractive: 0,
     queuedBackground: 0,
-    queuedTotal: 0,
     maxConcurrent: 1,
-    slotsUtilization: 0,
-    rpmLimit: null,
-    rateTokens: null,
     ...overrides,
   };
 }
@@ -197,8 +195,8 @@ describe("StatsMonitor", () => {
     const m = new StatsMonitor(
       () => ({
         providers: {
-          ollama: provider({ name: "ollama", active: 2, queuedInteractive: 5, queuedBackground: 3, maxConcurrent: 4 }),
-          anthropic: provider({ name: "anthropic", active: 1, queuedInteractive: 0, queuedBackground: 0, maxConcurrent: 0 }),
+          ollama: provider({ active: 2, queuedInteractive: 5, queuedBackground: 3, maxConcurrent: 4 }),
+          anthropic: provider({ active: 1, queuedInteractive: 0, queuedBackground: 0, maxConcurrent: 0 }),
         },
         fallbackSets: {},
         timestamp: Date.now(),

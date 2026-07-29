@@ -20,8 +20,10 @@ export interface ProviderStateEntry {
   maxConcurrent: number;
   /** Currently in-flight requests. */
   active: number;
-  /** Queued requests waiting for a slot on this provider. */
-  queued: number;
+  /** Queued interactive requests waiting for a slot on this provider. */
+  queuedInteractive: number;
+  /** Queued background requests waiting for a slot on this provider. */
+  queuedBackground: number;
   /** Requests-per-minute limit. null = unlimited. */
   rpmLimit: number | null;
   /** Current RPM token-bucket level. Starts at rpmLimit. */
@@ -38,8 +40,45 @@ export interface ProviderStateInit {
   cooldownFallbackMs?: number;
 }
 
+/** Listener fired when a provider enters a cooldown / breaker state.
+ *  Carries the duration so the listener can record an analogous unavailable
+ *  window in the model registry without needing to re-derive it. */
+export type ProviderUnavailableListener = (provider: string, retryAfterMs: number, reason: string) => void;
+
+/** Listener fired after a successful request clears all breaker / cooldown
+ *  state for a provider. The model registry uses this to drop a cooldown
+ *  early, since a successful completion is proof the window reopened
+ *  sooner than advertised. */
+export type ProviderAvailableListener = (provider: string) => void;
+
 export class ProviderStateMap {
   private readonly state = new Map<string, ProviderStateEntry>();
+  /** Subscribers called from `markCooling` and `recordSuccess`. Plain Sets
+   *  rather than EventEmitter: there's no scenario where the runtime
+   *  benefits from `emit`-style fan-out and the cost of an EventEmitter is
+   *  a non-trivial separator between two distinct concerns (state mutation
+   *  vs. observer notification). Listeners are kept off the hot path by
+   *  being invoked synchronously without try/catch — the model-registry
+   *  functions are `void`-returning among the callers we wire today, so a
+   *  throwing listener is a real bug, not a network blip. */
+  private readonly unavailableListeners = new Set<ProviderUnavailableListener>();
+  private readonly availableListeners = new Set<ProviderAvailableListener>();
+
+  /** Subscribe to provider-unavailable events. Returns an unsubscribe
+   *  function so callers can clean up across config reloads (the runtime
+   *  re-registers on every `reload()`; the old set ref-counts keep the
+   *  registry listeners alive otherwise). */
+  onUnavailable(listener: ProviderUnavailableListener): () => void {
+    this.unavailableListeners.add(listener);
+    return () => this.unavailableListeners.delete(listener);
+  }
+
+  /** Subscribe to provider-available events. Same return contract as
+   *  `onUnavailable`. */
+  onAvailable(listener: ProviderAvailableListener): () => void {
+    this.availableListeners.add(listener);
+    return () => this.availableListeners.delete(listener);
+  }
 
   /** Register a provider so the queue can check it. Idempotent — an
    * existing entry is updated with new init values but never fully replaced
@@ -61,7 +100,8 @@ export class ProviderStateMap {
       breakerUntil: null,
       maxConcurrent: init?.maxConcurrent ?? 0,
       active: 0,
-      queued: 0,
+      queuedInteractive: 0,
+      queuedBackground: 0,
       rpmLimit: init?.rpmLimit ?? null,
       rpmTokens: init?.rpmLimit ?? 0,
       lastRpmRefill: Date.now(),
@@ -132,23 +172,44 @@ export class ProviderStateMap {
 
   /** Mark a provider as cooling down. Duration follows the precedence
    * chain: retryAfterMs (upstream Retry-After) → cooldownFallbackMs
-   * (per-provider config) → null (caller's default). */
+   * (per-provider config) → null (caller's default). When the cooldown
+   * record actually lands (was non-null and produced a new effectiveMs),
+   * every unavailable-listener fires so the model registry can mirror
+   * the unavailable window onto the per-provider records. The listener
+   * is invoked synchronously after the state mutation so a subsequent
+   * `snapshot()` call sees the new deadline even if the listener awaits
+   * a Promise resolution (the registry writes are fire-and-forget). */
   markCooling(name: string, retryAfterMs?: number | null, fallbackMs?: number | null): void {
     const entry = this.state.get(name);
     if (!entry) return;
     const effectiveMs = retryAfterMs ?? fallbackMs ?? null;
     if (effectiveMs === null) return;
     entry.coolingUntil = Date.now() + Math.max(1000, effectiveMs);
+    const reason = retryAfterMs !== null && retryAfterMs !== undefined
+      ? "upstream retry-after"
+      : fallbackMs !== null && fallbackMs !== undefined
+        ? "per-provider cooldown fallback"
+        : "default cooldown";
+    for (const listener of this.unavailableListeners) listener(name, Math.max(1000, effectiveMs), reason);
   }
 
   /** Record a successful request — clears any active circuit breaker
    * state for this provider (breakerUntil, recent failures, and the
-   * consecutive-open count so the next trip starts at BASE_MS again). */
+   * consecutive-open count so the next trip starts at BASE_MS again).
+   * Fires every available-listener so the model registry can drop a
+   * cooldown early: a successful completion is proof the window
+   * reopened, whatever the upstream's reset headers said. Only fires
+   * when the success is meaningful for the cooling surface — meaning
+   * either the breaker was open or the provider was actively cooling
+   * before this success — to avoid spamming the persistence layer on
+   * every routine completion. */
   recordSuccess(name: string): void {
     const entry = this.state.get(name);
     if (!entry) return;
+    const wasActive = entry.breakerUntil !== null || entry.coolingUntil !== null;
     entry.breakerUntil = null;
     this.clearFailures(name);
+    if (wasActive) for (const listener of this.availableListeners) listener(name);
   }
 
   /** Circuit breaker configuration: 5 failures within a 60s sliding
@@ -198,7 +259,8 @@ export class ProviderStateMap {
   /** Snapshot of every registered provider's state for stats/UI. */
   snapshot(): Record<string, {
     active: number;
-    queued: number;
+    queuedInteractive: number;
+    queuedBackground: number;
     maxConcurrent: number;
     coolingUntil: number | null;
     breakerUntil: number | null;
@@ -211,7 +273,8 @@ export class ProviderStateMap {
       this.refillTokens(entry);
       result[name] = {
         active: entry.active,
-        queued: entry.queued,
+        queuedInteractive: entry.queuedInteractive,
+        queuedBackground: entry.queuedBackground,
         maxConcurrent: entry.maxConcurrent,
         coolingUntil: entry.coolingUntil,
         breakerUntil: entry.breakerUntil,
@@ -233,19 +296,27 @@ export class ProviderStateMap {
   private readonly failureCounts = new Map<string, number>();
 
   /** Increment the queue depth counter for a provider. Called when a
-   * request enters the global queue targeting this provider. */
-  incrementQueued(name: string): void {
+   * request enters the global queue targeting this provider. The priority
+   * is passed so `runtime.stats()` can report interactive vs background
+   * depths separately, which `runtime-stats.ts`'s alert rules read
+   * off the ThrottleStats shape (a per-provider breakdown that the
+   * router-era code maintained via independent ThrottledProvider
+   * wrappers; the global queue preserves the same shape via this
+   * split). */
+  incrementQueued(name: string, priority: "interactive" | "background"): void {
     const entry = this.state.get(name);
-    if (entry) entry.queued++;
+    if (!entry) return;
+    if (priority === "interactive") entry.queuedInteractive++;
+    else entry.queuedBackground++;
   }
 
-  /** Decrement the queue depth counter for a provider. Called when a
-   * request leaves the global queue (either to execute or to be removed). */
-  decrementQueued(name: string): void {
+  /** Decrement the queue depth counter for a provider. Priority matches
+   * the increment call -- they're symmetric. */
+  decrementQueued(name: string, priority: "interactive" | "background"): void {
     const entry = this.state.get(name);
-    if (entry) entry.queued = Math.max(0, entry.queued - 1);
+    if (!entry) return;
+    if (priority === "interactive") entry.queuedInteractive = Math.max(0, entry.queuedInteractive - 1);
+    else entry.queuedBackground = Math.max(0, entry.queuedBackground - 1);
   }
 }
 
-const CircuitBreakerBaseMs = 60_000;
-const CircuitBreakerMaxMs = 30 * 60 * 1000;

@@ -1,4 +1,4 @@
-import type { ProviderRouter } from "../providers/router.js";
+import type { Runtime } from "../runtime.js";
 import { getGlobalAgent } from "../pm/global-agents.js";
 import { primaryPick } from "../pm/agents.js";
 
@@ -12,7 +12,7 @@ const SYSTEM_PROMPT = `You gate tool calls for an autonomous coding agent (Claud
 Respond with ONLY a JSON object: {"decision": "allow" | "deny" | "ask", "reason": "one sentence"}`;
 
 export async function classifyAction(
-  router: ProviderRouter,
+  runtime: Runtime,
   toolName: string,
   toolInput: unknown,
 ): Promise<{ decision: ClassifierDecision; reason: string }> {
@@ -34,16 +34,17 @@ export async function classifyAction(
   }
   // Resolve the dispatch target from the agent's fallbackSet (rather
   // than the legacy agent.providerKey/model fields, which were dropped
-  // from AgentDef). The classifier runs on a ProviderRouter, not
-  // Runtime, so we read the active config off the router — same source
+  // from AgentDef). The classifier now runs on Runtime (post-router
+  // drop) and reads the active config off runtime.config — same source
   // of truth as the curator uses for the equivalent derivation.
-  const config = router.config;
+  const config = runtime.config;
   const pick = primaryPick(agent, config);
   if (!pick) {
     return { decision: "ask", reason: `no primary pick for global agent "${agent.name}" (fallbackSet="${agent.fallbackSet ?? "<unset>"})"` };
   }
-  const res = await router.completeWithEntries(
-    [{ provider: pick.providerKey, priority: 1 }],
+  const res = await runtime.completeViaProvider(
+    pick.providerKey,
+    pick.model,
     {
       model: pick.model,
       system: SYSTEM_PROMPT,
@@ -56,8 +57,12 @@ export async function classifyAction(
       ],
     },
     { priority: "interactive" },
-    `global agent "${agent.name}" (permissionClassifier)`,
-    "permissionClassifier",
+    {
+      fallbackSet: agent.fallbackSet ?? undefined,
+      agentId: agent.id,
+      agentName: agent.name,
+      role: "permissionClassifier",
+    },
   );
 
   const text = await new Response(res.body).text();

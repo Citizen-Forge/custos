@@ -43,7 +43,8 @@ describe("ProviderStateMap", () => {
     assert.equal(e.breakerUntil, null);
     assert.equal(e.maxConcurrent, 0);
     assert.equal(e.active, 0);
-    assert.equal(e.queued, 0);
+    assert.equal(e.queuedInteractive, 0);
+    assert.equal(e.queuedBackground, 0);
     assert.equal(e.rpmLimit, null);
     assert.equal(e.cooldownFallbackMs, null);
   });
@@ -384,38 +385,47 @@ describe("ProviderStateMap", () => {
 
   // -- queue depth counters ---------------------------------------------------
 
-  it("incrementQueued / decrementQueued track per-provider queue depth", () => {
+  it("incrementQueued / decrementQueued track per-provider queue depth by priority", () => {
     const m = new ProviderStateMap();
     m.register("ollama");
-    assert.equal(m.get("ollama")!.queued, 0);
+    assert.equal(m.get("ollama")!.queuedInteractive, 0);
+    assert.equal(m.get("ollama")!.queuedBackground, 0);
 
-    m.incrementQueued("ollama");
-    assert.equal(m.get("ollama")!.queued, 1);
+    m.incrementQueued("ollama", "interactive");
+    assert.equal(m.get("ollama")!.queuedInteractive, 1);
+    assert.equal(m.get("ollama")!.queuedBackground, 0);
 
-    m.incrementQueued("ollama");
-    assert.equal(m.get("ollama")!.queued, 2);
+    m.incrementQueued("ollama", "background");
+    assert.equal(m.get("ollama")!.queuedInteractive, 1);
+    assert.equal(m.get("ollama")!.queuedBackground, 1);
 
-    m.decrementQueued("ollama");
-    assert.equal(m.get("ollama")!.queued, 1);
+    m.incrementQueued("ollama", "interactive");
+    assert.equal(m.get("ollama")!.queuedInteractive, 2);
 
-    m.decrementQueued("ollama");
-    assert.equal(m.get("ollama")!.queued, 0);
+    m.decrementQueued("ollama", "interactive");
+    assert.equal(m.get("ollama")!.queuedInteractive, 1);
+
+    m.decrementQueued("ollama", "background");
+    assert.equal(m.get("ollama")!.queuedBackground, 0);
   });
 
   it("decrementQueued never drives queued below 0", () => {
     const m = new ProviderStateMap();
     m.register("safe");
-    m.decrementQueued("safe");
-    assert.equal(m.get("safe")!.queued, 0);
+    m.decrementQueued("safe", "interactive");
+    assert.equal(m.get("safe")!.queuedInteractive, 0);
 
-    m.decrementQueued("safe");
-    assert.equal(m.get("safe")!.queued, 0);
+    m.decrementQueued("safe", "interactive");
+    assert.equal(m.get("safe")!.queuedInteractive, 0);
+
+    m.decrementQueued("safe", "background");
+    assert.equal(m.get("safe")!.queuedBackground, 0);
   });
 
   it("incrementQueued / decrementQueued are no-ops for unregistered providers", () => {
     const m = new ProviderStateMap();
-    m.incrementQueued("ghost"); // should not throw
-    m.decrementQueued("ghost"); // should not throw
+    m.incrementQueued("ghost", "interactive"); // should not throw
+    m.decrementQueued("ghost", "background"); // should not throw
   });
 
   // -- snapshot ---------------------------------------------------------------
@@ -426,7 +436,8 @@ describe("ProviderStateMap", () => {
     const s = m.snapshot();
     assert.ok(s.idle);
     assert.equal(s.idle.active, 0);
-    assert.equal(s.idle.queued, 0);
+    assert.equal(s.idle.queuedInteractive, 0);
+    assert.equal(s.idle.queuedBackground, 0);
     assert.equal(s.idle.maxConcurrent, 3);
     assert.equal(s.idle.coolingUntil, null);
     assert.equal(s.idle.breakerUntil, null);
@@ -439,12 +450,13 @@ describe("ProviderStateMap", () => {
     const m = new ProviderStateMap();
     m.register("busy", { maxConcurrent: 2 });
     m.acquire("busy");
-    m.incrementQueued("busy");
-    m.incrementQueued("busy");
+    m.incrementQueued("busy", "interactive");
+    m.incrementQueued("busy", "background");
 
     const s = m.snapshot();
     assert.equal(s.busy.active, 1);
-    assert.equal(s.busy.queued, 2);
+    assert.equal(s.busy.queuedInteractive, 1);
+    assert.equal(s.busy.queuedBackground, 1);
   });
 
   it("snapshot is empty when no providers are registered", () => {

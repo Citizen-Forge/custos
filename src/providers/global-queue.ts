@@ -284,7 +284,7 @@ export class GlobalQueue {
       };
 
       const queue = priority === "interactive" ? this.interactiveQueue : this.backgroundQueue;
-      for (const target of fallbackTargets) this.state.incrementQueued(target.provider);
+      for (const target of fallbackTargets) this.state.incrementQueued(target.provider, priority);
       queue.push(entry);
 
       if (!options?.signal) return;
@@ -293,7 +293,7 @@ export class GlobalQueue {
         entry.aborted = true;
         const i = queue.indexOf(entry);
         if (i !== -1) queue.splice(i, 1);
-        for (const target of fallbackTargets) this.state.decrementQueued(target.provider);
+        for (const target of fallbackTargets) this.state.decrementQueued(target.provider, priority);
         const reason = (options.signal as AbortSignal).reason;
         if (reason instanceof Error) reject(reason);
         else if (typeof reason === "string") reject(new Error(reason));
@@ -321,7 +321,7 @@ export class GlobalQueue {
       const target = this.firstAvailable(entry.fallbackTargets);
       if (target) {
         this.interactiveQueue.splice(i, 1);
-        for (const t of entry.fallbackTargets) this.state.decrementQueued(t.provider);
+        for (const t of entry.fallbackTargets) this.state.decrementQueued(t.provider, "interactive");
         this.dispatchQueued(target, entry);
         continue;
       }
@@ -338,7 +338,7 @@ export class GlobalQueue {
       const target = this.firstAvailable(entry.fallbackTargets);
       if (target) {
         this.backgroundQueue.splice(i, 1);
-        for (const t of entry.fallbackTargets) this.state.decrementQueued(t.provider);
+        for (const t of entry.fallbackTargets) this.state.decrementQueued(t.provider, "background");
         this.dispatchQueued(target, entry);
         continue;
       }

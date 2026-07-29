@@ -21,27 +21,17 @@ describe("GET /metrics", () => {
     registerMetricsRoute(app, stubRuntime({
       providers: {
         ollama: {
-          name: "ollama",
           active: 2,
           queuedInteractive: 5,
           queuedBackground: 3,
-          queuedTotal: 8,
           maxConcurrent: 4,
-          slotsUtilization: 0.5,
-          rpmLimit: null,
-          rateTokens: null,
           cooldownUntil: undefined,
         },
         anthropic: {
-          name: "anthropic",
           active: 1,
           queuedInteractive: 0,
           queuedBackground: 0,
-          queuedTotal: 0,
           maxConcurrent: 0,
-          slotsUtilization: 0,
-          rpmLimit: null,
-          rateTokens: null,
           cooldownUntil: 1_700_000_000_000,
         },
       },
