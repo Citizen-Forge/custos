@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { ActivityResponse, AgentDef, AgentsResponse, CustosProject, FallbackSetOption } from '@shared/types'
+import type { ActivityResponse, AgentDef, AgentsResponse, CustosProject, FallbackSetOption, NowWorkingSummary } from '@shared/types'
 import { useCall, relativeTime } from '../api'
 import Avatar, { agentLabel } from './Avatar'
 import AgentModelSelect, { isOrphaned, parseModelSelectValue } from './AgentModelSelect'
@@ -67,6 +67,73 @@ export default function TeamTab({
     void patchAgent(agent, { fallbackSet: patch.fallbackSet })
   }
 
+  /** Per-agent live status row. Renders a compact summary inside the
+   *  agent card so a glance at the roster answers "what are they doing
+   *  right now" without scrolling to the bottom activity panel. The
+   *  server pre-resolves work-item titles and truncates long fields,
+   *  so this function is purely presentational. */
+  function renderNowWorking(agentId: string, activityData: ActivityResponse | null): React.JSX.Element {
+    const nw: NowWorkingSummary | undefined = activityData?.nowWorkingByAgent?.[agentId]
+    if (!nw || nw.status === 'idle') {
+      return <div className="now-working idle">Idle — waiting for dispatch</div>
+    }
+    if (nw.status === 'running') {
+      // Map server isStalled + client-computed wait window onto the
+      // existing running-row classes so the CSS for state colors is
+      // shared with the historical activity rows.
+      const timeSince = nw.lastEventAt ? Date.now() - nw.lastEventAt : 0
+      const state: 'running' | 'waiting' | 'stalled' = nw.isStalled
+        ? 'stalled'
+        : timeSince < 120_000
+          ? 'running'
+          : 'waiting'
+      const stateBadge = {
+        running: <span className="badge working">running</span>,
+        waiting: <span className="badge warn">waiting</span>,
+        stalled: <span className="badge stalled">no activity</span>,
+      }[state]
+      return (
+        <div className={`now-working running-row ${state}`}>
+          <div className="running-head">
+            {stateBadge}
+            <strong>{nw.workItemTitle ?? 'Project duties'}</strong>
+            {nw.workItemDeleted && <span className="badge deleted" title="work item was deleted">deleted</span>}
+          </div>
+          <div className="running-action" title={nw.currentAction ?? ''}>
+            {nw.currentAction
+              ? nw.currentAction
+              : state === 'waiting'
+                ? <span className="muted">waiting for an available provider slot…</span>
+                : <span className="muted">thinking…</span>
+            }
+            {nw.lastEventAt && (
+              <span className="muted"> · last moved {relativeTime(nw.lastEventAt)}</span>
+            )}
+          </div>
+        </div>
+      )
+    }
+    // status === 'succeeded' | 'failed' — show the most recent completion
+    const outcomeBadge = nw.status === 'succeeded'
+      ? <span className="badge succeeded">succeeded</span>
+      : <span className="badge failed">failed</span>
+    return (
+      <div className="now-working running-row">
+        <div className="running-head">
+          {outcomeBadge}
+          <strong>{nw.workItemTitle ?? 'Project duties'}</strong>
+          {nw.workItemDeleted && <span className="badge deleted" title="work item was deleted">deleted</span>}
+          {nw.endedAt && <span className="muted"> · {relativeTime(nw.endedAt)}</span>}
+        </div>
+        <div className="running-action" title={nw.error ?? nw.summary ?? ''}>
+          {nw.error
+            ? <span className="card-error">{nw.error}</span>
+            : nw.summary ?? <span className="muted">(no output)</span>}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="devops">
       {/* Agent roster -------------------------------------------------- */}
@@ -111,6 +178,7 @@ export default function TeamTab({
                 {agent.stats.assigned} assigned · {agent.stats.completed} done · {agent.stats.qaRejections} bounced · $
                 {agent.stats.totalCostUsd.toFixed(2)}
               </div>
+              {renderNowWorking(agent.id, activity)}
               {agent.notes.length > 0 && (
                 <ul className="agent-notes">
                   {agent.notes.map((note, i) => (
@@ -172,7 +240,13 @@ export default function TeamTab({
             })}
           </div>
         ) : null}
-        {!activity?.runs.length && <p className="hint">Nothing has run yet.</p>}
+        {/* "Nothing has run yet" only makes sense when nothing has ever
+            run. If there are active runs in flight the bottom panel will
+            populate as they complete; don't show a misleading empty
+            state in the meantime. */}
+        {!activity?.runs.length && !activity?.active.length && (
+          <p className="hint">Nothing has run yet.</p>
+        )}
         {activity?.runs.map((run) => (
           <details key={run.id} className={`run run-${run.status}`}>
             <summary>

@@ -274,6 +274,39 @@ export interface ActivityResponse {
   /** Runs that have produced no events for a while — surfaced, not killed. */
   stalledRunIds: string[];
   busy: string[];
+  /** Per-agent "what they're working on" summary, keyed by agentId. An
+   * entry exists for every agent on the project (idle ones are included
+   * with status="idle" rather than missing) so the UI can render every
+   * agent card without optional chaining gymnastics. */
+  nowWorkingByAgent: Record<string, NowWorkingSummary>;
+}
+
+/** Live work-in-progress snapshot for a single agent. Server-side
+ * enrichment resolves work-item titles and truncates long fields so the
+ * UI can render without further calls. */
+export interface NowWorkingSummary {
+  /** "running" = currently executing, "succeeded"/"failed" = most recent
+   * completed run, "idle" = no runs in the recent window. */
+  status: "running" | "succeeded" | "failed" | "idle";
+  /** The run this snapshot is drawn from. Absent for "idle". */
+  runId?: string;
+  /** For "running": true if lastEventAt is older than the stall threshold.
+   * For completed runs: always false. */
+  isStalled?: boolean;
+  /** Resolved work item title, or null if there is no workItemId. */
+  workItemTitle?: string | null;
+  /** True if workItemId was set but getWorkItem returned null (the item
+   * has been deleted between scheduling and dispatch, or archived). */
+  workItemDeleted?: boolean;
+  /** For "running": the latest heartbeat text (truncated server-side). */
+  currentAction?: string | null;
+  /** For completed runs: the run's summary text (truncated server-side). */
+  summary?: string | null;
+  /** For failed runs: the error message, if any. */
+  error?: string | null;
+  startedAt?: number;
+  lastEventAt?: number;
+  endedAt?: number | null;
 }
 
 /** Vault entry as the API exposes it. The value is deliberately absent:

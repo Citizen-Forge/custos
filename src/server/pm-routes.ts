@@ -300,12 +300,104 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
   app.get("/admin/api/projects/:id/activity", async (req) => {
     const { id } = req.params as { id: string };
     const { limit } = req.query as { limit?: string };
+    const pastRuns = await runs.listRuns(id, Number(limit) || 50);
+    const active = await runs.listActiveRuns(id);
     const stalled = await runs.listStalledRuns(id);
+    const stalledRunIds = stalled.map((run) => run.id);
+
+    // Resolve work-item titles once for every work item referenced by
+    // any run in the response (active + past). Doing this in one batch
+    // keeps the UI from issuing a follow-up request per agent card and
+    // keeps the response round-trip count to one even on a busy project
+    // with 8 agents and dozens of runs in the recent window.
+    const itemIds = Array.from(new Set(
+      [...active, ...pastRuns]
+        .map((run) => run.workItemId)
+        .filter((wid): wid is string => Boolean(wid)),
+    ));
+    const items = await Promise.all(itemIds.map((wid) => board.getWorkItem(wid)));
+    const itemTitles: Record<string, string | null> = Object.fromEntries(
+      itemIds.map((wid, idx) => [wid, items[idx]?.title ?? null]),
+    );
+
+    // Build a per-agent "what they're working on" snapshot. Every agent
+    // gets an entry (idle ones get status="idle") so the UI can render
+    // every agent card without optional chaining. Active runs win over
+    // past runs; past runs only surface when there's no active one.
+    //
+    // The pre-built maps cut the per-agent work to O(1) lookups -- a
+    // project with 8 agents and 200 past runs would otherwise do 1600
+    // comparisons on every poll, which compounds on the 20s revision
+    // cadence plus the live updates.
+    //
+    // NowWorkingSummary is declared locally because src/ and ui/ are
+    // separate TS projects with different module kinds (src/ is CJS,
+    // ui/ is ESM), so crossing the project boundary at the type level
+    // triggers a rootDir + module-kind mismatch. The canonical shape
+    // lives in ui/src/shared/types.ts; any drift between the two is a
+    // reviewable bug, not a silent divergence.
+    interface NowWorkingSummary {
+      status: "running" | "succeeded" | "failed" | "idle";
+      runId?: string;
+      isStalled?: boolean;
+      workItemTitle?: string | null;
+      workItemDeleted?: boolean;
+      currentAction?: string | null;
+      summary?: string | null;
+      error?: string | null;
+      startedAt?: number;
+      lastEventAt?: number;
+      endedAt?: number | null;
+    }
+    const activeByAgent = new Map(active.map((r) => [r.agentId, r]));
+    const lastRunByAgent = new Map<string, typeof pastRuns[number]>();
+    for (const run of pastRuns) {
+      if (!lastRunByAgent.has(run.agentId)) lastRunByAgent.set(run.agentId, run);
+    }
+    const projectAgents = await agentStore.listAgents(id);
+    const nowWorkingByAgent: Record<string, NowWorkingSummary> = {};
+    for (const agent of projectAgents) {
+      const activeRun = activeByAgent.get(agent.id);
+      if (activeRun) {
+        const hasWid = Boolean(activeRun.workItemId);
+        const title = hasWid ? (itemTitles[activeRun.workItemId as string] ?? null) : null;
+        nowWorkingByAgent[agent.id] = {
+          status: "running",
+          runId: activeRun.id,
+          isStalled: stalledRunIds.includes(activeRun.id),
+          workItemTitle: title ?? (hasWid ? `${activeRun.workItemId} (deleted)` : null),
+          workItemDeleted: hasWid && title === null,
+          currentAction: activeRun.currentAction ? activeRun.currentAction.slice(0, 120) : null,
+          startedAt: activeRun.startedAt,
+          lastEventAt: activeRun.lastEventAt,
+        };
+        continue;
+      }
+      const lastRun = lastRunByAgent.get(agent.id);
+      if (lastRun) {
+        const hasWid = Boolean(lastRun.workItemId);
+        const title = hasWid ? (itemTitles[lastRun.workItemId as string] ?? null) : null;
+        nowWorkingByAgent[agent.id] = {
+          status: lastRun.status === "running" ? "failed" : (lastRun.status as "succeeded" | "failed"),
+          runId: lastRun.id,
+          workItemTitle: title ?? (hasWid ? `${lastRun.workItemId} (deleted)` : null),
+          workItemDeleted: hasWid && title === null,
+          summary: lastRun.summary ? lastRun.summary.slice(0, 120) : null,
+          error: lastRun.error ?? null,
+          startedAt: lastRun.startedAt,
+          endedAt: lastRun.endedAt,
+        };
+        continue;
+      }
+      nowWorkingByAgent[agent.id] = { status: "idle" };
+    }
+
     return {
-      runs: await runs.listRuns(id, Number(limit) || 50),
-      active: await runs.listActiveRuns(id),
-      stalledRunIds: stalled.map((run) => run.id),
+      runs: pastRuns,
+      active,
+      stalledRunIds,
       busy: orchestrator.activeKeys(),
+      nowWorkingByAgent,
     };
   });
 
