@@ -86,6 +86,26 @@ export async function finishRun(id: string, outcome: { status: "succeeded" | "fa
   });
 }
 
+/** Captures QA's verdict on the engineer's run, so the agent card can show
+ * "Last QA bounce: <reason>" inline without re-querying work-item comments
+ * on every poll. Called by runQa after the contract parses — once per QA
+ * run, on the engineer row (not the QA agent's), because the rejection
+ * rate lives on the engineer and that's the surface that needs this
+ * inline. Truncating criterion + evidence on write keeps a verbose QA
+ * verdict from inflating agent-runs.json. */
+export async function attachQaBounce(
+  engineerRunId: string,
+  capture: { verdict: "pass" | "fail"; criterion?: string; evidence?: string },
+): Promise<AgentRun | null> {
+  return runs.update(engineerRunId, (run) => {
+    run.qaBounce = {
+      verdict: capture.verdict,
+      criterion: capture.criterion?.slice(0, 200) || undefined,
+      evidence: capture.evidence?.slice(0, 400) || undefined,
+    };
+  });
+}
+
 function monthStart(): number {
   const now = new Date();
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);

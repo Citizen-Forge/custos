@@ -215,6 +215,19 @@ export interface AgentRun {
   currentAction: string | null;
   /** Rolling count of tool calls, as a cheap progress signal. */
   toolCalls: number;
+  /** QA's verdict on this run's output, attached by runQa after the
+   * contract is parsed. Populated on the ENGINEER's run row (not the
+   * QA agent's) because the engineer is the agent whose card needs the
+   * surface context for its rejection rate -- "Last QA bounce: <reason>"
+   * rides on the same agent stats row that shows `qaRejections`. Criterion
+   * and evidence are truncated on write so a chatty QA verdict can't
+   * inflate the run file. Required when present: `verdict`; `criterion`
+   * and `evidence` are the picked-decisive ones and may be absent. */
+  qaBounce?: {
+    verdict: "pass" | "fail";
+    criterion?: string;
+    evidence?: string;
+  };
 }
 
 /** How long a run may produce no events before it's considered stalled.

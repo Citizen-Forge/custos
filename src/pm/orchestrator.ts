@@ -764,6 +764,40 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         }
       }
 
+      // Capture the decisive criterion + evidence onto the engineer's run
+      // row so the agent card can show "Last QA bounce: <reason>" inline
+      // without re-querying work-item comments on every poll. We pick the
+      // first criterion whose result matches the verdict -- a failing
+      // criterion when QA bounced (the reason for the bounce), a passing
+      // one when QA passed (what kept confidence). Skipped when the QA
+      // contract omitted a verdict rather than defaulted to "fail" -- a
+      // QA run that parsed cleanly without a verdict is a contract-shaped
+      // oddity, not a real bounce, and shouldn't surface one. Done
+      // independently of the model-capability feedback above so the
+      // surface data lives on its own concern rather than piggy-backing
+      // on a feedback loop. The engineer-run lookup uses
+      // `listRuns(...).find(...)` rather than tracking an index in
+      // memory because listRuns sorts by startedAt DESC and slices to
+      // limit, so the FIRST match in iteration order is the most-recent
+      // engineer run -- which is the row whose qaBounce should reflect
+      // this verdict. The assumption is encoded in a comment so a future
+      // sort change makes the surface silently wrong without breaking
+      // the typecheck.
+      if (contract.verdict) {
+        const decisive = contract.criteriaChecked?.find((c) =>
+          contract.verdict === "fail" ? c.result === "fail" : c.result === "pass",
+        );
+        const engineerRuns = await runs.listRuns(item.projectId, 50);
+        const engineerRun = engineerRuns.find((row) => row.role === "engineer" && row.workItemId === item.id);
+        if (engineerRun) {
+          await runs.attachQaBounce(engineerRun.id, {
+            verdict: contract.verdict,
+            criterion: decisive?.criterion?.trim() || undefined,
+            evidence: decisive?.evidence?.trim() || undefined,
+          });
+        }
+      }
+
       if (contract.verdict === "pass") {
         // Passing frees the checkout for the next ticket. The branch and
         // its pull request survive -- that's where the work actually lives.

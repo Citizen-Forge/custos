@@ -260,13 +260,6 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       // at the very end costs a line and survives that truncation.
       prompt: `${prompt}\n\n---\n\nRemember: your final message must end with exactly one fenced \`${tag}\` block containing valid JSON, and nothing after it.`,
       appendSystemPrompt: buildSystemPrompt(agent, options.extraSystemPrompt, options.outputContract),
-      // The PM assigns every agent a fallbackSet, post-migration; thread
-      // it as `custos:fallback/<set-name>` so the /v1/messages handler
-      // routes through the GlobalQueue (giving per-request failover over
-      // the chain). The legacy `custos:<provider>/<model>` form is gone
-      // -- an agent without a fallbackSet is broken and the run throws up
-      // the stack before this point.
-      //
       // Append caller context (project + agent identity) after `?` so the
       // gateway's /v1/messages handler can recover it and attribute the
       // resulting activity-log events back to the project + agent that
