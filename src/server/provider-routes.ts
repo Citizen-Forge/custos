@@ -56,23 +56,34 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
         return { error: `embeddingUrl "${embeddingUrl}" is not a valid URL` };
       }
     }
-    await updateConfig(runtime, (cfg) => ({
-      ...cfg,
-      providers: {
-        ...cfg.providers,
-        [name]: {
-          baseUrl,
-          costType,
-          models: models.map((m) => ({ name: m.name, enabled: m.enabled, ...(m.pricing ? { pricing: m.pricing } : {}) })),
-          apiKey: apiKey || undefined,
-          maxConcurrent: maxConcurrent ?? undefined,
-          rpmLimit: rpmLimit ?? undefined,
-          maxRequestBytes: maxRequestBytes ?? undefined,
-          priority: priority ?? undefined,
-          embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
+    await updateConfig(runtime, (cfg) => {
+      // Preserve the existing API key when the caller omits the field or
+      // passes `undefined` (empty form field on edit). Only update when
+      // a string value is explicitly provided, and only clear when `null`
+      // is passed (the admin UI's separate "Clear" action). Without this
+      // guard, editing a provider through the password-field form (which
+      // is always blank for security — placeholder says "(set -- enter to
+      // replace)") would inadvertently wipe the stored key on every save.
+      const prevKey = cfg.providers?.[name]?.apiKey;
+      const resolvedKey = apiKey === undefined ? prevKey : (apiKey || undefined);
+      return {
+        ...cfg,
+        providers: {
+          ...cfg.providers,
+          [name]: {
+            baseUrl,
+            costType,
+            models: models.map((m) => ({ name: m.name, enabled: m.enabled, ...(m.pricing ? { pricing: m.pricing } : {}) })),
+            apiKey: resolvedKey,
+            maxConcurrent: maxConcurrent ?? undefined,
+            rpmLimit: rpmLimit ?? undefined,
+            maxRequestBytes: maxRequestBytes ?? undefined,
+            priority: priority ?? undefined,
+            embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
+          },
         },
-      },
-    }));
+      };
+    });
     return { ok: true };
   });
 
@@ -241,23 +252,27 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       }
     }
     const costType = pricing ? "metered" : "free";
-    await updateConfig(runtime, (cfg) => ({
-      ...cfg,
-      providers: {
-        ...cfg.providers,
-        [name]: {
-          baseUrl,
-          costType,
-          models: [{ name: model, enabled: true, ...(pricing ? { pricing } : {}) }],
-          apiKey: apiKey || undefined,
-          maxConcurrent: maxConcurrent ?? undefined,
-          rpmLimit: rpmLimit ?? undefined,
-          maxRequestBytes: maxRequestBytes ?? undefined,
-          priority: priority ?? undefined,
-          embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
+    await updateConfig(runtime, (cfg) => {
+      const prevKey = cfg.providers?.[name]?.apiKey;
+      const resolvedKey = apiKey === undefined ? prevKey : (apiKey || undefined);
+      return {
+        ...cfg,
+        providers: {
+          ...cfg.providers,
+          [name]: {
+            baseUrl,
+            costType,
+            models: [{ name: model, enabled: true, ...(pricing ? { pricing } : {}) }],
+            apiKey: resolvedKey,
+            maxConcurrent: maxConcurrent ?? undefined,
+            rpmLimit: rpmLimit ?? undefined,
+            maxRequestBytes: maxRequestBytes ?? undefined,
+            priority: priority ?? undefined,
+            embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
+          },
         },
-      },
-    }));
+      };
+    });
     return { ok: true };
   });
 
