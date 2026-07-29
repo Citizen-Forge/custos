@@ -2,6 +2,7 @@ import { JsonCollection, newId, pmPath } from "./store.js";
 import type { GatewayConfig } from "../config.js";
 import { ROLE_DEFAULT_FALLBACK_SET } from "./prompts.js";
 import { pickPersonaName } from "./personas.js";
+import { getSettings as pmGetSettings, updateSettings as pmUpdateSettings } from "./project-settings.js";
 import type { AgentDef, AgentRole, Complexity, CostProfile } from "./types.js";
 
 export const agents = new JsonCollection<AgentDef>(pmPath("agents.json"));
@@ -152,6 +153,48 @@ export async function recordRunResult(id: string, outcome: { completed?: boolean
     }
     agent.updatedAt = Date.now();
   });
+}
+
+/**
+ * Migrate every project and global agent that lacks a `fallbackSet` to use
+ * the role-appropriate default from ROLE_DEFAULT_FALLBACK_SET, then reset
+ * `pmConfigured` for each affected project so the Project Manager re-runs
+ * and assigns proper fallback sets based on the current provider config.
+ *
+ * Safe to call on every startup: agents that already have a fallbackSet
+ * (or that were migrated on a previous boot) are skipped. Returns the
+ * number of agents updated in this pass.
+ */
+export async function migrateToFallbackSets(): Promise<number> {
+  const allAgents = await agents.list();
+  const projectIds = new Set<string>();
+  let migrated = 0;
+
+  for (const agent of allAgents) {
+    if (agent.fallbackSet) continue;
+    const fb = ROLE_DEFAULT_FALLBACK_SET[agent.role];
+    if (!fb) continue;
+
+    await agents.update(agent.id, (row) => {
+      row.fallbackSet = fb;
+      row.updatedAt = Date.now();
+    });
+    if (agent.projectId) projectIds.add(agent.projectId);
+    migrated++;
+  }
+
+  // Reset pmConfigured for every project whose agents were migrated so the
+  // PM re-evaluates on the next tick with the actual fallback-set config.
+  if (projectIds.size > 0) {
+    for (const pid of projectIds) {
+      const settings = await pmGetSettings(pid);
+      if (settings.pmConfigured) {
+        await pmUpdateSettings(pid, { pmConfigured: false, pmLastRunAt: null });
+      }
+    }
+  }
+
+  return migrated;
 }
 
 export async function deleteAgent(id: string): Promise<boolean> {

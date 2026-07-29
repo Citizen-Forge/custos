@@ -45,6 +45,19 @@ export function registerFallbackSetRoutes(app: FastifyInstance, runtime: Runtime
     return { ok: true };
   });
 
+  // -- Migrate agents missing fallback sets --------------------------------
+
+  app.post("/admin/api/projects/migrate-fallback-sets", async (_req, reply) => {
+    try {
+      const { migrateToFallbackSets } = await import("../pm/agents.js");
+      const migrated = await migrateToFallbackSets();
+      return { ok: true, migrated };
+    } catch (err) {
+      reply.code(500);
+      return { error: (err as Error).message };
+    }
+  });
+
   // -- Delete a fallback set ----------------------------------------------
 
   app.delete("/admin/api/fallback-sets/:name", async (req, reply) => {

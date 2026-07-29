@@ -1382,12 +1382,25 @@ function renderProjectsPanel() {
   section.appendChild(el("h2", { text: "Projects" }));
   section.appendChild(el("p", { class: "desc", text: "Each project is a workspace folder. A chat is a connectable session for that workspace -- open it from your phone, another computer, or the Custos desktop app to stream turns against the project's folder. The connect link is a bearer credential: anyone with it can type into that session. Don't share it, and don't expose this port past a network you trust." }));
 
-  // New project button
+  // New project button + Migrate now button
   section.appendChild(el("div", { class: "row" }, [
     el("button", { class: "primary", text: "New project", onclick: async () => {
       const name = prompt("Project name:");
       if (!name || !name.trim()) return;
       reloadAfter(api("/admin/api/projects", { method: "POST", body: { name: name.trim() } }), "Project created");
+    }}),
+    el("button", { text: "Migrate now", title: "Apply fallback-set defaults to any agents that still use direct model assignments; safe to call anytime, only touches agents without a fallbackSet", onclick: async () => {
+      try {
+        const result = await api("/admin/api/projects/migrate-fallback-sets", { method: "POST" });
+        if (result.migrated > 0) {
+          showToast(`Migrated ${result.migrated} agent(s) to fallback-set defaults — PM will re-evaluate on next tick`);
+        } else {
+          showToast("All agents already have a fallback set — nothing to migrate");
+        }
+        await loadState();
+      } catch (err) {
+        showToast(err.message, true);
+      }
     }}),
   ]));
 

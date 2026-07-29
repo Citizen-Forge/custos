@@ -20,6 +20,7 @@ import { RemoteSessionManager } from "./remote/session-manager.js";
 import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
 import { ensureGlobalAgents } from "./pm/global-agents.js";
+import { migrateToFallbackSets } from "./pm/agents.js";
 import { StatsMonitor, DEFAULT_ALERT_RULES } from "./runtime-stats.js";
 import { registerMetricsRoute } from "./server/metrics.js";
 
@@ -41,6 +42,16 @@ async function main() {
   // agent replaces that, and the runtime picks up the new source here.
   await ensureGlobalAgents();
   await runtime.reload();
+
+  // One-time migration: existing agents created before the fallback-set
+  // architecture carry providerKey/model with no fallbackSet. Apply the
+  // role-appropriate default fallback set to each and reset pmConfigured
+  // so the Project Manager re-evaluates on the next tick. Safe to call
+  // on every startup — already-migrated agents are skipped.
+  const migrated = await migrateToFallbackSets();
+  if (migrated > 0) {
+    console.log(`[migrate] Applied fallback-set defaults to ${migrated} agent(s) and queued PM re-evaluation.`);
+  }
 
   const memoryStore = new MemoryStore(QDRANT_URL, EMBEDDING_VECTOR_SIZE);
 
