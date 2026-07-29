@@ -29,9 +29,64 @@ export interface ProviderRuntimeStats extends ThrottleStats {
  *  stale data through a shared reference. */
 export interface RuntimeStats {
   providers: Record<string, ProviderRuntimeStats>;
+  /** Per-fallback-set health. Operators see at a glance whether each
+   *  named chain has a live pick or whether every entry is currently
+   *  unavailable, without having to triangulate cooldown / breaker /
+   *  RPM signals across the per-provider map. The set-name keys match
+   *  `config.fallbackSets` -- if a set has been removed from config
+   *  since the snapshot was taken, it simply disappears from the next
+   *  refresh. */
+  fallbackSets: Record<string, FallbackSetHealth>;
   /** ms epoch at which the snapshot was taken -- useful when log lines
    *  and HTTP responses are correlated after the fact. */
   timestamp: number;
+}
+
+/** Per-fallback-set health snapshot. Keyed by set name in
+ *  RuntimeStats.fallbackSets. The chain entries are reported in
+ *  declared order (matching `config.fallbackSets[name].providers`)
+ *  so the UI can render the priority sequence top-to-bottom without
+ *  re-sorting. */
+export interface FallbackSetHealth {
+  /** Set name as it appears in `config.fallbackSets`. */
+  name: string;
+  /** Set description, lifted from the config for the panel header. */
+  description: string;
+  /** Chain length. 0 for an empty set (rare; surfaced as exhausted). */
+  chainLength: number;
+  /** Per-entry health, in declared order. */
+  entries: FallbackSetEntryHealth[];
+  /** First entry whose `status === "available"`, or null when the
+   *  whole set is exhausted. The "live pick" -- what an incoming
+   *  request would actually dispatch to. */
+  livePick: { provider: string; model: string; index: number } | null;
+  /** True when no entry in the chain can accept a request right now.
+   *  Equivalent to `livePick === null && chainLength > 0`, but cached
+   *  so the UI doesn't have to recompute. */
+  exhausted: boolean;
+}
+
+/** Per-entry health inside a fallback set's chain. */
+export interface FallbackSetEntryHealth {
+  provider: string;
+  model: string;
+  /** Coarse availability for this entry. The statuses are mutually
+   *  exclusive; the order they appear in `providerState.canAccept()`
+   *  determines which one wins when multiple gates fail (cooldown
+   *  before breaker, breaker before capacity, capacity before RPM).
+   *  The "unregistered" status means the provider name has no entry
+   *  in `ProviderStateMap` at all -- a config drift where the set
+   *  references a provider the runtime never registered (e.g. a typo
+   *  in `providers.<name>` or a missing default). */
+  status: "available" | "cooldown" | "circuit-broken" | "at-capacity" | "rpm-exhausted" | "unregistered";
+  coolingUntil: number | null;
+  breakerUntil: number | null;
+  active: number;
+  /** Sub-queue depth for this provider (interactive + background). */
+  queued: number;
+  maxConcurrent: number;
+  rpmLimit: number | null;
+  rpmTokens: number | null;
 }
 
 /**
@@ -155,7 +210,7 @@ export class Runtime {
    *  throw a TypeError instead of returning empty data). */
   stats(): RuntimeStats {
     if (!this.router) {
-      return { providers: {}, timestamp: Date.now() };
+      return { providers: {}, fallbackSets: {}, timestamp: Date.now() };
     }
     const providers: Record<string, ProviderRuntimeStats> = {};
     for (const t of this.liveThrottles) {
@@ -171,7 +226,117 @@ export class Runtime {
       const existing = providers[name];
       if (existing) existing.cooldownUntil = until;
     }
-    return { providers, timestamp: Date.now() };
+    return {
+      providers,
+      fallbackSets: this.fallbackSetHealth(),
+      timestamp: Date.now(),
+    };
+  }
+
+  /** Per-fallback-set health: for each set in config, walk the chain
+   *  in declared order, classify each entry against ProviderStateMap,
+   *  and pick the first available entry as the "live pick". A set
+   *  with zero live picks is `exhausted: true` -- the runtime would
+   *  queue any incoming request rather than dispatch it. The shape
+   *  is intended for the admin panel; consumers that need per-provider
+   *  numbers should read `providerState.snapshot()` directly.
+   *
+   *  Pure: reads `this.config.fallbackSets` and `this.providerState`,
+   *  no I/O. Returns a fresh object on every call. */
+  fallbackSetHealth(): Record<string, FallbackSetHealth> {
+    const out: Record<string, FallbackSetHealth> = {};
+    const sets = this.config.fallbackSets ?? {};
+    const stateMap = this.providerState;
+    const now = Date.now();
+    for (const [name, set] of Object.entries(sets)) {
+      const entries: FallbackSetEntryHealth[] = [];
+      let livePick: FallbackSetHealth["livePick"] = null;
+      for (let i = 0; i < set.providers.length; i++) {
+        const entry = set.providers[i];
+        const state = stateMap.get(entry.provider);
+        let status: FallbackSetEntryHealth["status"];
+        let coolingUntil: number | null = null;
+        let breakerUntil: number | null = null;
+        let active = 0;
+        let queued = 0;
+        let maxConcurrent = 0;
+        let rpmLimit: number | null = null;
+        let rpmTokens: number | null = null;
+        if (!state) {
+          status = "unregistered";
+        } else {
+          // Snapshot to a local copy BEFORE reading or refilling so a
+          // concurrent canAccept() call from GlobalQueue doesn't race
+          // with us writing back to the shared state. The shared
+          // providerState entries are mutable (acquire/release mutate
+          // active, canAccept mutates rpmTokens/lastRpmRefill) so two
+          // readers writing back can produce a torn read where, e.g.,
+          // one reader's rpmTokens overwrite loses the other's last
+          // refill delta. snapshot-into-local is the cheapest fix that
+          // keeps ProviderStateMap's existing public API unchanged.
+          const snap = { ...state };
+          coolingUntil = snap.coolingUntil;
+          breakerUntil = snap.breakerUntil;
+          active = snap.active;
+          queued = snap.queued;
+          maxConcurrent = snap.maxConcurrent;
+          rpmLimit = snap.rpmLimit;
+          // Refill tokens the same way canAccept does so the reported
+          // rpmTokens matches the gate decision the runtime actually
+          // uses (a bucket can refill between snapshot reads, and
+          // reporting a stale low value would falsely advertise
+          // rpm-exhausted when the next request would be admitted).
+          // This computation runs on the local snap only -- the shared
+          // state entry is untouched.
+          if (snap.rpmLimit !== null) {
+            const elapsedMs = now - snap.lastRpmRefill;
+            if (elapsedMs > 0) {
+              const add = (elapsedMs / 60_000) * snap.rpmLimit;
+              snap.rpmTokens = Math.min(snap.rpmLimit, snap.rpmTokens + add);
+              snap.lastRpmRefill = now;
+            }
+            rpmTokens = Math.max(0, Math.round(snap.rpmTokens * 100) / 100);
+          }
+          // Classify in the same gate order canAccept uses. Cooldown
+          // wins first because a 429/503 is the most transient and the
+          // caller has the Retry-After to plan around; breaker second
+          // because it's a recovery-state signal; capacity third
+          // because that's the steady-state signal; RPM last because
+          // it's the most predictive (a momentary burst shouldn't read
+          // as "exhausted" to the operator when a refill is due in
+          // seconds).
+          if (coolingUntil !== null && now < coolingUntil) status = "cooldown";
+          else if (breakerUntil !== null && now < breakerUntil) status = "circuit-broken";
+          else if (maxConcurrent > 0 && active >= maxConcurrent) status = "at-capacity";
+          else if (rpmLimit !== null && rpmTokens !== null && rpmTokens < 1) status = "rpm-exhausted";
+          else status = "available";
+        }
+        entries.push({
+          provider: entry.provider,
+          model: entry.model,
+          status,
+          coolingUntil,
+          breakerUntil,
+          active,
+          queued,
+          maxConcurrent,
+          rpmLimit,
+          rpmTokens,
+        });
+        if (livePick === null && status === "available") {
+          livePick = { provider: entry.provider, model: entry.model, index: i };
+        }
+      }
+      out[name] = {
+        name,
+        description: set.description,
+        chainLength: set.providers.length,
+        entries,
+        livePick,
+        exhausted: livePick === null && set.providers.length > 0,
+      };
+    }
+    return out;
   }
 
   async reload(): Promise<void> {

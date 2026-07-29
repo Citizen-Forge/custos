@@ -319,6 +319,20 @@ async function loadState() {
     project.pmConfigured = settingsResp.settings.pmConfigured ?? false;
     project.paused = settingsResp.settings.paused ?? false;
   }
+  // Per-fallback-set health snapshot. Refreshed on demand via the
+  // panel's "Refresh" button; the boot-time fetch gives operators
+  // an immediate signal whether any chain is currently exhausted.
+  // The panel distinguishes "no fallback sets configured" from
+  // "stats endpoint unreachable" so a 5xx on /admin/api/runtime/stats
+  // doesn't read as a healthy chain to the operator.
+  try {
+    const stats = await api("/admin/api/runtime/stats");
+    state.fallbackSetHealth = stats.fallbackSets || {};
+    state.fallbackSetHealthError = null;
+  } catch (err) {
+    state.fallbackSetHealth = {};
+    state.fallbackSetHealthError = err.message || "stats endpoint unreachable";
+  }
   render();
 }
 
@@ -337,6 +351,7 @@ function render() {
   app.innerHTML = "";
   app.appendChild(renderProvidersPanel());
   app.appendChild(renderGlobalServicesPanel(state.providers));
+  app.appendChild(renderFallbackSetHealthPanel());
   app.appendChild(renderFallbackSetsPanel());
   app.appendChild(renderProjectsPanel());
   app.appendChild(renderSecurityPanel());
@@ -1050,6 +1065,165 @@ function renderGlobalServicesPanel(providers) {
   section.appendChild(table);
   section.appendChild(el("p", { class: "small", style: "margin-top: 8px;", text: "The endpoint field is only meaningful for embeddings — Ollama exposes them at a different path than /v1/chat/completions, so the runtime either derives the URL from the named provider or uses the explicit host here." }));
   return section;
+}
+
+// -- Per-fallback-set runtime health --------------------------------------
+//
+// Surfaces the "live pick" for every configured fallback set plus the
+// per-entry availability state. The per-provider panel above shows
+// throttle depth; this panel shows the dispatch outcome — what an
+// incoming request would actually hit — without the operator having to
+// mentally traverse each chain. Refreshes on demand via the button;
+// the boot-time fetch populates `state.fallbackSetHealth` from
+// /admin/api/runtime/stats so a freshly-loaded admin panel can spot
+// an exhausted chain before any user sees latency.
+function renderFallbackSetHealthPanel() {
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Fallback set health" }));
+  section.appendChild(el("p", { class: "desc", text: "For each configured fallback set, the first available provider is the \"live pick\" — what an incoming request would dispatch to. A chain with no available entry is exhausted; requests pile up in the queue until a provider recovers." }));
+
+  const health = state.fallbackSetHealth || {};
+  const setNames = Object.keys(health);
+
+  const refreshBtn = el("button", {
+    style: "font-size: 11px; padding: 3px 8px;",
+    text: "Refresh",
+    onclick: async () => {
+      refreshBtn.disabled = true;
+      const original = refreshBtn.textContent;
+      refreshBtn.textContent = "↻";
+      try {
+        const stats = await api("/admin/api/runtime/stats");
+        state.fallbackSetHealth = stats.fallbackSets || {};
+        state.fallbackSetHealthError = null;
+        render();
+      } catch (err) {
+        // Mirror the boot path's contract: a failed refresh has to
+        // surface in the panel, not just in a toast that disappears
+        // after 3s. Otherwise a successful boot with N sets followed
+        // by a 5xx refresh leaves the panel rendering the stale
+        // healthy table (setNames.length > 0, so the empty-branch
+        // warning never shows) — the operator sees stale data with
+        // no indication the fetch failed. Clearing both fields
+        // together matches what `loadState()` does on boot failure.
+        state.fallbackSetHealth = {};
+        state.fallbackSetHealthError = err.message || "stats endpoint unreachable";
+        render();
+        showToast(err.message, true);
+      } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = original;
+      }
+    },
+  });
+  const header = el("div", { class: "row", style: "margin-bottom: 12px;" });
+  header.appendChild(el("span", { class: "small", text: `${setNames.length} fallback set(s) configured.` }));
+  header.appendChild(refreshBtn);
+  section.appendChild(header);
+
+  if (!setNames.length) {
+    // Two distinct empty cases: "stats endpoint unreachable" vs
+    // "no fallback sets configured". The former means an operator
+    // would otherwise conclude the chain is healthy when the panel
+    // is actually blind -- surface the failure explicitly so the
+    // operator knows to click Refresh or check the server logs.
+    if (state.fallbackSetHealthError) {
+      const warn = el("div", {
+        style: "padding: 10px 12px; border: 1px solid var(--danger); border-radius: 6px; background: rgba(217,112,91,0.08); margin-bottom: 12px;",
+      });
+      warn.appendChild(el("strong", { style: "color: var(--danger);", text: "Stats unavailable" }));
+      warn.appendChild(el("div", { class: "small", style: "margin-top: 4px;", text: state.fallbackSetHealthError }));
+      warn.appendChild(el("div", { class: "small", style: "margin-top: 4px;", text: "Click Refresh to retry. The panel is currently blind to chain health." }));
+      section.appendChild(warn);
+    } else {
+      section.appendChild(el("p", { class: "small", text: "No fallback sets configured. Add one below under Fallback sets." }));
+    }
+    return section;
+  }
+
+  // Stable display order: alphabetical by name so operators can scan
+  // a long list quickly.
+  setNames.sort();
+  const table = el("table", { style: "width: 100%; border-collapse: collapse; margin-bottom: 12px;" });
+  table.appendChild(el("colgroup", {}, [
+    el("col", { style: "width: 18%;" }),
+    el("col", { style: "width: 30%;" }),
+    el("col", { style: "width: 18%;" }),
+    el("col", { style: "width: 34%;" }),
+  ]));
+  table.appendChild(el("tr", {}, [
+    el("th", { text: "Set" }),
+    el("th", { text: "Live pick" }),
+    el("th", { text: "Chain length" }),
+    el("th", { text: "Chain status" }),
+  ]));
+
+  for (const name of setNames) {
+    const set = health[name];
+    const livePick = set.livePick;
+    const livePickCell = livePick
+      ? el("td", {}, [
+          el("strong", { text: `${livePick.provider}/${livePick.model}` }),
+          el("br"),
+          el("span", { class: "small", text: `entry [${livePick.index}] — would dispatch here` }),
+        ])
+      : el("td", {}, [
+          el("span", { class: "badge warn", text: "EXHAUSTED" }),
+          el("br"),
+          el("span", { class: "small", text: set.chainLength === 0 ? "set is empty — no chain to walk" : "all entries currently unavailable" }),
+        ]);
+    const chainCell = el("td", {});
+    if (set.entries.length === 0) {
+      chainCell.appendChild(el("span", { class: "small", text: "—" }));
+    } else {
+      const row = el("div", { style: "display: flex; flex-wrap: wrap; gap: 4px; align-items: center;" });
+      set.entries.forEach((entry, idx) => {
+        const isLivePick = livePick && idx === livePick.index;
+        const badge = renderEntryStatusBadge(entry);
+        if (isLivePick) badge.style.boxShadow = "0 0 0 2px var(--accent)";
+        row.appendChild(badge);
+      });
+      chainCell.appendChild(row);
+    }
+    table.appendChild(el("tr", {}, [
+      el("td", {}, [
+        el("strong", { text: name }),
+        el("br"),
+        el("span", { class: "small", text: set.description }),
+      ]),
+      livePickCell,
+      el("td", { class: set.exhausted ? "muted" : "", text: String(set.chainLength) }),
+      chainCell,
+    ]));
+  }
+  section.appendChild(table);
+  section.appendChild(el("p", { class: "small", style: "margin-top: 4px;", text: "Bordered entry = current live pick. Hover an entry for the full status detail." }));
+  return section;
+}
+
+// Maps the runtime's per-entry `status` enum onto a colored badge with
+// a hover-tooltip containing the specifics. Pulled out so the same
+// vocabulary (color + suffix text) is used everywhere the chain is
+// rendered -- not just the panel above, but any future surface
+// (the agent card, the activity log, etc.) that wants to show
+// "why isn't this entry being used".
+function renderEntryStatusBadge(entry) {
+  const labels = {
+    available: { text: "available", cls: "ok", title: `Active: ${entry.active}${entry.maxConcurrent > 0 ? `/${entry.maxConcurrent}` : ""}${entry.queued > 0 ? ` (queued: ${entry.queued})` : ""}${entry.rpmLimit ? ` · RPM: ${entry.rpmTokens}/${entry.rpmLimit}` : ""}` },
+    cooldown: { text: "cooldown", cls: "warn", title: entry.coolingUntil ? `Cooling until ${new Date(entry.coolingUntil).toISOString()}` : "Cooldown active" },
+    "circuit-broken": { text: "breaker", cls: "warn", title: entry.breakerUntil ? `Circuit-broken until ${new Date(entry.breakerUntil).toISOString()}` : "Circuit breaker open" },
+    "at-capacity": { text: "at-capacity", cls: "warn", title: `Active: ${entry.active}/${entry.maxConcurrent}${entry.queued > 0 ? ` · queued: ${entry.queued}` : ""}` },
+    "rpm-exhausted": { text: "rpm-empty", cls: "warn", title: `RPM bucket empty (limit ${entry.rpmLimit}/min). Waiting for refill.` },
+    unregistered: { text: "missing", cls: "off", title: "Provider not registered — config drift, the named provider may have been removed." },
+  };
+  const def = labels[entry.status] || { text: entry.status, cls: "off", title: "" };
+  const badge = el("span", {
+    class: `badge ${def.cls}`,
+    style: "font-size: 10.5px; padding: 2px 7px;",
+    text: `${entry.provider}/${entry.model}`,
+    title: `${def.text} — ${def.title}`,
+  });
+  return badge;
 }
 
 // -- Fallback sets -------------------------------------------------------

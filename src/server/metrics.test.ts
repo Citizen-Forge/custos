@@ -45,6 +45,7 @@ describe("GET /metrics", () => {
           cooldownUntil: 1_700_000_000_000,
         },
       },
+      fallbackSets: {},
       timestamp: Date.now(),
     }));
 
@@ -96,6 +97,7 @@ describe("GET /metrics", () => {
     const app = Fastify({ logger: false });
     registerMetricsRoute(app, stubRuntime({
       providers: {},
+      fallbackSets: {},
       timestamp: Date.now(),
     }));
 

@@ -6,6 +6,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { StatsMonitor, type AlertRule, type StatsLogger } from "./runtime-stats.js";
 import type { RuntimeStats, ProviderRuntimeStats } from "./runtime.js";
+import type { GatewayConfig } from "./config.js";
+import type { ProviderStateMap } from "./providers/provider-state.js";
 
 /** Convenience: build a minimal ProviderRuntimeStats. Only the fields
  * the default rules extract from (queuedInteractive, queuedBackground)
@@ -39,7 +41,7 @@ function captureLogger(): { logs: string[]; logger: StatsLogger } {
 
 /** Build a RuntimeStats with one named provider. */
 function statsWith(providerName: string, p: ProviderRuntimeStats): RuntimeStats {
-  return { providers: { [providerName]: p }, timestamp: Date.now() };
+  return { providers: { [providerName]: p }, fallbackSets: {}, timestamp: Date.now() };
 }
 
 describe("StatsMonitor", () => {
@@ -198,6 +200,7 @@ describe("StatsMonitor", () => {
           ollama: provider({ name: "ollama", active: 2, queuedInteractive: 5, queuedBackground: 3, maxConcurrent: 4 }),
           anthropic: provider({ name: "anthropic", active: 1, queuedInteractive: 0, queuedBackground: 0, maxConcurrent: 0 }),
         },
+        fallbackSets: {},
         timestamp: Date.now(),
       }),
       {
@@ -299,6 +302,147 @@ describe("StatsMonitor", () => {
     m.stop();
     // No crash = pass. The interval timer is cleaned up.
     assert.ok(true, "start/stop cycle completed without error");
+  });
+
+  it("fallbackSetHealth: returns one entry per set with chain status and live pick", async () => {
+    // Lightweight runtime smoke: drive the fallbackSetHealth path
+    // through a hand-built ProviderStateMap + a fake config so we can
+    // assert the wire shape without spinning up the full Runtime.
+    // The Runtime class is heavy; the helper reads only `config` and
+    // `providerState`, both of which we can stub.
+    const { Runtime } = await import("./runtime.js");
+    const { ProviderStateMap } = await import("./providers/provider-state.js");
+    const runtime = new Runtime();
+    runtime.config = {
+      providers: {},
+      openaiCompatibleInstances: {},
+      fallbackSets: {
+        complex: {
+          name: "Complex reasoning",
+          description: "test complex set",
+          providers: [
+            { provider: "anthropic", model: "claude-sonnet-5" },
+            { provider: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" },
+          ],
+        },
+        empty: {
+          name: "Empty (test)",
+          description: "test empty",
+          providers: [],
+        },
+      },
+      tasks: {},
+    } as unknown as GatewayConfig;
+    // Build a fresh ProviderStateMap with two providers, mark
+    // anthropic as cooling (so the live pick falls through to ollama).
+    const freshMap = new ProviderStateMap();
+    freshMap.register("anthropic", { maxConcurrent: 4 });
+    freshMap.register("ollama", { maxConcurrent: 1 });
+    freshMap.markCooling("anthropic", 60_000);
+    // Swap the map in via the readonly field. We have to reach into
+    // the private shape because the runtime holds it as a singleton;
+    // tests for this surface care about the SHAPE of the output, not
+    // whether Runtime can hot-swap its state map.
+    (runtime as unknown as { providerState: ProviderStateMap }).providerState = freshMap;
+
+    const health = runtime.fallbackSetHealth();
+
+    assert.ok(health.complex, "complex set is reported");
+    assert.equal(health.complex.chainLength, 2);
+    assert.equal(health.complex.entries.length, 2);
+    // [0] anthropic is cooling
+    assert.equal(health.complex.entries[0].provider, "anthropic");
+    assert.equal(health.complex.entries[0].status, "cooldown");
+    assert.ok(health.complex.entries[0].coolingUntil, "cooldown deadline surfaces");
+    // [1] ollama is the live pick
+    assert.equal(health.complex.entries[1].provider, "ollama");
+    assert.equal(health.complex.entries[1].status, "available");
+    assert.deepEqual(health.complex.livePick, { provider: "ollama", model: "qwen2.5:14b-instruct-q4_K_M", index: 1 });
+    assert.equal(health.complex.exhausted, false);
+
+    assert.ok(health.empty, "empty set is reported");
+    assert.equal(health.empty.chainLength, 0);
+    assert.equal(health.empty.entries.length, 0);
+    assert.equal(health.empty.livePick, null);
+    // Exhausted is reserved for sets that have entries but no live pick;
+    // an empty set is its own thing (no chain = no failover path at all).
+    assert.equal(health.empty.exhausted, false, "empty set is not 'exhausted' (no chain to walk)");
+  });
+
+  it("fallbackSetHealth: marks a set exhausted when every entry is unavailable", async () => {
+    const { Runtime } = await import("./runtime.js");
+    const { ProviderStateMap } = await import("./providers/provider-state.js");
+    const runtime = new Runtime();
+    runtime.config = {
+      providers: {},
+      openaiCompatibleInstances: {},
+      fallbackSets: {
+        complex: {
+          name: "Complex reasoning",
+          description: "test",
+          providers: [
+            { provider: "anthropic", model: "claude-sonnet-5" },
+            { provider: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" },
+          ],
+        },
+      },
+      tasks: {},
+    } as unknown as GatewayConfig;
+    const freshMap = new ProviderStateMap();
+    freshMap.register("anthropic", { maxConcurrent: 4 });
+    freshMap.register("ollama", { maxConcurrent: 1 });
+    freshMap.markCooling("anthropic", 60_000);
+    freshMap.markCooling("ollama", 60_000);
+    (runtime as unknown as { providerState: ProviderStateMap }).providerState = freshMap;
+
+    const health = runtime.fallbackSetHealth();
+    assert.equal(health.complex.exhausted, true);
+    assert.equal(health.complex.livePick, null);
+    // Both entries should report cooldown status, not "available".
+    for (const entry of health.complex.entries) {
+      assert.notEqual(entry.status, "available");
+    }
+  });
+
+  it("fallbackSetHealth: flags unregistered provider names with status='unregistered'", async () => {
+    // Set references a provider the runtime never registered (config
+    // drift: typo in providers.<name>, or the operator removed the
+    // provider). The runtime would dispatch to this entry and crash
+    // at the provider lookup; the UI needs to surface it as
+    // "missing" rather than implying the entry is healthy.
+    const { Runtime } = await import("./runtime.js");
+    const { ProviderStateMap } = await import("./providers/provider-state.js");
+    const runtime = new Runtime();
+    runtime.config = {
+      providers: {},
+      openaiCompatibleInstances: {},
+      fallbackSets: {
+        complex: {
+          name: "Complex reasoning",
+          description: "test",
+          providers: [
+            { provider: "anthropic", model: "claude-sonnet-5" },
+            { provider: "typo-provider", model: "claude-typo" },
+          ],
+        },
+      },
+      tasks: {},
+    } as unknown as GatewayConfig;
+    // Register anthropic but NOT typo-provider, so [0] is healthy
+    // and [1] is the unregistered one. (If neither is registered,
+    // both come back as 'unregistered' -- which would still satisfy
+    // the `unregistered` assertion but the `available` assertion for
+    // [0] would fail.)
+    const freshMap = new ProviderStateMap();
+    freshMap.register("anthropic", { maxConcurrent: 4 });
+    (runtime as unknown as { providerState: ProviderStateMap }).providerState = freshMap;
+    const health = runtime.fallbackSetHealth();
+    assert.equal(health.complex.entries[0].status, "available");
+    assert.equal(health.complex.entries[1].status, "unregistered");
+    // The live pick is still [0] (anthropic) -- [1]'s unregistered
+    // status means it never becomes a candidate.
+    assert.equal(health.complex.livePick?.provider, "anthropic");
+    assert.equal(health.complex.exhausted, false);
   });
 
   it("uses the injected now() for all timing decisions", () => {
