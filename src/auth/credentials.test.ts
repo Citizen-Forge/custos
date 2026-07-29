@@ -33,6 +33,11 @@ test.after(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+// Placeholder anchor: the boot-time repair test sits at the END of this
+// file (after `existingAfter`) so its setup writes don't interleave with
+// the saveTokens-throws test above, which asserts the gateway file does
+// NOT exist after a malformed save.
+
 // isValidTokenSet must accept the >= 1 happy-path inputs (valid OAuth and
 // valid API-key-style) and reject every shape that would otherwise let a
 // write land a malformed TokenSet on disk.
@@ -163,4 +168,46 @@ test("syncSpawnedSessionCredentials returns skipped-empty and leaves the mirror 
   const after = JSON.parse(readFileSync(mirrorPath, "utf8"));
   assert.equal(after.claudeAiOauth.accessToken, before.claudeAiOauth.accessToken, "previously-valid accessToken preserved");
   assert.equal(after.claudeAiOauth.refreshToken, before.claudeAiOauth.refreshToken, "previously-valid refreshToken preserved");
+});
+
+// The boot-time repair path called from src/index.ts main(). The
+// invariant: a valid TokenSet on disk must always overwrite a stale
+// (empty-shape) mirror with valid content, so the first claude
+// subprocess the container spawns reads a meaningful credentials file
+// instead of inheriting whatever bad shape a previous boot wrote (or
+// what the bind-mounted ./data/claude-home volume carries forward).
+// Pre-fix, this code path silently wrote the empty shape on top of the
+// valid input -- the production bug-shape this suite is built to pin.
+// Post-fix, `syncSpawnedSessionCredentials` writes valid content with
+// the correct scope + refreshTokenExpiresAt, which Claude Code's
+// local-login check requires beyond the three top-level fields.
+test("syncSpawnedSessionCredentials writes a valid mirror when input is valid even if the on-disk mirror was empty", async () => {
+  const gatewayPath = process.env.GATEWAY_CREDENTIALS_PATH!;
+  mkdirSync(join(gatewayPath, ".."), { recursive: true });
+  const validTokens = {
+    accessToken: "sk-ant-oat01-bootstrap",
+    refreshToken: "sk-ant-ort01-bootstrap",
+    expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+    raw: { scope: "user:inference user:profile", refresh_token_expires_in: 2109600 },
+  };
+  writeFileSync(gatewayPath, JSON.stringify(validTokens, null, 2), "utf8");
+
+  const mirrorPath = join(tempDir, ".claude", ".credentials.json");
+  mkdirSync(join(tempDir, ".claude"), { recursive: true });
+  const emptyPreExisting = { claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 } };
+  writeFileSync(mirrorPath, JSON.stringify(emptyPreExisting, null, 2), "utf8");
+
+  const result = await syncSpawnedSessionCredentials();
+  assert.equal(result.outcome, "mirrored", "valid input should yield outcome=mirrored");
+
+  const after = JSON.parse(readFileSync(mirrorPath, "utf8"));
+  assert.equal(after.claudeAiOauth.accessToken, validTokens.accessToken);
+  assert.equal(after.claudeAiOauth.refreshToken, validTokens.refreshToken);
+  assert.equal(after.claudeAiOauth.expiresAt, validTokens.expiresAt);
+  assert.deepEqual(after.claudeAiOauth.scopes, ["user:inference", "user:profile"]);
+  assert.equal(
+    typeof after.claudeAiOauth.refreshTokenExpiresAt,
+    "number",
+    "mirror must carry the refreshTokenExpiresAt derived from raw.refresh_token_expires_in (Claude Code's local-login check requires it)",
+  );
 });

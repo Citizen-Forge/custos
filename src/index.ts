@@ -19,6 +19,7 @@ import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
 import { ensureGlobalAgents } from "./pm/global-agents.js";
 import { migrateToFallbackSets } from "./pm/agents.js";
+import { syncSpawnedSessionCredentials } from "./auth/credentials.js";
 import { StatsMonitor, DEFAULT_ALERT_RULES } from "./runtime-stats.js";
 import { registerMetricsRoute } from "./server/metrics.js";
 
@@ -40,6 +41,20 @@ async function main() {
   // agent replaces that, and the runtime picks up the new source here.
   await ensureGlobalAgents();
   await runtime.reload();
+
+  // Repair the bind-mounted ~/:claude/.credentials.json mirror eagerly,
+  // BEFORE the orchestrator starts spawning subprocesses. docker-compose
+  // mounts `./data/claude-home` -> `/root/.claude` so the mirror file
+  // persists across container restarts -- which means any bad shape a
+  // previous boot wrote carries forward into the new container. The
+  // in-`runTurn` call (every agent spawn) eventually overwrites it, but
+  // a freshly-started container with a stale empty mirror would let the
+  // first claude subprocess attempt OAuth-refresh against the empty
+  // refreshToken and surface the same "OAuth session expired" error we
+  // were already shipping a fix for in syncSpawnedSessionCredentials.
+  // Doing it once at boot guarantees the file is correct before any
+  // subprocess even tries to read it.
+  await syncSpawnedSessionCredentials();
 
   // One-time migration: existing agents created before the fallback-set
   // architecture carry providerKey/model with no fallbackSet. Apply the
