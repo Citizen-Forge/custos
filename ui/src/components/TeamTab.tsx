@@ -21,6 +21,19 @@ export default function TeamTab({
   const [activity, setActivity] = useState<ActivityResponse | null>(null)
   const [agents, setAgents] = useState<AgentDef[]>([])
   const [fallbackSets, setFallbackSets] = useState<Record<string, FallbackSetOption>>({})
+  // Ticks once every 10s so "last moved Xs ago" labels re-render between
+  // pm_events WebSocket updates. Without this the relative-time strings
+  // freeze on the value computed at the last activity fetch, which on a
+  // busy project can be minutes stale (a card showing "12s" while really
+  // "2m 12s" looks like the agent just woke up when it actually stopped
+  // responding). setNow fires a re-render; the inline Date.now() reads
+  // inside renderNowWorking and the running-list map pick the new value
+  // up via closure on the next render.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 10_000)
+    return () => clearInterval(interval)
+  }, [])
 
   const refresh = useCallback(async () => {
     const [activityRes, agentsRes] = await Promise.all([
@@ -81,7 +94,7 @@ export default function TeamTab({
       // Map server isStalled + client-computed wait window onto the
       // existing running-row classes so the CSS for state colors is
       // shared with the historical activity rows.
-      const timeSince = nw.lastEventAt ? Date.now() - nw.lastEventAt : 0
+      const timeSince = nw.lastEventAt ? now - nw.lastEventAt : 0
       const state: 'running' | 'waiting' | 'stalled' = nw.isStalled
         ? 'stalled'
         : timeSince < 120_000
@@ -197,7 +210,7 @@ export default function TeamTab({
         {activity?.active.length ? (
           <div className="running-list">
             {activity.active.map((run) => {
-              const timeSinceLastEvent = Date.now() - run.lastEventAt
+              const timeSinceLastEvent = now - run.lastEventAt
               const stalled = activity.stalledRunIds.includes(run.id)
               const status: 'running' | 'waiting' | 'stalled' =
                 stalled ? 'stalled' :
