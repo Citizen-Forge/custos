@@ -395,6 +395,22 @@ export interface FallbackSetEntryHealth {
 
   async reload(): Promise<void> {
     const config = await loadConfig();
+    // Publish the loaded config to `this.config` IMMEDIATELY after the
+    // await returns, before any later step reads through it. Pre-migration,
+    // `reload()` only stored `config` in the local variable; nothing
+    // outside `reload()` read `this.config`, so the assignment was
+    // latent and the runtime field's definite-assignment assertion
+    // (`config!: GatewayConfig;`) covered the silence. After the
+    // curator+classifier drop, `Runtime.refreshEmbedding()` and
+    // `Runtime.completeViaProvider(...)` read `this.config` from
+    // outside the reload scope (and so does `Runtime.fallbackDefaultModel`
+    // for each /v1/messages request); without this line those calls
+    // receive `undefined` and `primaryPick(agent, undefined)` blows up
+    // the boot with a TypeError that gives no hint that the root cause is
+    // a missing assignment. The placement matters: BEFORE
+    // `this.queue?.abortAll(...)` so any concurrent stats read during
+    // the reload transition sees the new config rather than undefined.
+    this.config = config;
 
     // Drop the old queue's in-flight work before re-registering providers
     // so a config edit doesn't leave old requests continuing to do work
