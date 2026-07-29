@@ -11,6 +11,7 @@ import type { Provider, CompleteOptions, ProviderResponse } from "./providers/ty
 import type { EmbeddingConfig } from "./memory/embeddings.js";
 import { getGlobalAgent } from "./pm/global-agents.js";
 import { resolveEmbeddingHost } from "./providers/embedding-url.js";
+import * as agentStore from "./pm/agents.js";
 
 /** Per-provider runtime stats, used by the admin endpoint, the periodic
  * stats logger, and the threshold-alert monitor. Extends ThrottleStats
@@ -117,8 +118,16 @@ export class Runtime {
    *  returned release function, typically in a finally block.
    *  The agent-runner calls this before spawning claude so the initial
    *  model selection reserves capacity on the chosen provider instead
-   *  of just checking availability race-ily. */
-  resolveFallbackSet(agent: { fallbackSet?: string; providerKey: string; model: string }): { providerKey: string; model: string; release: () => void } | null {
+   *  of just checking availability race-ily.
+   *
+   *  Reads only the agent's `fallbackSet`. The historical
+   *  `providerKey`/`model` fields were dropped from `AgentDef` in the
+   *  providerKey/model schema drop (commit message pending) -- the
+   *  primary pick is now derived at read time via
+   *  `agents.primaryPick(agent, config)`. The Pick shape here keeps the
+   *  method signature narrow so callers that only carry an `AgentDef`
+   *  subset still work. */
+  resolveFallbackSet(agent: { fallbackSet?: string }): { providerKey: string; model: string; release: () => void } | null {
     if (!agent.fallbackSet) return null;
     const set = this.config.fallbackSets?.[agent.fallbackSet];
     if (!set || !set.providers.length) return null;
@@ -305,9 +314,21 @@ export class Runtime {
       this.embedding = null;
       return;
     }
-    const providerDef = this.config.providers?.[agent.providerKey];
+    // Resolve the embeddings provider through the global agent's
+    // fallbackSet rather than reading a stale `agent.providerKey`. The
+    // agent-row field was dropped along with `AgentDef.providerKey` /
+    // `model` in the schema-cleanup commit; primaryPick is the single
+    // source of truth for "which provider does this agent currently
+    // dispatch to" across the runtime.
+    const pick = agentStore.primaryPick(agent, this.config);
+    if (!pick) {
+      console.warn(`embeddings global agent has no live primary pick (fallbackSet="${agent.fallbackSet ?? "<unset>"}"); embedding disabled until a fallback set is assigned`);
+      this.embedding = null;
+      return;
+    }
+    const providerDef = this.config.providers?.[pick.providerKey];
     if (!providerDef) {
-      console.warn(`embeddings global agent references missing provider "${agent.providerKey}"; embedding disabled until a provider exists`);
+      console.warn(`embeddings global agent references missing provider "${pick.providerKey}"; embedding disabled until a provider exists`);
       this.embedding = null;
       return;
     }
@@ -338,7 +359,7 @@ export class Runtime {
         providerEmbeddingUrl: providerDef.embeddingUrl,
         providerBaseUrl: providerDef.baseUrl,
       }),
-      model: agent.model,
+      model: pick.model,
     };
   }
 }

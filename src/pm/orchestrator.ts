@@ -510,29 +510,56 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           this.emit("activity", projectId, `Skipped new agent "${spec.name}": ${spec.providerKey}/${spec.model} is exhausted.`);
           continue;
         }
+        // The engineering manager's contract still asks for `providerKey`
+        // and `model` on a new engineer (see ASSIGN_SHAPE) so it can match
+        // each new agent against the menu it's shown. After this commit
+        // the agent stores no providerKey/model at all -- the same
+        // provider/model picks up a default fallback set whose first entry
+        // is that provider/model. We look it up by scanning
+        // `config.fallbackSets` for a set whose `providers[0]` matches.
+        const matchingSet = Object.entries(this.runtime.config.fallbackSets ?? {}).find(([, set]) => {
+          const first = set.providers[0];
+          return first && first.provider === spec.providerKey && first.model === spec.model;
+        });
+        const fallbackSet = matchingSet?.[0] ?? Object.keys(this.runtime.config.fallbackSets ?? {})[0];
+        if (!fallbackSet) {
+          this.emit("activity", projectId, `Skipped new agent "${spec.name}": no fallback set exists to wrap ${spec.providerKey}/${spec.model}.`);
+          continue;
+        }
         const created = await agentStore.createAgent({
           projectId,
           role: "engineer",
           name: spec.name,
-          providerKey: spec.providerKey,
-          model: spec.model,
+          fallbackSet,
           specialty: spec.specialty ?? null,
           maxComplexity: spec.maxComplexity ?? "medium",
           systemPrompt: spec.systemPrompt ?? "",
           createdBy: "engineering-manager",
         });
         if (spec.tempId) tempIds.set(spec.tempId, created.id);
-        this.emit("activity", projectId, `Engineering manager created engineer "${created.name}" on ${created.providerKey}/${created.model}.`);
+        const createdPick = agentStore.primaryPick(created, this.runtime.config);
+        this.emit("activity", projectId, `Engineering manager created engineer "${created.name}" on ${createdPick?.providerKey ?? "?"}/${createdPick?.model ?? "?"}.`);
       }
 
       for (const tune of result.parsed.tuning ?? []) {
         if (!tune.agentId) continue;
         if (tune.note) await agentStore.appendAgentNote(tune.agentId, tune.note);
-        const patch = {
-          ...(tune.providerKey && knownProviders.has(tune.providerKey) ? { providerKey: tune.providerKey } : {}),
-          ...(tune.model ? { model: tune.model } : {}),
-          ...(tune.maxComplexity ? { maxComplexity: tune.maxComplexity } : {}),
-        };
+        // The EM contract still asks for providerKey/model in its tuning
+        // entries (see ASSIGN_SHAPE), but post-drop these become "switch
+        // to the fallback set whose first entry is this provider/model".
+        // We only act on the tuning note when the providerKey/model
+        // combination corresponds to a real set -- otherwise the note
+        // would be applied against a non-existent fallback chain and the
+        // operator's intent would silently vanish.
+        const patch: Parameters<typeof agentStore.updateAgent>[1] = {};
+        if (tune.maxComplexity) patch.maxComplexity = tune.maxComplexity;
+        if (tune.providerKey && tune.model) {
+          const matchingSet = Object.entries(this.runtime.config.fallbackSets ?? {}).find(([, set]) => {
+            const first = set.providers[0];
+            return first && first.provider === tune.providerKey && first.model === tune.model;
+          });
+          if (matchingSet) patch.fallbackSet = matchingSet[0];
+        }
         if (Object.keys(patch).length) await agentStore.updateAgent(tune.agentId, patch);
       }
 
@@ -549,14 +576,19 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         if (!agentId) continue;
         const assignee = await agentStore.getAgent(agentId);
         if (!assignee) continue;
-        if (unavailable.has(modelId(assignee.providerKey, assignee.model))) {
+        const pick = agentStore.primaryPick(assignee, this.runtime.config);
+        if (pick && unavailable.has(modelId(pick.providerKey, pick.model))) {
           this.emit(
             "activity",
             projectId,
-            `Held "${assignment.workItemId}": ${assignee.name} runs on ${assignee.providerKey}/${assignee.model}, which is exhausted.`,
+            `Held "${assignment.workItemId}": ${assignee.name} runs on ${pick.providerKey}/${pick.model}, which is exhausted.`,
           );
           continue;
         }
+        // Above check used the resolved primary pick; recordOutcome
+        // below reads what actually ran (the agent's primary pick at the
+        // time of dispatch, which the agent-runner will acquire via
+        // resolveFallbackSet).
         slots -= 1;
         await board.updateWorkItem(assignment.workItemId, {
           assigneeAgentId: agentId,
@@ -716,7 +748,20 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // time it decides who gets the hard tickets.
       const author = item.assigneeAgentId ? await agentStore.getAgent(item.assigneeAgentId) : null;
       if (author) {
-        await recordOutcome(author.providerKey, author.model, contract.verdict === "pass" ? "passed" : "bounced");
+        // Record capability against the *actual* provider/model that ran
+        // this ticket, not the agent's primary pick or any stored row
+        // field. The agent's fallback chain may have skipped [0] because
+        // that provider was rate-limited; if we credited the verdict to
+        // [0] instead, the EM's feedback loop would steer away from the
+        // wrong model on the next sizing pass. The AgentRun row carries
+        // the resolved pair that the agent-runner recorded at dispatch
+        // time, which is the only source of truth that matches what
+        // actually served the request.
+        const latestRuns = await runs.listRuns(item.projectId, 50);
+        const thisRun = latestRuns.find((row) => row.agentId === author.id && row.workItemId === item.id);
+        if (thisRun) {
+          await recordOutcome(thisRun.providerKey, thisRun.model, contract.verdict === "pass" ? "passed" : "bounced");
+        }
       }
 
       if (contract.verdict === "pass") {
@@ -831,7 +876,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         `This project has a monthly budget of ${ctx.settings.budget.monthlyUsd === null ? "unlimited" : `$${ctx.settings.budget.monthlyUsd}`}. Assign a fallback set to each role below, choosing from the available fallback sets.`,
         "",
         `The following roles need assignments:`,
-        ...roster.map((a) => `- **${a.role}**${a.fallbackSet ? ` (currently using "${a.fallbackSet}")` : ` (currently on ${a.providerKey}/${a.model})`}`),
+        ...roster.map((a) => `- **${a.role}**${a.fallbackSet ? ` (currently using "${a.fallbackSet}")` : ` (currently no fallback set assigned)`}`),
         "",
         "## Available fallback sets",
         "",

@@ -20,6 +20,25 @@ export const ROLE_DEFAULT_FALLBACK_SET: Record<AgentRole, string> = {
   "project-manager": "complex",
 };
 
+/** Fallback set each built-in global system role defaults to. Distinct
+ *  from ROLE_DEFAULT_FALLBACK_SET because global services aren't picked
+ *  by the Project Manager -- they're config-time seeds that operate
+ *  project-orthogonally. Each global gets its OWN fallback set rather
+ *  than sharing "standard" / "fast" with project agents: embeddings
+ *  need an embedding-capable model (not a chat model -- Ollama's
+ *  /api/embeddings rejects chat-model names), the permission
+ *  classifier wants the smallest reliable JSON-only model, and the
+ *  memory curator benefits from a strong reasoning set. Sharing a set
+ *  with project agents would silently misroute these services whenever
+ *  an operator edits the shared set's first entry. The matching
+ *  `embeddings` and `classifier` sets are defined in
+ *  DEFAULT_CONFIG.fallbackSets (config.ts). */
+export const GLOBAL_AGENT_FALLBACK_SET = {
+  memoryCurator: "standard",
+  permissionClassifier: "classifier",
+  embeddings: "embeddings",
+} as const;
+
 /** @deprecated Kept for backward compat — the PM now assigns fallback sets,
  *  not specific providerKey/model pairs. Use ROLE_DEFAULT_FALLBACK_SET. */
 export const ROLE_DEFAULT_MODEL: Record<AgentRole, [providerKey: string, model: string]> = {
@@ -329,8 +348,7 @@ export const ASSIGN_SHAPE = `{
     {
       "tempId": "a name you make up, to reference in assignments below",
       "name": "short human-readable name",
-      "providerKey": "exactly one of the providerKey values from the menu",
-      "model": "exactly one of the model values from the menu, paired with that providerKey",
+      "fallbackSet": "exactly one of the fallback set names from the menu",
       "specialty": "one line: what this agent is for",
       "maxComplexity": "low" | "medium" | "high",
       "systemPrompt": "extra instructions appended to the standard engineer prompt; may be empty"
@@ -340,7 +358,7 @@ export const ASSIGN_SHAPE = `{
     { "workItemId": "id", "complexity": "low" | "medium" | "high", "agentId": "existing agent id", "tempId": "or a tempId from newAgents", "rationale": "one line: why this agent, at this cost, for this ticket" }
   ],
   "tuning": [
-    { "agentId": "id", "note": "instruction appended to that agent's prompt", "providerKey": "optional new provider", "model": "optional new model", "maxComplexity": "optional new tier" }
+    { "agentId": "id", "note": "instruction appended to that agent's prompt", "fallbackSet": "optional new fallback set", "maxComplexity": "optional new tier" }
   ],
   "notes": "string"
 }`;

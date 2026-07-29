@@ -1,30 +1,28 @@
-import type { AgentDef, FallbackSetOption, ProviderOption } from '@shared/types'
+import type { AgentDef, FallbackSetOption } from '@shared/types'
 
 /**
- * Reusable agent model selector. Encapsulates the fallback-set-aware
- * dropdown with orphan handling plus the legacy "pinned model" mode
- * (the engineering manager's ad-hoc engineer authoring and operators
- * who want to pin a specific model).
- *
- * The selected value encodes the mode with a `set::` or `model::` prefix
- * so the consumer can read the mode back without guessing:
- *   - `set::<name>` → fallback set dispatch (per-request failover)
- *   - `model::<provider>::<model>` → direct provider/model (legacy)
+ * Reusable agent model selector. Encapsulates the fallback-set dropdown
+ * with orphan handling. The selected value encodes the only mode that
+ * matters post-providerKey-drop: `set::<name>` resolves to the named
+ * fallback set's first entry (the "primary pick"), with per-request
+ * failover over the rest of the chain via the GlobalQueue.
  *
  * Switching to a fallback set sends `{ fallbackSet: "<name>" }` and
- * leaves providerKey/model untouched (the migration normalizes them
- * on next boot to satisfy the primary-pick contract). Switching to a
- * direct model sends `{ fallbackSet: null, providerKey, model }` so
- * the runtime drops back to the pinned path.
+ * leaves every other agent field untouched (the runtime always derives
+ * the dispatch target from fallbackSet, so there's nothing else to
+ * update). There is no "pinned model" mode any more: every agent picks
+ * a fallback set, and `parseModelSelectValue` returns the same shape
+ * regardless of which set the user picks.
  *
  * Orphan-set UI: when an agent's fallbackSet is no longer in the
- * `fallbackSets` map (the migration's orphanSet branch leaves the
- * field untouched and only resets pmConfigured), the select renders
- * an explicit `[orphaned: <name>] — Reset PM to recover` disabled
- * option that's selected, so the operator sees the broken state and
- * has a hint to recover. Covers both the typical case (orphan inside
- * the "Fallback sets" optgroup) and the edge case of zero fallback
- * sets configured (orphan at the top level).
+ * `fallbackSets` map (the migration's orphanCleared branch leaves
+ * `fallbackSet` unset, but pre-migration on-disk rows may still carry
+ * one), the select renders an explicit
+ * `[orphaned: <name>] — Reset PM to recover` disabled option that's
+ * selected, so the operator sees the broken state and has a hint to
+ * recover. Covers both the typical case (orphan inside the "Fallback
+ * sets" optgroup) and the edge case of zero fallback sets configured
+ * (orphan rendered at the top level).
  *
  * The full chain (`provider/model → provider/model → ...`) lives in
  * each option's `title` attribute so it's discoverable on hover
@@ -36,31 +34,33 @@ import type { AgentDef, FallbackSetOption, ProviderOption } from '@shared/types'
 export interface AgentModelSelectProps {
   agent: AgentDef
   fallbackSets: Record<string, FallbackSetOption>
-  /** Direct provider/model options listed under the "Pinned model" optgroup. */
-  providerOptions: ProviderOption[]
   onChange: (value: string) => void
 }
 
 export default function AgentModelSelect({
   agent,
   fallbackSets,
-  providerOptions,
   onChange,
 }: AgentModelSelectProps): React.JSX.Element {
-  const isOrphaned = !!agent.fallbackSet && !fallbackSets[agent.fallbackSet]
+  const orphan = isOrphaned(agent, fallbackSets)
   const setCount = Object.keys(fallbackSets).length
+  const value = agent.fallbackSet ? `set::${agent.fallbackSet}` : ''
   return (
     <select
-      value={modelSelectValue(agent)}
+      value={value}
       onChange={(e) => onChange(e.target.value)}
-      title={agent.fallbackSet
-        ? `Fallback set: ${agent.fallbackSet}` +
-          (isOrphaned ? ' — orphaned (no longer in config); click Reset PM to recover' : ' (runtime uses per-request failover)')
-        : `Pinned: ${agent.providerKey}/${agent.model}`}
+      title={
+        agent.fallbackSet
+          ? `Fallback set: ${agent.fallbackSet}` +
+            (orphan
+              ? ' — orphaned (no longer in config); click Reset PM to recover'
+              : ' (runtime uses per-request failover)')
+          : 'No fallback set assigned; pick one'
+      }
     >
       {setCount > 0 && (
         <optgroup label="Fallback sets (per-request failover)">
-          {isOrphaned && (
+          {orphan && (
             <option value={`set::${agent.fallbackSet}`} disabled>
               [orphaned: {agent.fallbackSet}] — Reset PM to recover
             </option>
@@ -80,71 +80,54 @@ export default function AgentModelSelect({
         optgroup above is gated by `setCount > 0`, so it disappears entirely
         when the user has emptied the fallback-set menu in config. Without
         an explicit orphan option the browser would silently pick the first
-        direct model and the operator would lose visibility of the broken
+        valid set and the operator would lose visibility of the broken
         state. Render the orphan as a top-level option in that case so the
         "[orphaned: <name>]" message is still visible. */}
-      {isOrphaned && setCount === 0 && (
+      {orphan && setCount === 0 && (
         <option value={`set::${agent.fallbackSet}`} disabled>
           [orphaned: {agent.fallbackSet}] — Reset PM to recover
         </option>
       )}
-      <optgroup label="Pinned model (no fallback)">
-        {optionsIncluding(providerOptions, agent).map((option) => (
-          <option
-            key={`model::${option.providerKey}::${option.model}`}
-            value={`model::${option.providerKey}::${option.model}`}
-          >
-            {option.providerKey} / {option.model}
-            {option.free ? ' (free)' : ''}
-          </option>
-        ))}
-      </optgroup>
+      {!agent.fallbackSet && setCount > 0 && (
+        <option value="" disabled>
+          — pick a fallback set —
+        </option>
+      )}
     </select>
   )
 }
 
-/** Discriminated union returned by `parseModelSelectValue`. Two modes
- *  match the two operational modes the agent can be in: fallback-set
- *  dispatch or pinned provider/model. Forcing the caller to handle
- *  both via a `kind` switch keeps the two modes explicit at every
- *  call site, instead of letting `null` vs `undefined` distinctions
- *  drift across consumers. */
-export type ModelPatch =
-  | { kind: 'fallback'; fallbackSet: string }
-  | { kind: 'pinned'; providerKey: string; model: string };
+/** The single shape returned by `parseModelSelectValue`. With the
+ *  pinned-model path gone, every select value resolves to a fallback-
+ *  set assignment -- there's no second mode. The discriminated union
+ *  is kept for forward compat (a future "direct model" override could
+ *  add a second `kind`) and so the call site in TeamTab's onModelChange
+ *  can be a single explicit `if (patch.kind === 'fallback')`. */
+export type ModelPatch = { kind: 'fallback'; fallbackSet: string }
 
 /** Decodes a select value back into a typed patch. Returns `null` for
- *  values that don't match either prefix (shouldn't happen for value
- *  events from the select, but the parser is defensive). */
+ *  values that don't match the `set::` prefix (the empty-string
+ *  sentinel for "no selection", or any future mode that's not a
+ *  fallback set). */
 export function parseModelSelectValue(value: string): ModelPatch | null {
   if (value.startsWith('set::')) {
-    return { kind: 'fallback', fallbackSet: value.slice('set::'.length) };
+    const name = value.slice('set::'.length)
+    if (!name) return null
+    return { kind: 'fallback', fallbackSet: name }
   }
-  if (value.startsWith('model::')) {
-    const [, providerKey, model] = value.split('::');
-    return { kind: 'pinned', providerKey, model };
-  }
-  return null;
+  return null
 }
 
 /* ----------------------------- private helpers ----------------------------- */
 
-/** Encodes the agent's current selection into a `set::name` or
- *  `model::provider::model` value that the select can match against
- *  its options. */
-function modelSelectValue(agent: AgentDef): string {
-  if (agent.fallbackSet) return `set::${agent.fallbackSet}`;
-  return `model::${agent.providerKey}::${agent.model}`;
-}
-
 /** True when the agent's fallbackSet is set but the set is no longer in
- *  `fallbackSets` — the migration's orphanSet branch leaves the field
- *  untouched (only resets pmConfigured), so the runtime would dispatch
- *  to a non-existent set and 503 on every request. Surfaced from here
- *  so other surfaces (the Reset PM button in TeamTab, future edit
- *  forms) can share the same predicate instead of duplicating it. */
+ *  `fallbackSets` — the migration's orphanCleared branch leaves the
+ *  field untouched (only resets pmConfigured), so the runtime would
+ *  dispatch to a non-existent set and 503 on every request. Surfaced
+ *  from here so other surfaces (the Reset PM button in TeamTab, future
+ *  edit forms) can share the same predicate instead of duplicating it. */
 export function isOrphaned(agent: AgentDef, fallbackSets: Record<string, FallbackSetOption>): boolean {
-  return !!agent.fallbackSet && !fallbackSets[agent.fallbackSet];
+  return !!agent.fallbackSet && !fallbackSets[agent.fallbackSet]
 }
 
 /** Short label for a fallback set in the dropdown — the set name plus the
@@ -156,20 +139,8 @@ export function isOrphaned(agent: AgentDef, fallbackSets: Record<string, Fallbac
  *  ollama/qwen2.5:14b-instruct-q4_K_M` would crowd a card-width dropdown
  *  past the next option; the +N form keeps everything one line. */
 function fallbackSetLabel(name: string, fallbackSets: Record<string, FallbackSetOption>): string {
-  const set = fallbackSets[name];
-  if (!set || set.providers.length === 0) return name;
-  if (set.providers.length === 1) return `${name} · ${set.providers[0].provider}/${set.providers[0].model}`;
-  return `${name} · ${set.providers[0].provider}/${set.providers[0].model} +${set.providers.length - 1}`;
-}
-
-/** The agent's current pairing may not be in the live menu (a provider was
- *  removed from gateway config after the operator picked it). Include it
- *  anyway so the select shows the truth rather than silently snapping to
- *  another model. */
-function optionsIncluding(options: ProviderOption[], agent: AgentDef): ProviderOption[] {
-  if (options.some((o) => o.providerKey === agent.providerKey && o.model === agent.model)) return options;
-  return [
-    { providerKey: agent.providerKey, model: agent.model, free: false, inputPerMTok: null, outputPerMTok: null, budgetUsd: null },
-    ...options,
-  ];
+  const set = fallbackSets[name]
+  if (!set || set.providers.length === 0) return name
+  if (set.providers.length === 1) return `${name} · ${set.providers[0].provider}/${set.providers[0].model}`
+  return `${name} · ${set.providers[0].provider}/${set.providers[0].model} +${set.providers.length - 1}`
 }

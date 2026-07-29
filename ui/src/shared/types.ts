@@ -155,13 +155,11 @@ export interface AgentDef {
   /** Human name, so a board full of agents is legible at a glance. */
   personaName: string | null;
   name: string;
-  providerKey: string;
-  model: string;
-  /** When set, the runtime dispatches this agent through the named
-   *  fallback set (per-request failover via GlobalQueue). At most one of
-   *  `fallbackSet` and `providerKey`/`model` is the operational driver —
-   *  `fallbackSet` wins when present, the legacy fields are kept around
-   *  for the UI's "primary pick" display (see docs/primary-pick.md). */
+  /** The fallback set this agent uses for dispatch. The "primary pick"
+   *  -- what the operator sees on the badge -- is just `fallbackSet[0]`,
+   *  derived at read-time from the API's `fallbackSets` map; the agent
+   *  row itself carries no provider/model pair. The AgentModelSelect
+   *  dropdown is the only UI surface that needs to show this contract. */
   fallbackSet?: string | null;
   systemPrompt: string;
   specialty: string | null;

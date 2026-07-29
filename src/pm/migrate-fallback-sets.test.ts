@@ -7,10 +7,12 @@
 // calls run.
 //
 // The migration takes a GatewayConfig so it can look up fallback-set
-// definitions and normalize providerKey/model to each agent's fallback
-// set's first entry. The test config below uses three named sets — two
-// with a single entry (for "primary pick" assertions) and one with two
-// entries (for the "first entry wins" surface).
+// definitions and apply role defaults. With the schema cleanup dropping
+// `providerKey`/`model` from AgentDef, the test fixtures seed agents
+// with `fallbackSet` only and assertions about the operator-facing
+// "primary pick" use `primaryPick(agent, config)` rather than reading
+// `agent.providerKey` / `agent.model` (which no longer exist on the
+// type).
 import { before, after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -23,6 +25,7 @@ const testDir = mkdtempSync(join(tmpdir(), "migrate-test-"));
 let agents: Awaited<typeof import("./agents.js")>["agents"];
 let migrateToFallbackSets: Awaited<typeof import("./agents.js")>["migrateToFallbackSets"];
 let createAgent: Awaited<typeof import("./agents.js")>["createAgent"];
+let primaryPick: Awaited<typeof import("./agents.js")>["primaryPick"];
 let updateSettings: Awaited<typeof import("./project-settings.js")>["updateSettings"];
 let getSettings: Awaited<typeof import("./project-settings.js")>["getSettings"];
 let ROLE_DEFAULT_FALLBACK_SET: Awaited<typeof import("./prompts.js")>["ROLE_DEFAULT_FALLBACK_SET"];
@@ -30,7 +33,7 @@ let newId: Awaited<typeof import("./store.js")>["newId"];
 
 // Test config: three fallback sets, deliberately different from the
 // production defaults so the test is independent of any code change in
-// prompts.ts. The first entry is what normalization will pin to.
+// prompts.ts. The first entry is what primaryPick returns.
 const testConfig = {
   providers: {},
   openaiCompatibleInstances: {},
@@ -60,6 +63,7 @@ before(async () => {
   agents = ag.agents;
   migrateToFallbackSets = ag.migrateToFallbackSets;
   createAgent = ag.createAgent;
+  primaryPick = ag.primaryPick;
   const ps = await import("./project-settings.js");
   updateSettings = ps.updateSettings;
   getSettings = ps.getSettings;
@@ -74,36 +78,29 @@ after(() => {
 });
 
 describe("migrateToFallbackSets()", () => {
-  it("applies fallbackSet per ROLE_DEFAULT_FALLBACK_SET, normalizes primary pick, and resets pmConfigured", async () => {
+  it("applies fallbackSet per ROLE_DEFAULT_FALLBACK_SET and resets pmConfigured for agents missing one", async () => {
     const pid = newId();
     // Seed project settings with pmConfigured=true so the migration resets it.
     await updateSettings(pid, { pmConfigured: true, pmLastRunAt: 1_700_000_000_000 });
 
     const engineer = await createAgent({
-      projectId: pid, role: "engineer", name: "Test Engineer",
-      providerKey: "anthropic", model: "claude-sonnet-5", createdBy: "system",
+      projectId: pid, role: "engineer", name: "Test Engineer", createdBy: "system",
     });
     const qa = await createAgent({
-      projectId: pid, role: "qa", name: "Test QA",
-      providerKey: "anthropic", model: "claude-sonnet-5", createdBy: "system",
+      projectId: pid, role: "qa", name: "Test QA", createdBy: "system",
     });
-    // Agent already has a fallbackSet -- primary pick still gets normalized
-    // because the existing providerKey/model usually doesn't match the
-    // set's first entry (the legacy "anthropic/claude-sonnet-5" default
-    // is what's on disk from pre-pivot creation).
+    // Devops already has fallbackSet pointing at a valid set in config.
+    // Migration sees fallbackSet is set and the set exists with
+    // providers, so it skips the agent entirely.
     const devops = await createAgent({
       projectId: pid, role: "devops", name: "Test DevOps",
-      providerKey: "anthropic", model: "claude-sonnet-5",
       fallbackSet: "custom-set", createdBy: "system",
     });
 
     const migrated = await migrateToFallbackSets(testConfig);
 
-    // All three agents needed an update: engineer + qa got a new
-    // fallbackSet AND their primary pick normalized; devops kept its
-    // fallbackSet but had its primary pick normalized to "custom-set"'s
-    // first entry (anthropic/claude-opus-5).
-    assert.equal(migrated, 3, "engineer + qa: assign + normalize; devops: normalize only");
+    // Engineer + qa got a new fallbackSet; devops was already correct.
+    assert.equal(migrated, 2, "engineer + qa got fallbackSet, devops was already correct");
 
     // (a) fallbackSet is set per ROLE_DEFAULT_FALLBACK_SET for the two
     // that were missing it.
@@ -112,104 +109,83 @@ describe("migrateToFallbackSets()", () => {
     const qa2 = await agents.get(qa.id);
     assert.equal(qa2?.fallbackSet, ROLE_DEFAULT_FALLBACK_SET["qa"], "qa gets the role default");
 
-    // (a2) Primary pick normalized to the fallback set's first entry.
-    // ROLE_DEFAULT_FALLBACK_SET["engineer"] and ["qa"] are "standard" in
-    // the default prompts.ts; the test config's "standard" first entry is
-    // ollama / qwen2.5:14b-instruct-q4_K_M.
-    assert.equal(eng2?.providerKey, "ollama", "engineer primary pick = first entry provider");
-    assert.equal(eng2?.model, "qwen2.5:14b-instruct-q4_K_M", "engineer primary pick = first entry model");
-    assert.equal(qa2?.providerKey, "ollama", "qa primary pick = first entry provider");
-    assert.equal(qa2?.model, "qwen2.5:14b-instruct-q4_K_M", "qa primary pick = first entry model");
+    // (b) Primary pick derives from fallbackSet[0], not from any
+    // stored field on the agent. ROLE_DEFAULT_FALLBACK_SET["engineer"]
+    // and ["qa"] are "standard" in the default prompts.ts; the test
+    // config's "standard" first entry is ollama / qwen2.5:14b-instruct-q4_K_M.
+    assert.deepEqual(primaryPick(eng2!, testConfig), { providerKey: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" });
+    assert.deepEqual(primaryPick(qa2!, testConfig), { providerKey: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" });
 
-    // (b) Devops primary pick was normalized to its set's first entry.
+    // (c) Devops is untouched because its fallbackSet was already set
+    // and the set exists in config.
     const devops2 = await agents.get(devops.id);
     assert.equal(devops2?.fallbackSet, "custom-set", "pre-existing fallbackSet preserved");
-    assert.equal(devops2?.providerKey, "anthropic", "devops primary pick = first entry provider");
-    assert.equal(devops2?.model, "claude-opus-5", "devops primary pick = first entry model");
+    assert.deepEqual(primaryPick(devops2!, testConfig), { providerKey: "anthropic", model: "claude-opus-5" });
 
-    // (c) pmConfigured is reset because at least one agent got a new
-    // fallbackSet (engineer + qa). The devops normalization alone
-    // wouldn't have triggered the reset, but the new fallbackSets were.
+    // (d) pmConfigured is reset because at least one agent got a new
+    // fallbackSet (engineer + qa).
     const settings = await getSettings(pid);
     assert.equal(settings.pmConfigured, false, "pmConfigured reset to false");
     assert.equal(settings.pmLastRunAt, null, "pmLastRunAt reset to null");
   });
 
-  it("normalizes primary pick without resetting pmConfigured when fallbackSet was already set", async () => {
+  it("is a no-op when fallbackSet is already set to a valid entry", async () => {
     const pid = newId();
     await updateSettings(pid, { pmConfigured: true });
 
-    // Agent has fallbackSet="standard" with stale primary pick that
-    // doesn't match the set's first entry. Migration should normalize
-    // the primary pick but NOT reset pmConfigured (no fallbackSet was
-    // reassigned, so the PM has nothing to re-evaluate).
     const agent = await createAgent({
       projectId: pid, role: "engineer", name: "Already Migrated",
-      providerKey: "anthropic", model: "claude-sonnet-5",
       fallbackSet: "standard", createdBy: "system",
     });
 
     const count = await migrateToFallbackSets(testConfig);
-    assert.equal(count, 1, "primary pick normalized even though fallbackSet was already set");
+    assert.equal(count, 0, "no agents need updating when fallbackSet is already valid");
 
     const after = await agents.get(agent.id);
     assert.equal(after?.fallbackSet, "standard", "fallbackSet preserved");
-    assert.equal(after?.providerKey, "ollama", "primary pick normalized to set's first entry provider");
-    assert.equal(after?.model, "qwen2.5:14b-instruct-q4_K_M", "primary pick normalized to set's first entry model");
-
-    // pmConfigured stays true because pure normalization doesn't affect
-    // PM decisions.
-    const settings = await getSettings(pid);
-    assert.equal(settings.pmConfigured, true, "pmConfigured not touched when fallbackSet unchanged");
-  });
-
-  it("is a no-op when primary pick already matches the fallback set's first entry", async () => {
-    const pid = newId();
-    await updateSettings(pid, { pmConfigured: true });
-
-    // Agent whose primary pick already matches "standard"'s first entry.
-    const agent = await createAgent({
-      projectId: pid, role: "engineer", name: "Already Normalized",
-      providerKey: "ollama", model: "qwen2.5:14b-instruct-q4_K_M",
-      fallbackSet: "standard", createdBy: "system",
-    });
-
-    const count = await migrateToFallbackSets(testConfig);
-    assert.equal(count, 0, "no agents need updating when primary pick already matches");
-
-    const after = await agents.get(agent.id);
-    assert.equal(after?.providerKey, "ollama", "providerKey unchanged");
-    assert.equal(after?.model, "qwen2.5:14b-instruct-q4_K_M", "model unchanged");
 
     const settings = await getSettings(pid);
     assert.equal(settings.pmConfigured, true, "pmConfigured not touched when nothing changed");
   });
 
-  it("leaves providerKey/model untouched but resets pmConfigured when the agent's fallbackSet is no longer in config", async () => {
+  it("clears fallbackSet and resets pmConfigured when the agent's fallbackSet is no longer in config", async () => {
     const pid = newId();
     await updateSettings(pid, { pmConfigured: true });
     const agent = await createAgent({
       projectId: pid, role: "engineer", name: "Orphaned Set",
-      providerKey: "anthropic", model: "claude-sonnet-5",
       fallbackSet: "deleted-set", createdBy: "system",
     });
 
     const count = await migrateToFallbackSets(testConfig);
-    // The agent has fallbackSet set so step 1 (assign role default) is
-    // skipped — but step 2 (normalize) can't find "deleted-set" in the
-    // test config, so the agent itself is left untouched. The orphanSet
-    // branch still flips pmConfigured so the PM re-runs and picks a
-    // valid set; otherwise the agent would dispatch to a non-existent
-    // set indefinitely and the runtime would 503 on every request.
-    assert.equal(count, 0, "no agent updates -- the agent's own fields are stale, not migrated");
+    assert.equal(count, 1, "orphan agent's fallbackSet is cleared");
 
     const after = await agents.get(agent.id);
-    assert.equal(after?.providerKey, "anthropic", "providerKey unchanged");
-    assert.equal(after?.model, "claude-sonnet-5", "model unchanged");
-    assert.equal(after?.fallbackSet, "deleted-set", "fallbackSet unchanged");
+    assert.equal(after?.fallbackSet, undefined, "orphan fallbackSet cleared so the PM can re-evaluate");
+    assert.equal(primaryPick(after!, testConfig), null, "no primary pick until PM assigns a fresh set");
 
     const settings = await getSettings(pid);
-    assert.equal(settings.pmConfigured, false, "pmConfigured reset so the PM re-evaluates and picks a valid set");
+    assert.equal(settings.pmConfigured, false, "pmConfigured reset so the PM re-runs and picks a valid set");
+  });
+
+  it("assigns global system roles through GLOBAL_AGENT_FALLBACK_SET when no fallbackSet is set", async () => {
+    // Seed an "embeddings" global with no fallbackSet. Migration should
+    // fill it from GLOBAL_AGENT_FALLBACK_SET.embeddings (which is
+    // "standard"), so the primary pick becomes that set's first entry.
+    const agent = await createAgent({
+      projectId: null,
+      kind: "global",
+      systemRole: "embeddings",
+      role: "engineer",
+      name: "Test Embeddings",
+      createdBy: "system",
+    });
+
+    const count = await migrateToFallbackSets(testConfig);
+    assert.equal(count, 1, "global agent without fallbackSet gets one assigned");
+
+    const after = await agents.get(agent.id);
+    assert.equal(after?.fallbackSet, "standard", "global agent gets the role-default fallback set");
+    assert.deepEqual(primaryPick(after!, testConfig), { providerKey: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" });
   });
 
   it("handles an empty agent collection gracefully", async () => {

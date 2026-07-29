@@ -151,18 +151,16 @@ export interface AgentDef {
   /** A human name, so a board full of agents is legible at a glance. Null
    * on records created before personas existed. */
   personaName: string | null;
-  /** Key into config.providers or config.openaiCompatibleInstances, or
-   *  "anthropic" for the built-in Anthropic provider. Used for direct
-   *  assignment. When fallbackSet is set, the runtime resolves through
-   *  the named fallback set instead of using providerKey/model directly. */
-  providerKey: string;
-  model: string;
-  /** Name of the fallback set this agent should use for dispatch (see
-   * GatewayConfig.fallbackSets). When set, the runtime iterates the
-   * fallback set's ordered providers and uses the first available one
-   * instead of going directly to providerKey/model. The PM assigns
-   * fallback sets to all roles; direct providerKey/model overrides are
-   * still supported for backward compat and manual tuning. */
+  /** Name of the fallback set this agent uses for dispatch (see
+   *  GatewayConfig.fallbackSets). The runtime resolves it to the first
+   *  available provider in the set; if that provider 429s mid-run the
+   *  next request in the same subprocess falls through to the next
+   *  entry in the set. The PM assigns fallback sets to every role. The
+   *  "primary pick" -- what the operator sees on the badge -- is just
+   *  fallbackSet[0], derived at read-time via primaryPick(agent, config)
+   *  rather than stored on every agent record; this prevents drift
+   *  between the operator-facing hint and the dispatch target when
+   *  config changes. */
   fallbackSet?: string;
   /** Appended to the role's base prompt rather than replacing it, so an EM
    * tuning an engineer can't accidentally delete its board contract. */

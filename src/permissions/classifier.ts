@@ -1,5 +1,6 @@
 import type { ProviderRouter } from "../providers/router.js";
 import { getGlobalAgent } from "../pm/global-agents.js";
+import { primaryPick } from "../pm/agents.js";
 
 export type ClassifierDecision = "allow" | "deny" | "ask";
 
@@ -31,10 +32,20 @@ export async function classifyAction(
     // be parsed (see extractDecision below).
     return { decision: "ask", reason: "no global agent with systemRole \"permissionClassifier\" is configured" };
   }
+  // Resolve the dispatch target from the agent's fallbackSet (rather
+  // than the legacy agent.providerKey/model fields, which were dropped
+  // from AgentDef). The classifier runs on a ProviderRouter, not
+  // Runtime, so we read the active config off the router — same source
+  // of truth as the curator uses for the equivalent derivation.
+  const config = router.config;
+  const pick = primaryPick(agent, config);
+  if (!pick) {
+    return { decision: "ask", reason: `no primary pick for global agent "${agent.name}" (fallbackSet="${agent.fallbackSet ?? "<unset>"})"` };
+  }
   const res = await router.completeWithEntries(
-    [{ provider: agent.providerKey, priority: 1 }],
+    [{ provider: pick.providerKey, priority: 1 }],
     {
-      model: agent.model,
+      model: pick.model,
       system: SYSTEM_PROMPT,
       max_tokens: 200,
       messages: [

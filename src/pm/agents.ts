@@ -1,9 +1,9 @@
 import { JsonCollection, newId, pmPath } from "./store.js";
 import type { GatewayConfig } from "../config.js";
-import { ROLE_DEFAULT_FALLBACK_SET } from "./prompts.js";
+import { GLOBAL_AGENT_FALLBACK_SET, ROLE_DEFAULT_FALLBACK_SET } from "./prompts.js";
 import { pickPersonaName } from "./personas.js";
 import { getSettings as pmGetSettings, updateSettings as pmUpdateSettings } from "./project-settings.js";
-import type { AgentDef, AgentRole, Complexity, CostProfile } from "./types.js";
+import type { AgentDef, AgentRole, Complexity, CostProfile, GlobalSystemRole } from "./types.js";
 
 export const agents = new JsonCollection<AgentDef>(pmPath("agents.json"));
 
@@ -65,26 +65,62 @@ export async function listEngineers(projectId: string): Promise<AgentDef[]> {
   return agents.find((row) => row.role === "engineer" && row.active && row.projectId === projectId);
 }
 
+/** The agent's "primary pick" — the provider/model that would be displayed
+ *  as its current target, derived from its `fallbackSet` rather than stored
+ *  on the agent. Centralises the contract `primary pick == fallbackSet[0]`
+ *  into one helper so the operator-facing badge, the spend tracker, the
+ *  EM's availability check, and any future consumers all agree on the same
+ *  read. Returns null when:
+ *    - the agent has no fallbackSet (legacy direct-pinned agent; should not
+ *      exist post-migration)
+ *    - the configured fallbackSet is missing or empty (orphan agent; the
+ *      PM must be reset for the agent to recover)
+ *  Callers handle the null by treating the agent as unusable rather than
+ *  crashing — the runtime surfaces this as a 503 / orphan badge in the UI.
+ *
+ *  Reads config first because `pickPersonaName`-style call-site patterns
+ *  like the orchestrator already pass `this.runtime.config` around. The
+ *  helper is pure (no I/O), so it's safe to call per-row without batching. */
+export interface PrimaryPick {
+  providerKey: string;
+  model: string;
+}
+
+export function primaryPick(agent: AgentDef, config: GatewayConfig): PrimaryPick | null {
+  if (!agent.fallbackSet) return null;
+  const set = config.fallbackSets?.[agent.fallbackSet];
+  const first = set?.providers[0];
+  if (!first) return null;
+  return { providerKey: first.provider, model: first.model };
+}
+
 export interface CreateAgentInput {
   projectId: string | null;
   role: AgentRole;
   name: string;
-  providerKey: string;
-  model: string;
+  /** Persona name override (for tests and seed data); defaults to a random
+   *  generated name when unset. */
+  personaName?: string;
   systemPrompt?: string;
   specialty?: string | null;
   maxComplexity?: Complexity;
   createdBy?: AgentDef["createdBy"];
-  personaName?: string;
   costProfile?: CostProfile | null;
-  /** Fallback set name to use for dispatch. When set, the runtime iterates
-   *  the fallback set's providers in order and uses the first available one.
-   *  Overrides direct providerKey/model dispatch. */
+  /** Fallback set name to use for dispatch. Required for project agents;
+   *  the runtime resolves the agent's primary pick and routed dispatch
+   *  through `fallbackSet[0]` (with per-request failover over the
+   *  remaining entries). For project agents this is normally assigned by
+   *  the Project Manager; for global agents it comes from
+   *  GLOBAL_AGENT_FALLBACK_SET[systemRole]. */
   fallbackSet?: string;
   /** Pass "global" + `systemRole` for project-orthogonal services (memory
    *  curator, permission classifier, embeddings). Defaults to "project". */
   kind?: AgentDef["kind"];
-  systemRole?: AgentDef["systemRole"];
+  systemRole?: GlobalSystemRole;
+  /** Embeddings endpoint base URL, only meaningful when
+   *  `systemRole === "embeddings"`. See AgentDef.embeddingBaseUrl for
+   *  the precedence chain. */
+  embeddingBaseUrl?: string;
 }
 
 export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
@@ -98,9 +134,8 @@ export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
     role: input.role,
     name: input.name,
     personaName: input.personaName ?? pickPersonaName(taken),
-    providerKey: input.providerKey,
-    model: input.model,
     fallbackSet: input.fallbackSet,
+    embeddingBaseUrl: input.embeddingBaseUrl,
     systemPrompt: input.systemPrompt ?? "",
     specialty: input.specialty ?? null,
     createdBy: input.createdBy ?? "human",
@@ -114,7 +149,7 @@ export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
   });
 }
 
-export type AgentPatch = Partial<Pick<AgentDef, "name" | "providerKey" | "model" | "fallbackSet" | "systemPrompt" | "specialty" | "maxComplexity" | "active">>;
+export type AgentPatch = Partial<Pick<AgentDef, "name" | "fallbackSet" | "embeddingBaseUrl" | "systemPrompt" | "specialty" | "maxComplexity" | "active">>;
 
 export async function updateAgent(id: string, patch: AgentPatch): Promise<AgentDef | null> {
   return agents.update(id, (agent) => {
@@ -157,46 +192,31 @@ export async function recordRunResult(id: string, outcome: { completed?: boolean
 
 /**
  * Migrate every project and global agent to the canonical fallback-set
- * shape, in two passes per agent:
+ * shape:
  *
- *   1. **Assign fallbackSet.** Agents missing one get the role-appropriate
- *      default from ROLE_DEFAULT_FALLBACK_SET. Projects whose agents
- *      received a new fallbackSet get `pmConfigured` reset so the Project
- *      Manager re-evaluates against the current provider config.
+ *   - **Assign fallbackSet.** Agents missing one get the role-appropriate
+ *     default from ROLE_DEFAULT_FALLBACK_SET (project roles) or
+ *     GLOBAL_AGENT_FALLBACK_SET (global system roles). Projects whose
+ *     agents received a new fallbackSet get `pmConfigured` reset so the
+ *     Project Manager re-evaluates against the current provider config.
  *
- *   2. **Normalize the "primary pick".** Every agent with a fallbackSet
- *      has its `providerKey`/`model` set to the first entry of that
- *      fallback set's providers. This is the operator-facing "primary
- *      pick" displayed in the UI badge and tooltip; the runtime always
- *      dispatches via the fallback chain, so the legacy `providerKey`/
- *      `model` field is dashboard-decorative. Before this migration,
- *      agents created by `ensureProjectAgents` carried `anthropic/
- *      claude-sonnet-5` regardless of which fallback set the Project
- *      Manager picked later — the UI then showed a stale claude-Sonnet
- *      hint for an agent that was actually meant to run on the fallback
- *      set's first entry.
+ *   - **Orphan handling.** Agents whose configured fallbackSet no longer
+ *     exists (the user deleted the set) or has an empty providers array
+ *     get their `fallbackSet` CLEARED so the next PM run has a clean
+ *     slate and the runtime doesn't dispatch to a non-existent set. The
+ *     project's pmConfigured is reset for the same reason.
  *
- * Formalizes the contract: **primary pick == first live entry of the
- * fallback set.** Pure normalization (providerKey/model adjusted without
- * changing the fallbackSet) does NOT trigger a pmConfigured reset, since
- * the PM's decisions are about fallbackSet selection, not providerKey.
+ * The contract is `primary pick == fallbackSet[0]` — derived on read via
+ * `primaryPick(agent, config)`, never stored on the agent. Old agents.json
+ * records written before this commit still carry `providerKey`/`model`
+ * fields on disk; the JSON collection parses them as inert extras, but
+ * no runtime read accesses them after this point (the helper is the only
+ * source of truth). A future cleanup pass can prune the on-disk ghosts
+ * without code changes; today they're harmless trailing data.
  *
  * Safe to call on every startup: agents already matching the contract
- * are skipped (no-op). Returns the number of agents updated in this pass.
- *
- * Edge cases:
- *   - Agent references a fallbackSet that no longer exists in config
- *     (the user deleted the set) or has an empty providers array. The
- *     agent's providerKey/model are left untouched (no valid first entry
- *     to point at), but the project's pmConfigured is reset so the PM
- *     re-runs on the next tick and picks a valid set. Without this, the
- *     agent would dispatch to a non-existent set indefinitely and the
- *     runtime would 503 on every request it tried to serve.
- *   - Global agents (memory curator, embeddings, classifier) participate
- *     in normalization too — they carry the same shape and benefit from
- *     the same invariant.
+ * are skipped (no-op). Returns the number of agents actually written.
  */
-
 export async function migrateToFallbackSets(config: GatewayConfig): Promise<number> {
   const allAgents = await agents.list();
   const projectIds = new Set<string>();
@@ -206,57 +226,48 @@ export async function migrateToFallbackSets(config: GatewayConfig): Promise<numb
   for (const agent of allAgents) {
     const updates: Partial<AgentDef> = {};
     let fallbackSetChanged = false;
-    let orphanSet = false;
+    let orphanCleared = false;
 
-    // Step 1: Apply role-default fallbackSet if missing.
     if (!agent.fallbackSet) {
-      const fb = ROLE_DEFAULT_FALLBACK_SET[agent.role];
+      // Project role defaults live in ROLE_DEFAULT_FALLBACK_SET; global
+      // system roles use GLOBAL_AGENT_FALLBACK_SET (which keys by
+      // systemRole rather than role, since the solver needs the host
+      // service identity to pick a model shape -- e.g. embeddings wants
+      // a set whose first entry is an embedding-capable provider).
+      const isGlobal = agent.kind === "global";
+      const fb = isGlobal
+        ? agent.systemRole ? GLOBAL_AGENT_FALLBACK_SET[agent.systemRole] : undefined
+        : ROLE_DEFAULT_FALLBACK_SET[agent.role];
       if (fb) {
         updates.fallbackSet = fb;
         fallbackSetChanged = true;
       }
-    }
-
-    // Step 2: Normalize providerKey/model to the first entry of the
-    // (now-effective) fallback set, holding the contract that the
-    // operator-facing "primary pick" is always the first live entry.
-    const effectiveFb = (updates.fallbackSet ?? agent.fallbackSet) as string | undefined;
-    if (effectiveFb) {
-      const setDef = fallbackSets[effectiveFb];
-      const firstEntry = setDef?.providers[0];
-      if (firstEntry) {
-        if (agent.providerKey !== firstEntry.provider || agent.model !== firstEntry.model) {
-          updates.providerKey = firstEntry.provider;
-          updates.model = firstEntry.model;
-        }
-      } else {
-        // The agent references a fallbackSet that no longer exists in
-        // config (the user deleted the set) or has no providers. Track
-        // this so the project's pmConfigured flips false and the PM
-        // re-runs on the next tick — without that, the agent would
-        // dispatch to a non-existent set indefinitely and the runtime
-        // would 503 on every request it tried to serve.
-        orphanSet = true;
+    } else {
+      // The agent already names a set; check it's still valid. A set with
+      // zero providers or one that's been deleted from config means any
+      // dispatch against this agent is doomed. Clear the field so the
+      // re-assignment pass below can pick a valid one.
+      const setDef = fallbackSets[agent.fallbackSet];
+      if (!setDef || setDef.providers.length === 0) {
+        updates.fallbackSet = undefined;
+        orphanCleared = true;
       }
     }
 
-    if (Object.keys(updates).length === 0 && !orphanSet) continue;
+    if (Object.keys(updates).length === 0) continue;
 
-    if (Object.keys(updates).length > 0) {
-      await agents.update(agent.id, (row) => {
-        Object.assign(row, updates);
-        row.updatedAt = Date.now();
-      });
-      migrated++;
-    }
-    if (agent.projectId && (fallbackSetChanged || orphanSet)) projectIds.add(agent.projectId);
+    await agents.update(agent.id, (row) => {
+      Object.assign(row, updates);
+      row.updatedAt = Date.now();
+    });
+    migrated++;
+    if (agent.projectId && (fallbackSetChanged || orphanCleared)) projectIds.add(agent.projectId);
   }
 
-  // Reset pmConfigured for every project whose agents had their fallbackSet
-  // changed, so the PM re-evaluates with the actual fallback-set config.
-  // Pure normalization (providerKey/model adjusted without changing the
-  // fallbackSet) doesn't affect PM decisions, so those projects stay
-  // pinned with pmConfigured=true.
+  // Reset pmConfigured for every project whose agents were touched -- a
+  // falling-back-onto-default assignment means the PM should re-evaluate
+  // against current provider config rather than keep whatever fallback
+  // set it picked before the change.
   if (projectIds.size > 0) {
     for (const pid of projectIds) {
       const settings = await pmGetSettings(pid);
@@ -352,18 +363,12 @@ export async function ensureProjectAgents(projectId: string): Promise<AgentDef[]
   for (const spec of roles) {
     const existing = await agents.find((row) => row.projectId === projectId && row.role === spec.role);
     if (existing.length) continue;
-    const fallbackSet = ROLE_DEFAULT_FALLBACK_SET[spec.role];
-    // Default providerKey/model from the fallback set's first entry.
-    const providerKey = "anthropic";
-    const model = "claude-sonnet-5";
     created.push(
       await createAgent({
         projectId,
         role: spec.role,
         name: spec.name,
-        providerKey,
-        model,
-        fallbackSet,
+        fallbackSet: ROLE_DEFAULT_FALLBACK_SET[spec.role],
         maxComplexity: spec.maxComplexity,
         createdBy: "system",
         specialty: spec.role === "engineer" ? "General-purpose implementation work across the stack" : null,
@@ -371,4 +376,13 @@ export async function ensureProjectAgents(projectId: string): Promise<AgentDef[]
     );
   }
   return created;
+}
+
+/** The fallback set each global system role should default to when seeded.
+ * Used by `migrateToFallbackSets` to assign a set on first boot and by
+ * `ensureGlobalAgents` when creating a fresh global row. Optional per
+ * role -- a global service without a default is left with `fallbackSet`
+ * unset (and the runtime treats that as "not yet configured"). */
+export function defaultFallbackSetForGlobal(role: GlobalSystemRole): string | undefined {
+  return GLOBAL_AGENT_FALLBACK_SET[role];
 }

@@ -1,42 +1,34 @@
 import { agents, createAgent } from "./agents.js";
 import type { AgentDef, GlobalSystemRole } from "./types.js";
 
-/** The built-in global service roster the gateway seeds on first boot.
- * Each entry is the "factory default" for its `systemRole` and is only
- * inserted if no row already exists with that systemRole, so a hand-tuned
- * curator survives an upgrade that adds new globals.
- *
- * Pick the cheap-and-correct defaults: a local Ollama model for the
- * curator (it runs cheaply in the background), an Ollama-fast chat model
- * for the per-turn permission classifier (must be fast; sits on every
- * tool call), and Ollama's nomic-embed-text for embeddings (matches the
- * existing embeddingProvider default in CONFIG). */
+/** The "factory default" for each built-in global service. Captures the
+ * name, specialty and the fallback set identity — the actual provider /
+ * model pair is derived at runtime from the named set via
+ * `primaryPick(agent, config)`, not stored here. This means a global service
+ * created today automatically picks up an operator's later edits to the
+ * fallback set's provider chain without needing a migration. */
 const BUILTIN_GLOBAL_AGENTS: ReadonlyArray<{
   systemRole: GlobalSystemRole;
   name: string;
-  providerKey: string;
-  model: string;
+  fallbackSet: string;
   specialty: string;
 }> = [
   {
     systemRole: "memoryCurator",
     name: "Memory Curator",
-    providerKey: "ollama",
-    model: "qwen2.5:14b-instruct-q4_K_M",
+    fallbackSet: "standard",
     specialty: "Extracts durable, semantically useful facts from past sessions into long-term memory",
   },
   {
     systemRole: "permissionClassifier",
     name: "Permission Classifier",
-    providerKey: "ollama-fast",
-    model: "qwen2.5:3b-instruct",
+    fallbackSet: "fast",
     specialty: "Gates tool calls: allow, deny, or ask a human before each side-effectful action",
   },
   {
     systemRole: "embeddings",
     name: "Embeddings",
-    providerKey: "ollama",
-    model: "nomic-embed-text",
+    fallbackSet: "standard",
     specialty: "Vector embeddings for the memory store and semantic recall",
   },
 ];
@@ -46,10 +38,10 @@ const BUILTIN_GLOBAL_AGENTS: ReadonlyArray<{
  * so an install with a hand-edited memory curator is left alone.
  *
  * Called once from index.ts on startup, after `runtime.reload()` so the
- * configured providers exist; a global whose `providerKey` doesn't match
- * any configured provider is still inserted (the agent row IS the
- * configured spec — the runtime's responsibility is to surface that the
- * upstream isn't reachable, not to refuse to write the row). */
+ * configured providers exist; a global whose fallbackSet doesn't yet
+ * exist in config is still inserted (the agent row IS the configured spec
+ * — the runtime's responsibility is to surface that the upstream isn't
+ * reachable, not to refuse to write the row). */
 export async function ensureGlobalAgents(): Promise<AgentDef[]> {
   const created: AgentDef[] = [];
   for (const spec of BUILTIN_GLOBAL_AGENTS) {
@@ -65,8 +57,7 @@ export async function ensureGlobalAgents(): Promise<AgentDef[]> {
       systemRole: spec.systemRole,
       role: "engineer",
       name: spec.name,
-      providerKey: spec.providerKey,
-      model: spec.model,
+      fallbackSet: spec.fallbackSet,
       specialty: spec.specialty,
       createdBy: "system",
     }));
@@ -91,7 +82,6 @@ export async function listGlobalAgents(): Promise<AgentDef[]> {
 export const GLOBAL_AGENT_PRESETS = BUILTIN_GLOBAL_AGENTS.map((spec) => ({
   systemRole: spec.systemRole,
   name: spec.name,
-  providerKey: spec.providerKey,
-  model: spec.model,
+  fallbackSet: spec.fallbackSet,
   specialty: spec.specialty,
 }));

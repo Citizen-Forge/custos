@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { ActivityResponse, AgentDef, AgentsResponse, CustosProject, FallbackSetOption, ProviderOption } from '@shared/types'
+import type { ActivityResponse, AgentDef, AgentsResponse, CustosProject, FallbackSetOption } from '@shared/types'
 import { useCall, relativeTime } from '../api'
 import Avatar, { agentLabel } from './Avatar'
 import AgentModelSelect, { isOrphaned, parseModelSelectValue } from './AgentModelSelect'
@@ -20,7 +20,6 @@ export default function TeamTab({
   const call = useCall()
   const [activity, setActivity] = useState<ActivityResponse | null>(null)
   const [agents, setAgents] = useState<AgentDef[]>([])
-  const [providerOptions, setProviderOptions] = useState<ProviderOption[]>([])
   const [fallbackSets, setFallbackSets] = useState<Record<string, FallbackSetOption>>({})
 
   const refresh = useCallback(async () => {
@@ -31,7 +30,6 @@ export default function TeamTab({
     if (activityRes) setActivity(activityRes)
     if (agentsRes) {
       setAgents(agentsRes.agents)
-      setProviderOptions(agentsRes.providerOptions)
       setFallbackSets(agentsRes.fallbackSets ?? {})
     }
   }, [call, project.id])
@@ -57,20 +55,16 @@ export default function TeamTab({
   }
 
   /** Adapter from the AgentModelSelect's value-format-onChange back to the
-   *  PATCH body. The select emits `set::<name>` or `model::<provider>::<model>`;
-   *  parseModelSelectValue decodes it into a typed ModelPatch (a
-   *  discriminated union the switches discriminator on). The fallback
-   *  branch leaves providerKey/model untouched (the migration normalizes
-   *  them on next boot); the pinned branch clears fallbackSet explicitly
-   *  so the runtime drops back to the pinned path. */
+   *  PATCH body. The select emits `set::<name>` (or the empty sentinel
+   *  for "no selection"); parseModelSelectValue decodes it into a typed
+   *  ModelPatch whose single `kind` is always `fallback` after the
+   *  providerKey/model drop. We send `{ fallbackSet: <name> }` and the
+   *  runtime derives the dispatch target from `fallbackSet[0]` -- there's
+   *  no second field to write, so the patch body is a single property. */
   function onModelChange(agent: AgentDef, value: string): void {
     const patch = parseModelSelectValue(value)
     if (!patch) return
-    if (patch.kind === 'fallback') {
-      void patchAgent(agent, { fallbackSet: patch.fallbackSet })
-    } else {
-      void patchAgent(agent, { fallbackSet: null, providerKey: patch.providerKey, model: patch.model })
-    }
+    void patchAgent(agent, { fallbackSet: patch.fallbackSet })
   }
 
   return (
@@ -96,7 +90,6 @@ export default function TeamTab({
                   <AgentModelSelect
                     agent={agent}
                     fallbackSets={fallbackSets}
-                    providerOptions={providerOptions}
                     onChange={(value) => onModelChange(agent, value)}
                   />
                 </label>

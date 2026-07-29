@@ -5,6 +5,7 @@ import type { EmbeddingConfig } from "./embeddings.js";
 import { embed } from "./embeddings.js";
 import { MemoryStore } from "./store.js";
 import { getGlobalAgent } from "../pm/global-agents.js";
+import { primaryPick } from "../pm/agents.js";
 
 const SESSIONS_DIR = process.env.GATEWAY_SESSIONS_DIR ?? "data/sessions";
 const CURSOR_PATH = process.env.GATEWAY_CURATOR_CURSOR_PATH ?? "data/curator-cursor.json";
@@ -118,10 +119,25 @@ async function curateBatch(deps: CuratorDeps, file: string, batchText: string): 
     console.warn("curator: no global agent with systemRole \"memoryCurator\"; skipping batch");
     return 0;
   }
+  // The curator is dispatched through `router.completeWithEntries`, which
+  // expects an explicit entries list. With the schema cleanup dropping
+  // `providerKey`/`model` from AgentDef, the only way to derive those is
+  // via the runtime's primaryPick helper — but curator runs on a
+  // ProviderRouter, not Runtime, so we read the active config off the
+  // router. The router holds the merged config (config + fileConfig) by
+  // contract; see providers/router.ts. Falling back to "unknown" lets
+  // an unconfigured curator surface a clear warning rather than silently
+  // dispatch to a stale disk value.
+  const config = deps.router.config;
+  const pick = primaryPick(agent, config);
+  if (!pick) {
+    console.warn(`curator: no primary pick for global agent "${agent.name}" (fallbackSet="${agent.fallbackSet ?? "<unset>"}"); skipping batch`);
+    return 0;
+  }
   const res = await deps.router.completeWithEntries(
-    [{ provider: agent.providerKey, priority: 1 }],
+    [{ provider: pick.providerKey, priority: 1 }],
     {
-      model: agent.model,
+      model: pick.model,
       system: EXTRACTION_SYSTEM_PROMPT,
       max_tokens: 1000,
       messages: [{ role: "user", content: batchText }],

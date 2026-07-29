@@ -160,16 +160,38 @@ export function buildSystemPrompt(agent: AgentDef, extra: string | undefined, co
  */
 export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): Promise<AgentRunResult<T>> {
   const { agent, projectId, cwd, prompt, tag } = options;
+  // Resolve the agent's primary pick from its fallbackSet so we record
+  // cost against what actually ran, not whatever stale providerKey the
+  // agent row on disk still carries from before the schema drop. Three
+  // inputs in priority order:
+  //   1. The acquireSlot path -- runtime.resolveFallbackSet() reads the
+  //      fallbackSet, asks ProviderStateMap which providers are accepting
+  //      work, and returns the first one with a slot already held. This is
+  //      the actual provider the run will dispatch to.
+  //   2. primaryPick(agent, config) -- the operator-facing primary pick,
+  //      used when resolveFallbackSet has no live provider to release.
+  //   3. null -- only possible if the agent has no fallbackSet at all (a
+  //      legacy state that migrateToFallbackSets should have resolved; an
+  //      unmitigated error here surfaces as a clear 503 at dispatch time
+  //      rather than a silent wrong-provider bill).
+  const resolved = runtime.resolveFallbackSet(agent);
+  const effectiveProviderKey = resolved?.providerKey ?? agents.primaryPick(agent, runtime.config)?.providerKey ?? null;
+  const effectiveModel = resolved?.model ?? agents.primaryPick(agent, runtime.config)?.model ?? null;
+  const releaseSlot = resolved?.release ?? null;
+  if (!effectiveProviderKey || !effectiveModel) {
+    throw new Error(`agent ${agent.id} has no fallbackSet or no live primary pick; the PM must assign one before this run can be dispatched`);
+  }
   // Whether this run's reported cost is real money is decided here, from
-  // the same config the engineering manager was shown when it picked the
-  // provider -- see agents.listProviderOptions.
-  const billed = !agents.listProviderOptions(runtime.config).find((o) => o.providerKey === agent.providerKey && o.model === agent.model)?.free;
+  // the provider/model that the run will actually dispatch against --
+  // see agents.listProviderOptions. A free subscription ride counts as
+  // free, regardless of what's on disk in the agents.json row.
+  const billed = !agents.listProviderOptions(runtime.config).find((o) => o.providerKey === effectiveProviderKey && o.model === effectiveModel)?.free;
   const run = await runs.startRun({
     projectId,
     agentId: agent.id,
     role: agent.role,
-    providerKey: agent.providerKey,
-    model: agent.model,
+    providerKey: effectiveProviderKey,
+    model: effectiveModel,
     billed,
     workItemId: options.workItemId,
     ideaId: options.ideaId,
@@ -218,15 +240,6 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     controller.abort();
   }, RUN_TIMEOUT_MS);
 
-  // Resolve the model via the agent's fallback set when one is configured.
-  // The runtime picks the first available provider in the set and acquires
-  // a slot for it (so the run truly reserves capacity). The slot is held
-  // for the entire run and released in the finally block below.
-  const resolved = runtime.resolveFallbackSet(agent);
-  const effectiveProviderKey = resolved?.providerKey ?? agent.providerKey;
-  const effectiveModel = resolved?.model ?? agent.model;
-  const releaseSlot = resolved?.release ?? null;
-
   try {
     await runTurn(runtime, {
       cwd,
@@ -238,13 +251,13 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       // at the very end costs a line and survives that truncation.
       prompt: `${prompt}\n\n---\n\nRemember: your final message must end with exactly one fenced \`${tag}\` block containing valid JSON, and nothing after it.`,
       appendSystemPrompt: buildSystemPrompt(agent, options.extraSystemPrompt, options.outputContract),
-      // When the PM assigned a fallback set to this role, format the model
-    // as `custos:fallback/<set-name>` so the /v1/messages handler routes
-    // through the GlobalQueue (giving per-request failover). Otherwise use
-    // the pinned form `custos:<provider>/<model>` for direct dispatch.
-    model: agent.fallbackSet
-      ? formatFallbackAlias(agent.fallbackSet)
-      : formatModelAlias(effectiveProviderKey, effectiveModel),
+      // The PM assigns every agent a fallbackSet, post-migration; thread
+      // it as `custos:fallback/<set-name>` so the /v1/messages handler
+      // routes through the GlobalQueue (giving per-request failover over
+      // the chain). The legacy `custos:<provider>/<model>` form is gone
+      // -- an agent without a fallbackSet is broken and the run throws up
+      // the stack before this point.
+      model: formatFallbackAlias(agent.fallbackSet as string),
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
       onEvent,
@@ -280,12 +293,13 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
 
   // Also record against the project-level spend tracker so the
   // orchestrator can check the project's budget without re-aggregating
-  // individual run records. Only billed (metered) spend counts.
+  // individual run records. Only billed (metered) spend counts. Records
+  // the *actual* provider that served the run (the resolved pair), not
+  // anything stale on the agent row -- the agent could be on fallback
+  // set "complex" while the runtime dispatched to entry [1] because [0]
+  // was rate-limited, and the spend follows the run, not the config.
   if (billed && costUsd != null && costUsd > 0) {
-    // The project-level budget check doesn't need provider-level
-    // granularity for enforcement, but recording per-provider lets the
-    // admin surface show where the money went.
-    await runtime.spendTracker.record(projectId, agent.providerKey, costUsd);
+    await runtime.spendTracker.record(projectId, effectiveProviderKey, costUsd);
   }
 
   return { runId: run.id, ok, parsed, text: await redactSecrets(text), error, costUsd, runMs };

@@ -1,5 +1,6 @@
 import type { Runtime } from "../runtime.js";
 import { saveConfig, type GatewayConfig } from "../config.js";
+import { primaryPick } from "../pm/agents.js";
 
 /** Shared helpers used by the admin route group split across several domain
  * files. Kept here so the route files don't duplicate masking, config
@@ -28,23 +29,30 @@ export function maskApiKey(key: string): string {
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
 }
 
-export async function findInstanceUsages(name: string): Promise<string[]> {
+export async function findInstanceUsages(name: string, runtime?: Runtime): Promise<string[]> {
   // After the project/global split (the global-agents module landing
   // alongside this commit), the practical reference surface is
-  // agents.json — every agent, project or global, has a `providerKey`
-  // and that's the key we delete against. config.tasks still exists
-  // for backwards compatibility with hand-edited configs, but the
-  // canonical pickers are the agents themselves, so we walk those.
+  // agents.json — every agent, project or global, has a fallbackSet
+  // whose first entry references the provider we're checking. The
+  // config.tasks entries still exist for backwards compatibility with
+  // hand-edited configs, but the canonical pickers are the agents
+  // themselves, so we walk those.
   //
   // Lazy-import the PM collection so admin-shared stays free of a
   // direct PM dependency at load time (admin routes run before any
   // project agents are listed) and so a future refactor that moves
-  // the collection can update this single import.
-  const { agents } = await import("../pm/agents.js");
+  // the collection can update this single import. `primaryPick` is the
+  // single source of truth for "which provider does this agent dispatch
+  // to" post-cleanup, so we test against that rather than reading any
+  // stale `providerKey` field off the agent row.
+  const { agents, primaryPick } = await import("../pm/agents.js");
+  const cfg = runtime?.config;
   const rows = await agents.list();
   const usages: string[] = [];
   for (const row of rows) {
-    if (row.providerKey !== name) continue;
+    if (!cfg) continue;
+    const pick = primaryPick(row, cfg);
+    if (pick?.providerKey !== name) continue;
     if (row.kind === "global") usages.push(`global-agent:${row.systemRole ?? row.role} (${row.name})`);
     else usages.push(`agent:${row.id} ${row.projectId === null ? "shared" : `project ${row.projectId}`}`);
   }

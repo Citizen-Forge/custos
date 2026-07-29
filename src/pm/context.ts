@@ -1,6 +1,24 @@
 import type { ProviderOption } from "./agents.js";
 import { isAvailable, type ModelRecord } from "./model-registry.js";
 import type { AgentDef, Idea, ProjectSettings, WorkItem } from "./types.js";
+import type { GatewayConfig } from "../config.js";
+
+/**
+ * Render the "runs on" line for an engineer roster row. Reads from the
+ *  agent's fallbackSet rather than its (now-dropped) `providerKey`/`model`
+ *  fields; the operator-facing primary pick is `fallbackSet[0]`, with
+ *  `+N` when the chain has more than one entry, exactly as the
+ *  AgentModelSelect label. Config is passed in (rather than read from a
+ *  module-level singleton) so tests can render rosters against a fixed
+ *  GatewayConfig without bootstrapping the full runtime.
+ */
+export function describeAgentPick(agent: AgentDef, config: GatewayConfig): string {
+  const set = agent.fallbackSet ? config.fallbackSets?.[agent.fallbackSet] : null;
+  if (!set || set.providers.length === 0) return "no fallback set";
+  const first = set.providers[0];
+  if (set.providers.length === 1) return `${first.provider} / ${first.model}`;
+  return `${first.provider} / ${first.model} +${set.providers.length - 1}`;
+}
 
 /** Renders board state as markdown for an agent prompt. Kept in one place
  * so every role sees a ticket described the same way -- a QA agent and the
@@ -51,15 +69,19 @@ export function renderBoardSummary(items: WorkItem[]): string {
   return lines.join("\n");
 }
 
-export function renderAgentRoster(roster: AgentDef[]): string {
+export function renderAgentRoster(roster: AgentDef[], config?: GatewayConfig): string {
   if (!roster.length) return "_No engineer agents exist yet — you will need to create at least one._";
+  // The roster call site in orchestrator.ts passes `this.runtime.config`;
+  // tests and any future caller that omit the config still get a sane
+  // string ("no fallback set") rather than crashing.
+  const cfg = config ?? ({} as GatewayConfig);
   return roster
     .map((agent) => {
       const s = agent.stats;
       const bounceRate = s.completed ? `${Math.round((s.qaRejections / s.completed) * 100)}%` : "n/a";
       return [
         `### \`${agent.id}\` — ${agent.name}`,
-        `Runs on: ${agent.providerKey} / ${agent.model} · rated up to **${agent.maxComplexity}** complexity`,
+        `Runs on: ${describeAgentPick(agent, cfg)} · rated up to **${agent.maxComplexity}** complexity`,
         `Specialty: ${agent.specialty ?? "unspecified"}`,
         `Record: ${s.assigned} assigned, ${s.completed} completed, ${s.qaRejections} QA bounces (${bounceRate} of completed), $${s.totalCostUsd.toFixed(2)} spent, ${Math.round(s.avgRunMs / 1000)}s average run`,
         agent.notes.length ? `Existing tuning notes:\n${agent.notes.map((n) => `  - ${n}`).join("\n")}` : "No tuning notes yet.",

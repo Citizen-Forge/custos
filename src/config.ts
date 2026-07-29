@@ -218,6 +218,28 @@ const DEFAULT_CONFIG: GatewayConfig = {
       description: "Quick turnarounds, simple tickets, classification, and other latency-sensitive work where correctness but not depth is needed",
       providers: [{ provider: "ollama-fast", model: "qwen2.5:3b-instruct" }, { provider: "ollama", model: "qwen2.5:14b-instruct-q4_K_M" }],
     },
+    // Dedicated fallback set for the global embeddings service. Distinct
+    // from "standard" because embeddings need an embedding-capable model
+    // (nomic-embed-text on Ollama), not a chat model — Ollama's
+    // /api/embeddings endpoint will reject chat-model names. The
+    // embeddings global agent defaults to this set; operators on a
+    // different embedding provider can override via the Global Services
+    // panel.
+    "embeddings": {
+      name: "Embeddings (Ollama)",
+      description: "Vector embeddings for the memory store. Uses Ollama's native embedding endpoint, which requires an embedding-capable model (nomic-embed-text, mxbai-embed-large). Do not point this set at a chat model.",
+      providers: [{ provider: "ollama", model: "nomic-embed-text" }],
+    },
+    // Dedicated fallback set for the global permission classifier.
+    // Distinct from "fast" because the classifier sits on every tool
+    // call (very high call volume) and benefits from a smaller model
+    // than "fast"'s default. Ollama's 3b-instruct is the lowest-cost
+    // option that follows the JSON-only contract reliably.
+    "classifier": {
+      name: "Permission classifier",
+      description: "Gates every tool call from autonomous agents. Should be a small, fast model that follows the JSON-only contract reliably.",
+      providers: [{ provider: "ollama-fast", model: "qwen2.5:3b-instruct" }],
+    },
   },
   tasks: {
     general: [
