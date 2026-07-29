@@ -82,6 +82,12 @@ export interface ModelDef {
   /** Per-model pricing. Only meaningful for metered providers; free and
    * subscription providers have no per-token cost to track. */
   pricing?: PricingConfig;
+  /** Maximum output tokens this model supports. When set, the provider
+   * clamps `max_tokens` in outgoing requests to this value. Operators
+   * typically set this per-model because different models from the same
+   * provider (e.g. Groq's Qwen 3.6 at 16384 vs Llama 3.1 at 8192) have
+   * different per-model caps. Omit to allow any value the caller sends. */
+  maxOutputTokens?: number;
 }
 
 /** Top-level provider abstraction. Replaces the flat

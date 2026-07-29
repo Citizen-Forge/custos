@@ -475,6 +475,15 @@ export interface FallbackSetEntryHealth {
     for (const [name, providerDef] of Object.entries(config.providers ?? {})) {
       const defaultModel = providerDef.models.find((m) => m.enabled) ?? providerDef.models[0];
       if (!defaultModel) continue;
+      // Build per-model settings map so the provider can resolve
+      // maxOutputTokens (and any future per-model tuning fields) at
+      // dispatch time when modelOverride selects a non-default model.
+      const modelSettings: Record<string, { maxOutputTokens?: number }> = {};
+      for (const m of providerDef.models) {
+        if (m.maxOutputTokens !== undefined) {
+          modelSettings[m.name] = { maxOutputTokens: m.maxOutputTokens };
+        }
+      }
       const instanceConfig = {
         baseUrl: providerDef.baseUrl,
         model: defaultModel.name,
@@ -486,6 +495,7 @@ export interface FallbackSetEntryHealth {
         emitLateMetadataDelta: providerDef.emitLateMetadataDelta,
         maxRequestBytes: providerDef.maxRequestBytes,
         maxRequestBytesWarnRatio: providerDef.maxRequestBytesWarnRatio,
+        models: Object.keys(modelSettings).length > 0 ? modelSettings : undefined,
       };
       bareProviders[name] = new OpenAICompatibleProvider(name, instanceConfig);
       stateMap.register(name, {

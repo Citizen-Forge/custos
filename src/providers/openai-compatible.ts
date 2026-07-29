@@ -75,6 +75,11 @@ export interface OpenAICompatibleInstanceConfig {
    *  hard cap, keeping the conversation always below the limit.
    *  Default 0.75. Only meaningful when `maxRequestBytes` is set. */
   maxRequestBytesWarnRatio?: number;
+  /** Per-model settings, keyed by model name. Resolved at dispatch time
+   * when `modelOverride` (via `CompleteOptions`) supplies a model
+   * different than the default `model`. Populated at provider
+   * construction from `ProviderDef.models` in `runtime.ts`. */
+  models?: Record<string, { maxOutputTokens?: number }>;
 }
 
 /**
@@ -94,6 +99,20 @@ export class OpenAICompatibleProvider implements Provider {
     // clientBetaHeader is Anthropic-specific and intentionally ignored here.
     const { signal, modelOverride } = options ?? {};
     let openaiRequest = toOpenAIRequest(request, modelOverride ?? this.config.model);
+
+    // Clamp max_tokens per-model when the provider's config carries a
+    // per-model limit. Different models on the same provider (e.g. Groq's
+    // Qwen 3.6 at 16384 vs Llama 3.1 at 8192) have different output-token
+    // caps, and the upstream rejects requests whose max_tokens exceeds the
+    // model-specific limit with a 400. Resolve the effective model from
+    // modelOverride (what the GlobalQueue dispatched) or the provider's
+    // default model, then look up the cap from the per-model settings map.
+    // No map == no clamping (legacy instances that don't carry models).
+    const effectiveModel = modelOverride ?? this.config.model;
+    const modelCfg = this.config.models?.[effectiveModel];
+    if (modelCfg?.maxOutputTokens !== undefined && openaiRequest.max_tokens !== undefined) {
+      openaiRequest.max_tokens = Math.min(openaiRequest.max_tokens, modelCfg.maxOutputTokens);
+    }
 
     // Per-instance request size cap (see OpenAICompatibleInstanceConfig.maxRequestBytes).
     // When configured, the request is fitted by stripping oldest inline-base64 image parts.

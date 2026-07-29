@@ -14,7 +14,7 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
     const { baseUrl, costType, models, apiKey, maxConcurrent, rpmLimit, maxRequestBytes, priority, embeddingUrl } = req.body as {
       baseUrl: string;
       costType: "free" | "subscription" | "metered";
-      models: { name: string; enabled: boolean; pricing?: PricingConfig | null }[];
+      models: { name: string; enabled: boolean; pricing?: PricingConfig | null; maxOutputTokens?: number | null }[];
       apiKey?: string | null;
       maxConcurrent?: number | null;
       rpmLimit?: number | null;
@@ -64,7 +64,12 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
           [name]: {
             baseUrl,
             costType,
-            models: models.map((m) => ({ name: m.name, enabled: m.enabled, ...(m.pricing ? { pricing: m.pricing } : {}) })),
+            models: models.map((m) => ({
+              name: m.name,
+              enabled: m.enabled,
+              ...(m.pricing ? { pricing: m.pricing } : {}),
+              ...(m.maxOutputTokens !== undefined && m.maxOutputTokens !== null ? { maxOutputTokens: m.maxOutputTokens } : {}),
+            })),
             apiKey: resolveApiKey(apiKey, cfg.providers?.[name]?.apiKey),
             maxConcurrent: resolveOptionalInt(maxConcurrent, cfg.providers?.[name]?.maxConcurrent),
             rpmLimit: resolveOptionalInt(rpmLimit, cfg.providers?.[name]?.rpmLimit),
@@ -172,13 +177,22 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
     return { plan, host: plan.host, tried: tries, ok: Boolean(success), picked: success?.path ?? null };
   });
 
-  /** Toggle a single model's enabled state without opening the edit form. */
+  /** Toggle a single model's enabled state or update maxOutputTokens
+   *  without opening the edit form. Accepts both fields in one call
+   *  so the admin UI can fire one PATCH when the operator clicks either
+   *  the enable checkbox or edits the maxOutputTokens input on a model
+   *  sub-row. Fields not present in the body are left unchanged. */
   app.patch("/admin/api/providers/:name/models/:model", async (req, reply) => {
     const { name, model: modelName } = req.params as { name: string; model: string };
-    const { enabled } = req.body as { enabled: boolean };
-    if (typeof enabled !== "boolean") {
+    const { enabled, maxOutputTokens } = req.body as { enabled?: boolean; maxOutputTokens?: number | null };
+    if (enabled !== undefined && typeof enabled !== "boolean") {
       reply.code(400);
       return { error: "enabled must be a boolean" };
+    }
+    if (maxOutputTokens !== undefined && maxOutputTokens !== null &&
+        (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1)) {
+      reply.code(400);
+      return { error: "maxOutputTokens must be a positive integer (or null for unlimited)" };
     }
     const provider = runtime.config.providers?.[name];
     if (!provider) { reply.code(404); return { error: `provider "${name}" not found` }; }
@@ -190,7 +204,10 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
       const target = cfg.providers?.[name];
       if (!target) return cfg;
       const models = [...target.models];
-      models[idx] = { ...models[idx], enabled };
+      const updated = { ...models[idx] };
+      if (enabled !== undefined) updated.enabled = enabled;
+      if (maxOutputTokens !== undefined) updated.maxOutputTokens = maxOutputTokens ?? undefined;
+      models[idx] = updated;
       return { ...cfg, providers: { ...cfg.providers, [name]: { ...target, models } } };
     });
     return { ok: true };

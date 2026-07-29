@@ -898,6 +898,42 @@ function renderProvidersPanel() {
       } else {
         modelTd.appendChild(el("span", { class: "small", style: "margin-left: 12px;", text: "—" }));
       }
+      // Inline maxOutputTokens input — saved via PATCH on blur so the
+      // operator doesn't need to open the full Edit form just to tune
+      // a single model's output-token cap against a provider where
+      // different models have different limits (e.g. Groq's per-model
+      // 16384 vs 8192).
+      modelTd.appendChild(el("span", { class: "small", style: "margin-left: 12px; font-size: 11px;", text: "max_tokens:" }));
+      const maxTokenInput = el("input", {
+        type: "number",
+        min: "1",
+        step: "1",
+        style: "width: 70px; font-size: 11px; padding: 2px 5px; margin-left: 3px;",
+        value: model.maxOutputTokens ?? "",
+        placeholder: "unlimited",
+        title: "Maximum output tokens this model supports. Blank = allow any value the caller sends (upstream may reject).",
+      });
+      let saveTimeout = null;
+      maxTokenInput.oninput = () => {
+        if (saveTimeout) clearTimeout(saveTimeout);
+        saveTimeout = setTimeout(async () => {
+          const raw = maxTokenInput.value.trim();
+          const val = raw ? Number(raw) : null;
+          if (val !== null && (!Number.isInteger(val) || val < 1)) {
+            showToast("max tokens must be a positive integer (or blank for unlimited)", true);
+            return;
+          }
+          try {
+            await api(`/admin/api/providers/${encodeURIComponent(name)}/models/${encodeURIComponent(model.name)}`, {
+              method: "PATCH",
+              body: { maxOutputTokens: val },
+            });
+          } catch (err) {
+            showToast(err.message, true);
+          }
+        }, 800);
+      };
+      modelTd.appendChild(maxTokenInput);
       modelRow.appendChild(modelTd);
       table.appendChild(modelRow);
     }
