@@ -1222,6 +1222,48 @@ function renderQueueActivityPanel() {
   section.appendChild(el("p", { class: "desc", text: "Recent work dispatched through the global queue, oldest at the bottom. Rows tagged with the same project + agent came from one logical request; a request that walked the chain shows queued → dispatched → fallback → succeeded across multiple rows. Auto-refreshes every 5s." }));
 
   const body = el("div", { class: "panel-body" });
+
+  // Outcome filter state: null = show all, otherwise a string matching ev.outcome.
+  let filterOutcome = null;
+  const OUTCOME_FILTERS = [
+    { value: null, label: "All", color: "var(--muted)" },
+    { value: "succeeded", label: "✓ succeeded", color: "var(--ok)" },
+    { value: "failed", label: "✕ failed", color: "var(--danger)" },
+    { value: "fallback", label: "↪ fallback", color: "var(--warn)" },
+    { value: "stuck-request", label: "⏱ stuck", color: "var(--warn)" },
+    { value: "dispatched", label: "→ dispatched", color: "var(--accent)" },
+    { value: "queued", label: "queued", color: "var(--muted)" },
+  ];
+
+  const filterRow = el("div", { class: "row", style: "margin-bottom: 10px; gap: 5px;" });
+  filterRow.appendChild(el("span", { class: "small", text: "Filter:" }));
+  let activeFilterBtn = null;
+  function setActiveFilter(btn) {
+    if (activeFilterBtn) {
+      activeFilterBtn.style.background = "";
+      activeFilterBtn.style.color = "";
+    }
+    activeFilterBtn = btn;
+    if (btn) {
+      btn.style.background = "var(--accent)";
+      btn.style.color = "#0d1117";
+    }
+  }
+  for (const f of OUTCOME_FILTERS) {
+    const btn = el("button", {
+      style: `font-size: 11px; padding: 3px 9px; border-radius: 999px; color: ${f.color};`,
+      text: f.label,
+    });
+    if (f.value === null) setActiveFilter(btn);
+    btn.onclick = () => {
+      filterOutcome = f.value;
+      setActiveFilter(btn);
+      void refreshQueueActivity();
+    };
+    filterRow.appendChild(btn);
+  }
+  body.appendChild(filterRow);
+
   const tbody = el("tbody");
   const table = el("table", { class: "activity-table" });
   table.appendChild(el("thead", {}, [el("tr", {}, [
@@ -1260,15 +1302,19 @@ function renderQueueActivityPanel() {
   async function refreshQueueActivity() {
     try {
       const resp = await api("/admin/api/queue/activity?limit=100");
-      const events = resp.events || [];
+      let events = resp.events || [];
+      if (filterOutcome !== null) {
+        events = events.filter((ev) => ev.outcome === filterOutcome);
+      }
       tbody.innerHTML = "";
       if (events.length === 0) {
         tbody.appendChild(el("tr", {}, [el("td", { colspan: "9", class: "muted", text: "No queue activity yet — dispatch an agent or trigger the chat to see events stream in." })]));
       } else {
         for (const ev of events) tbody.appendChild(renderQueueActivityRow(ev));
       }
-      const cap = resp.capacity ?? events.length;
-      statusLine.textContent = `Showing ${events.length} of last ${cap} events (newest first).`;
+      const cap = resp.capacity ?? (resp.events || []).length;
+      const filteredNote = filterOutcome !== null ? ` (filtered to ${events.length})` : "";
+      statusLine.textContent = `Showing ${events.length} of last ${cap} events (newest first).${filteredNote}`;
     } catch (err) {
       statusLine.textContent = `Failed to load: ${err.message}`;
     }
