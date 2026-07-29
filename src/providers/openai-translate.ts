@@ -580,33 +580,36 @@ export function fitRequestToSize(req: OpenAIRequest, maxBytes: number, warnRatio
   };
 }
 
-/** Remove the oldest complete turns (everything after the system prompt
- *  and before the most recent user message) from an OpenAI request until
- *  its serialized body fits `maxBytes`. Returns a FitRequestResult when
- *  truncation succeeds (stillOverLimit can still be true if even the
- *  most recent turn alone exceeds the limit), or undefined when the
- *  request has no messages to trim (only system + one user message).
- *  The system prompt at index 0 is always preserved. */
+/** Remove the oldest messages (everything after the system prompt) from
+ *  an OpenAI request until its serialized body fits `maxBytes`. Keeps the
+ *  system prompt at index 0 and the newest messages. Returns a
+ *  FitRequestResult when truncation succeeds (stillOverLimit can still be
+ *  true if even a single message alone exceeds the limit), or undefined
+ *  when the request has < 3 messages total (nothing worth dropping).
+ *
+ *  Agent-style conversations (the dominant case) produce messages where
+ *  the only `role: "user"` entry is the initial prompt at index 1 — every
+ *  subsequent tool_result becomes `role: "tool"` in the OpenAI translation.
+ *  A user-message search would find `lastUserIdx = 1` and refuse to
+ *  truncate anything. The role-agnostic approach below removes the oldest
+ *  half of messages (excluding the system prompt), which works for both
+ *  traditional chat conversations and tool-result-heavy agent turns. */
 function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxBytes: number): FitRequestResult | undefined {
-  // Need at least system (0) + one user message to have anything to trim.
-  // If we only have 2 messages (system + user), there's nothing old to drop.
+  // Need at least system (0) + 2 more messages to have anything worth
+  // trimming. A single turn with only its system prompt, one user, and
+  // one assistant response has no "old" material to drop.
   if (req.messages.length < 3) return undefined;
 
-  // Find the last user message — this is the current turn. Keep it
-  // and everything after it (assistant response, tool results).
-  let lastUserIdx = -1;
-  for (let i = req.messages.length - 1; i >= 0; i--) {
-    if (req.messages[i].role === "user") {
-      lastUserIdx = i;
-      break;
-    }
-  }
-  if (lastUserIdx <= 1) return undefined;  // nothing between system and this user
+  // Remove roughly half of the messages (oldest first), keeping the
+  // system prompt at index 0 and the newest ~50% of messages. This is
+  // role-agnostic — it works for both chat and tool-result-heavy agent
+  // conversations where user messages may only appear once.
+  const keepCount = Math.max(2, Math.ceil(req.messages.length / 2));
+  const removedCount = req.messages.length - keepCount;
 
-  const removedCount = lastUserIdx - 1;
   const clone: OpenAIRequest = JSON.parse(JSON.stringify(req));
-  // Remove messages from index 1 up to (but not including) lastUserIdx.
-  // Index 0 is the system prompt, which we keep.
+  // Remove messages from index 1 through removedCount. Index 0 is the
+  // system prompt, which we always preserve.
   clone.messages.splice(1, removedCount);
 
   const finalBytes = serializeRequestBytes(clone);

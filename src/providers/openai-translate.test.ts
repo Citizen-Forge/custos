@@ -1096,19 +1096,21 @@ describe("fitRequestToSize", () => {
   });
 
   it("strips oldest image until the body fits when over cap", () => {
-    // 3 messages, each with a ~2KB image. Cap = 1.5KB total. Should
-    // strip at least 2 of the 3 images to fit.
+    // 3 messages, each with a ~2KB image. Cap = 1.5KB total. All 3
+    // images must be stripped to fit inside the 1500-byte cap (each
+    // inline base64 image's serialized payload is ~2KB, and the
+    // combined body with all 3 is ~6.5KB). Oldest images (msg 0, then
+    // msg 1) are stripped first; the assertion checks that stripping
+    // happened at all and that the body was brought under the cap.
+    // The strongest assertion is finalBytes <= cap, not a specific
+    // image-preservation claim, because the exact byte-count math
+    // varies with JSON serialization overhead and base64 expansion.
     const req = toOpenAIRequest(buildRequestWithImages([2048, 2048, 2048]), "x");
     const cap = 1500;
     const result = fitRequestToSize(req, cap);
     assert.ok(result.stripped > 0, "must strip when over cap");
     assert.equal(result.stillOverLimit, false, "must fit after stripping");
     assert.ok(result.finalBytes <= cap, `finalBytes ${result.finalBytes} must be <= cap ${cap}`);
-    // Oldest images are stripped first -- verify by examining messages.
-    // After stripping, the OLDEST messages' image parts (indices 0
-    // and 1) become placeholder text, leaving message[2]'s image intact.
-    const last = (result.request.messages[2].content as OpenAIContentPart[]);
-    assert.ok(last.some(isOpenAIImagePart), "newest message's image is preserved");
   });
 
   it("strips multiple images from the SAME message when one isn't enough", () => {
