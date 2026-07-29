@@ -4,7 +4,7 @@ import { getApiKeySource } from "../config.js";
 import { startOAuthFlow, exchangeCode, type OAuthMode } from "../auth/oauth.js";
 import { OAuthFlowTracker } from "../auth/oauth-flow-tracker.js";
 import { getValidAccessToken, getOAuthStatus, saveTokens, clearTokens } from "../auth/credentials.js";
-import { maskApiKey, resolveApiKey, updateConfig } from "./admin-shared.js";
+import { maskApiKey, resolveApiKey, resolveOptionalInt, updateConfig } from "./admin-shared.js";
 
 export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime): void {
   const oauthFlows = new OAuthFlowTracker();
@@ -27,8 +27,8 @@ export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime):
       anthropic: {
         ...cfg.anthropic,
         apiKey: resolveApiKey(apiKey, cfg.anthropic?.apiKey),
-          ...(maxConcurrent !== undefined ? { maxConcurrent: maxConcurrent ?? undefined } : {}),
-          ...(rpmLimit !== undefined ? { rpmLimit: rpmLimit ?? undefined } : {}),
+          maxConcurrent: resolveOptionalInt(maxConcurrent, cfg.anthropic?.maxConcurrent),
+          rpmLimit: resolveOptionalInt(rpmLimit, cfg.anthropic?.rpmLimit),
       },
     }));
     const result: Record<string, unknown> = {};

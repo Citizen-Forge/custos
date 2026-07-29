@@ -88,6 +88,30 @@ export function resolveApiKey(
   return apiKey || undefined;
 }
 
+/** Resolve an optional integer field (maxConcurrent, rpmLimit, maxRequestBytes)
+ *  from a PUT/PATCH request body against the previously stored value, preserving
+ *  the existing value when the caller omits the field (undefined). Only update
+ *  when a non-null number is provided, and only clear when `null` is explicitly
+ *  passed (the admin UI's "unlimited" / "no limit" affordance).
+ *
+ *  Without this guard, any `?? undefined` fallback silently wipes stored values
+ *  when a future UI form sends `null` to mean "use the server default" instead
+ *  of omitting the field. Four call sites across provider-routes.ts and
+ *  anthropic-routes.ts previously duplicated this pattern inline — each with a
+ *  subtle divergence in how they handled the omitted-field case.
+ *
+ *  Type param `T` is `number | null | undefined` at call sites; the signature
+ *  accepts it as `T` so the caller can keep per-field narrowed types without
+ *  casting. */
+export function resolveOptionalInt<T extends number | null | undefined>(
+  value: T,
+  prev: number | undefined,
+): number | undefined {
+  if (value === undefined) return prev;
+  if (value === null) return undefined;
+  return value;
+}
+
 export async function updateConfig(runtime: Runtime, mutate: (cfg: GatewayConfig) => GatewayConfig): Promise<GatewayConfig> {
   const next = mutate(runtime.config);
   await saveConfig(next);

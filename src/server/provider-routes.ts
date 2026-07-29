@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Runtime } from "../runtime.js";
 import type { PricingConfig } from "../providers/spend-tracker.js";
 import type { Priority } from "../providers/types.js";
-import { findInstanceUsages, resolveApiKey, updateConfig } from "./admin-shared.js";
+import { findInstanceUsages, resolveApiKey, resolveOptionalInt, updateConfig } from "./admin-shared.js";
 import { planEmbeddingProbe, resolveEmbeddingHost } from "../providers/embedding-url.js";
 import { getGlobalAgent } from "../pm/global-agents.js";
 
@@ -66,9 +66,9 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
             costType,
             models: models.map((m) => ({ name: m.name, enabled: m.enabled, ...(m.pricing ? { pricing: m.pricing } : {}) })),
             apiKey: resolveApiKey(apiKey, cfg.providers?.[name]?.apiKey),
-            maxConcurrent: maxConcurrent ?? undefined,
-            rpmLimit: rpmLimit ?? undefined,
-            maxRequestBytes: maxRequestBytes ?? undefined,
+            maxConcurrent: resolveOptionalInt(maxConcurrent, cfg.providers?.[name]?.maxConcurrent),
+            rpmLimit: resolveOptionalInt(rpmLimit, cfg.providers?.[name]?.rpmLimit),
+            maxRequestBytes: resolveOptionalInt(maxRequestBytes, cfg.providers?.[name]?.maxRequestBytes),
             priority: priority ?? undefined,
             embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
           },
@@ -252,9 +252,9 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
           costType,
           models: [{ name: model, enabled: true, ...(pricing ? { pricing } : {}) }],
           apiKey: resolveApiKey(apiKey, cfg.providers?.[name]?.apiKey),
-            maxConcurrent: maxConcurrent ?? undefined,
-            rpmLimit: rpmLimit ?? undefined,
-            maxRequestBytes: maxRequestBytes ?? undefined,
+            maxConcurrent: resolveOptionalInt(maxConcurrent, cfg.providers?.[name]?.maxConcurrent),
+            rpmLimit: resolveOptionalInt(rpmLimit, cfg.providers?.[name]?.rpmLimit),
+            maxRequestBytes: resolveOptionalInt(maxRequestBytes, cfg.providers?.[name]?.maxRequestBytes),
             priority: priority ?? undefined,
             embeddingUrl: embeddingUrl ? embeddingUrl : undefined,
           },
