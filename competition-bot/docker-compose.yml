@@ -1,0 +1,17 @@
+services:
+  competition-bot:
+    build: .
+    ports:
+      - "3456:3456"
+    volumes:
+      # Persist SQLite database across restarts
+      - ./data:/app/data
+      # Mount /dev/shm for Chromium shared memory
+      - /dev/shm:/dev/shm
+    environment:
+      - PORT=3456
+      # Optional: override data directory (defaults to /app/data)
+      # - DATA_DIR=/app/data
+    restart: unless-stopped
+    # Give Chromium enough shared memory
+    shm_size: "2gb"

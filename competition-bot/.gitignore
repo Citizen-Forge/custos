@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+.env
+*.db
+.env.local
+admin-ui/node_modules/
+admin-ui/dist/
+*.tsbuildinfo

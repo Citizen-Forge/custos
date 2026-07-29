@@ -1,9 +1,11 @@
 import { get } from '../db/db.js';
 import { newPage } from './browser.js';
-import { analyseFormFields, answerQuestion, analyseSubmitAction, chooseSelectOption } from '../llm/client.js';
+import { analyseFormFields, answerQuestion, analyseSubmitAction, chooseSelectOption, askLlm } from '../llm/client.js';
 import { matchesEntryCta } from './cta-match.js';
+import { solveCaptchaOnPage, getActiveService } from '../captcha/solver.js';
 import type { LlmProvider } from '../config/types.js';
 import type { AnalysedField } from '../llm/client.js';
+import type { Page as PlaywrightPage } from 'playwright';
 import { botEvents } from '../events.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -66,23 +68,27 @@ export async function enterCompetition(
   let screenshotAfter = '';
 
   try {
-    await page.goto(competition.url, { waitUntil: 'networkidle2', timeout: 30_000 });
+    await page.goto(competition.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await new Promise((r) => setTimeout(r, 2000));
 
     // ── CAPTCHA detection ────────────────────────────────────────────
-    const hasCaptcha = await page.evaluate(() => {
+    // Don't abort immediately — many pages embed reCAPTCHA/hCaptcha widgets
+    // (e.g. Gleam forms) that don't block basic email entry. We mark the
+    // presence and only fail if submission is actually blocked.
+    const captchaDetected = await page.evaluate(() => {
       const body = document.body?.innerHTML?.toLowerCase() || '';
       return (
         body.includes('recaptcha') ||
         body.includes('hcaptcha') ||
         body.includes('g-recaptcha') ||
         body.includes('cf-turnstile') ||
-        document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], .g-recaptcha, div[class*="captcha"]') !== null
+        body.includes('turnstile') ||
+        document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], .g-recaptcha, div[class*="captcha"], .cf-turnstile, iframe[src*="turnstile"]') !== null
       );
     });
 
-    if (hasCaptcha) {
-      throw new Error('CAPTCHA detected — cannot enter automatically');
+    if (captchaDetected) {
+      botEvents.info('  ⚠️ CAPTCHA widget detected on page — will attempt entry anyway (many forms with embedded captcha work fine for basic entry)');
     }
 
     // ── Analyse the page for form fields ──────────────────────────────
@@ -132,6 +138,12 @@ export async function enterCompetition(
       }
     }
 
+    // ── Try to solve text-based CAPTCHAs with the LLM ────────────────
+    // Many competition pages use simple anti-spam questions like
+    // "What is 3+5?" that an LLM can trivially answer, or "Enter the code"
+    // prompts where the code is shown on the page.
+    await solveTextCaptcha(page, provider, competition.title, pageContent);
+
     // ── Try to find and check consent checkboxes ─────────────────────
     await page.evaluate(() => {
       const checkboxes = Array.from(document.querySelectorAll<HTMLInputElement>(
@@ -177,7 +189,34 @@ export async function enterCompetition(
     screenshotBefore = `/screenshots/${competitionId}-before.png`;
 
     // ── Submit the form — multi-strategy ────────────────────────────
-    const submitted = await submitForm(page, provider, competition.title, pageContent, pageHtml);      if (!submitted) {
+    let submitted = await submitForm(page, provider, competition.title, pageContent, pageHtml);
+
+    // ── If submission failed and CAPTCHA detected, try external solver ───
+    if (!submitted && captchaDetected) {
+      const serviceName = getActiveService();
+      if (serviceName !== 'none') {
+        botEvents.info('  🔄 First submission attempt failed with CAPTCHA present — trying external solving service...');
+
+        const solved = await solveCaptchaOnPage(page, competition.url);
+        if (solved) {
+          // Wait for the page to process the solved token
+          await new Promise((r) => setTimeout(r, 2000));
+
+          // Retry submission with the solved CAPTCHA
+          botEvents.info('  🔄 Retrying submission with solved CAPTCHA...');
+          submitted = await submitForm(page, provider, competition.title, pageContent, pageHtml);
+        }
+      }
+    }
+
+    if (!submitted) {
+      // Distinguish CAPTCHA-blocked failures from normal submit-button failures
+      if (captchaDetected && getActiveService() === 'none') {
+        throw new Error('CAPTCHA detected — form could not be submitted (CAPTCHA widget likely blocked the entry). Consider configuring an external CAPTCHA solving service in Settings.');
+      }
+      if (captchaDetected) {
+        throw new Error('CAPTCHA detected — form could not be submitted even after external solving attempt (the solving service may have failed or the CAPTCHA may not be the blocker)');
+      }
       throw new Error(
         "Could not find submit button — none of the 7 strategies located a click-to-enter CTA, a submit button, or a keyboard/Enter/click_next path. See the activity feed for the strategy results; the most common cause on third-party aggregator pages (customerfocus.co.uk, Loquax) is that the entry CTA is a plain <a> tag with text like \"Click here to enter <prize>\", now covered by strategy 6b.",
       );
@@ -233,7 +272,7 @@ const SUCCESS_PHRASES = [
 /**
  * Check whether the current page shows a success message.
  */
-async function checkSuccess(page: import('puppeteer').Page): Promise<boolean> {
+async function checkSuccess(page: PlaywrightPage): Promise<boolean> {
   const text = await page.evaluate(() => document.body?.innerText?.toLowerCase() || '');
   return SUCCESS_PHRASES.some((p) => text.includes(p));
 }
@@ -243,7 +282,7 @@ async function checkSuccess(page: import('puppeteer').Page): Promise<boolean> {
  * Returns true if any strategy appeared to succeed.
  */
 async function submitForm(
-  page: import('puppeteer').Page,
+  page: PlaywrightPage,
   provider: LlmProvider,
   competitionTitle: string,
   pageText: string,
@@ -573,6 +612,130 @@ async function submitForm(
   return false;
 }
 
+// ── Text CAPTCHA solving ────────────────────────────────────────────
+
+/**
+ * Scan the page for simple text-based CAPTCHAs / anti-spam questions
+ * that an LLM can trivially answer, and fill them in.
+ *
+ * Handles patterns like:
+ *   "What is 3 + 5?"
+ *   "Enter the code shown: ABC123"
+ *   "What colour is the sky?"
+ *   "Type the word: SUNSHINE"
+ *   Any input near a label containing "captcha", "code", "verify", "anti-spam", etc.
+ */
+async function solveTextCaptcha(
+  page: PlaywrightPage,
+  provider: LlmProvider,
+  competitionTitle: string,
+  pageText: string,
+): Promise<void> {
+  // First, find any text input near a CAPTCHA-like label
+  const captchaField = await page.evaluate(() => {
+    const captchaKeywords = ['captcha', 'anti-spam', 'antispam', 'verification', 'verify you\'re human', 'prove you\'re human', 'are you human', 'security check', 'enter the code', 'type the code', 'type the word', 'enter code', 'what is'];
+
+    // Check labels
+    const labels = Array.from(document.querySelectorAll<HTMLElement>('label, span, div, p, strong'));
+    for (const el of labels) {
+      const text = el.innerText?.toLowerCase().trim();
+      if (!text) continue;
+      if (captchaKeywords.some((kw) => text.includes(kw))) {
+        // Found a CAPTCHA-like label. Look for the nearest text input.
+        const input = el.closest('div, form, section, li, p')?.querySelector<HTMLInputElement>(
+          'input[type="text"], input:not([type]), input[type="tel"], input[type="number"]',
+        );
+        if (input) {
+          return {
+            found: true,
+            label: el.innerText.trim(),
+            name: input.name || input.id || '',
+          };
+        }
+      }
+    }
+
+    // Also check placeholders on text inputs
+    const inputs = Array.from(document.querySelectorAll<HTMLInputElement>(
+      'input[type="text"], input:not([type]), input[type="tel"], input[type="number"]',
+    ));
+    for (const input of inputs) {
+      const placeholder = (input.placeholder || '').toLowerCase();
+      if (placeholder && captchaKeywords.some((kw) => placeholder.includes(kw))) {
+        const parentText = input.closest('div, form, section, li, p')?.textContent || '';
+        return {
+          found: true,
+          label: parentText.trim().slice(0, 200),
+          name: input.name || input.id || '',
+        };
+      }
+    }
+
+    return { found: false, label: '', name: '' };
+  });
+
+  if (!captchaField.found) return;
+
+  botEvents.info('  🔢 Text-based CAPTCHA detected — asking LLM to solve');
+
+  // Build prompt: give the LLM the label text and nearby page context
+  const systemPrompt = `You are solving a simple anti-spam question or text CAPTCHA on a competition entry form.
+
+Your job:
+- Look at the question/label text and any nearby context
+- Answer the question directly and accurately
+- If it's a math question, compute the answer
+- If it asks you to type a code or word shown on the page, extract it from the context
+- If it's a common-sense question (e.g. "what colour is the sky?"), give the obvious answer
+
+Return ONLY the answer — no explanation, no quotes, just the value to type into the field.`;
+
+  const userPrompt = `Competition: ${competitionTitle}
+
+Question/label on the page:
+"${captchaField.label}"
+
+Nearby page context:
+${pageText.slice(0, 1000)}
+
+What should be entered in this CAPTCHA field? Return ONLY the exact value to type, nothing else.`;
+
+  try {
+    const answer = await askLlm(provider, systemPrompt, userPrompt);
+    const cleaned = answer.trim().replace(/^["'\s]+|["'\s]+$/g, '');
+
+    if (cleaned && cleaned.length < 100) {
+      // Try to fill by name/id first, then by proximity
+      if (captchaField.name) {
+        await fillField(page, {
+          name: captchaField.name,
+          type: 'text',
+          label: captchaField.label,
+        }, cleaned);
+      } else {
+        // Fallback: find input nearest to the label text
+        await page.evaluate((answer: string) => {
+          const inputs = Array.from(document.querySelectorAll<HTMLInputElement>(
+            'input[type="text"], input:not([type]), input[type="tel"], input[type="number"]',
+          ));
+          if (inputs.length > 0) {
+            const last = inputs[inputs.length - 1];
+            last.value = answer;
+            last.dispatchEvent(new Event('input', { bubbles: true }));
+            last.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }, cleaned);
+      }
+
+      botEvents.info(`  ✅ LLM solved text CAPTCHA: "${cleaned.slice(0, 50)}"`);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  } catch (err) {
+    // LLM failed to solve — continue without it
+    botEvents.info('  ⚠️ Could not solve text CAPTCHA with LLM — continuing anyway');
+  }
+}
+
 // ── Field value determination ─────────────────────────────────────────
 
 async function determineFieldValue(
@@ -646,7 +809,7 @@ async function determineFieldValue(
 
 // ── Field filling ─────────────────────────────────────────────────────
 
-async function fillField(page: import('puppeteer').Page, field: AnalysedField, value: string): Promise<void> {
+async function fillField(page: PlaywrightPage, field: AnalysedField, value: string): Promise<void> {
   const fieldName = field.name;
   const selectors = [
     `input[name="${fieldName}"]`,
@@ -667,7 +830,7 @@ async function fillField(page: import('puppeteer').Page, field: AnalysedField, v
 
       if (tagName === 'select') {
         try {
-          await el.select(value);
+          await el.selectOption(value);
         } catch {
           // If value isn't an option, try selecting the first non-empty option
           const optionCount = await page.evaluate((sel) => {
@@ -698,28 +861,28 @@ async function fillField(page: import('puppeteer').Page, field: AnalysedField, v
         await el.type(value, { delay: 30 });
 
         // Set value directly and dispatch events (triggers JS validation listeners)
-        await page.evaluate((sel, val) => {
+        await page.evaluate(({ sel, val }: { sel: string; val: string }) => {
           const e = document.querySelector<HTMLTextAreaElement>(sel);
           if (e) {
             e.value = val;
             e.dispatchEvent(new Event('input', { bubbles: true }));
             e.dispatchEvent(new Event('change', { bubbles: true }));
           }
-        }, selector, value);
+        }, { sel: selector, val: value });
 
       } else {
         await el.click();
         await el.type(value, { delay: 30 });
 
         // Set value directly and dispatch events (triggers JS validation listeners)
-        await page.evaluate((sel, val) => {
+        await page.evaluate(({ sel, val }: { sel: string; val: string }) => {
           const e = document.querySelector<HTMLInputElement>(sel);
           if (e) {
             e.value = val;
             e.dispatchEvent(new Event('input', { bubbles: true }));
             e.dispatchEvent(new Event('change', { bubbles: true }));
           }
-        }, selector, value);
+        }, { sel: selector, val: value });
       }
       return;
     }
