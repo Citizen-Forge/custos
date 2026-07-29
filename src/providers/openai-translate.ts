@@ -584,40 +584,69 @@ export function fitRequestToSize(req: OpenAIRequest, maxBytes: number, warnRatio
  *  an OpenAI request until its serialized body fits `maxBytes`. Keeps the
  *  system prompt at index 0 and the newest messages. Returns a
  *  FitRequestResult when truncation succeeds (stillOverLimit can still be
- *  true if even a single message alone exceeds the limit), or undefined
- *  when the request has < 3 messages total (nothing worth dropping).
+ *  true if even keeping only the system + one message still exceeds the
+ *  limit), or undefined when the request has < 3 messages total (nothing
+ *  worth dropping).
  *
  *  Agent-style conversations (the dominant case) produce messages where
  *  the only `role: "user"` entry is the initial prompt at index 1 — every
  *  subsequent tool_result becomes `role: "tool"` in the OpenAI translation.
  *  A user-message search would find `lastUserIdx = 1` and refuse to
  *  truncate anything. The role-agnostic approach below removes the oldest
- *  half of messages (excluding the system prompt), which works for both
- *  traditional chat conversations and tool-result-heavy agent turns. */
+ *  messages progressively until the body fits (or only 2 messages remain),
+ *  which works for both traditional chat conversations and tool-result-heavy
+ *  agent turns even when the conversation is far past the size cap.
+ *
+ *  LOOPING BEHAVIOR: A single 50% pass may not suffice for very large
+ *  conversations — a 131MB session file reduced by 50% still leaves ~65MB,
+ *  which exceeds most caps. The old one-shot approach returned
+ *  `stillOverLimit: true` after that single attempt, blocking the request
+ *  entirely. Now the function keeps removing 25% of remaining messages per
+ *  iteration until the body fits or only 2 messages survive, at which point
+ *  the limit really can't be satisfied (unless the system prompt alone
+ *  exceeds the cap, which is an operator config issue). */
 function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxBytes: number): FitRequestResult | undefined {
   // Need at least system (0) + 2 more messages to have anything worth
   // trimming. A single turn with only its system prompt, one user, and
   // one assistant response has no "old" material to drop.
   if (req.messages.length < 3) return undefined;
 
-  // Remove roughly half of the messages (oldest first), keeping the
-  // system prompt at index 0 and the newest ~50% of messages. This is
-  // role-agnostic — it works for both chat and tool-result-heavy agent
-  // conversations where user messages may only appear once.
-  const keepCount = Math.max(2, Math.ceil(req.messages.length / 2));
-  const removedCount = req.messages.length - keepCount;
-
   const clone: OpenAIRequest = JSON.parse(JSON.stringify(req));
-  // Remove messages from index 1 through removedCount. Index 0 is the
-  // system prompt, which we always preserve.
-  clone.messages.splice(1, removedCount);
+  let removedCount = 0;
 
+  // Loop: remove oldest messages in chunks of ~25% until the body fits
+  // or only the system prompt + 1 message remain. The old one-shot 50%
+  // pass was insufficient for conversations whose <newest half> alone
+  // exceeds the cap (e.g. a 131MB session file's newest 50% = ~65MB).
+  while (clone.messages.length > 2) {
+    // Remove the oldest ~25% of remaining non-system messages.
+    const chunkSize = Math.max(1, Math.floor((clone.messages.length - 1) * 0.25));
+    clone.messages.splice(1, chunkSize);
+    removedCount += chunkSize;
+
+    const finalBytes = serializeRequestBytes(clone);
+    if (finalBytes <= maxBytes) {
+      return {
+        request: clone,
+        stripped: 0,
+        truncatedMessages: removedCount,
+        stillOverLimit: false,
+        initialBytes: currentBytes,
+        finalBytes,
+      };
+    }
+  }
+
+  // Even with only system + 1 message, still over the cap. Nothing more
+  // we can remove — the system prompt alone (or its serialization overhead)
+  // exceeds the limit. Return what we have with stillOverLimit: true so
+  // the caller surfaces a clear 413.
   const finalBytes = serializeRequestBytes(clone);
   return {
     request: clone,
     stripped: 0,
     truncatedMessages: removedCount,
-    stillOverLimit: finalBytes > maxBytes,
+    stillOverLimit: true,
     initialBytes: currentBytes,
     finalBytes,
   };
