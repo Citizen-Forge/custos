@@ -185,6 +185,13 @@ export interface GatewayConfig {
    * the session login instead. Fails closed: unset means every request on
    * that surface is rejected, not allowed through -- there's no supported
    * "open" mode. Generate one from the admin UI's Security panel. */
+  /**
+   * @deprecated Removed -- custos is no longer a Claude Code proxy and the
+   * only requests it handles are its own spawned subprocesses, so the
+   * shared-secret client-auth gate is dead weight. The field is read by
+   * `pruneStaleFields` and dropped on every restart; the
+   * `client-auth-guard.ts` file is preserved as a no-op stub for any
+   * leftover registrations. */
   clientApiKey?: string;
 }
 
@@ -345,12 +352,10 @@ function migrateLegacyShape(fileConfig: Partial<GatewayConfig>): void {
  *     lines up with the type tightening.
  *
  * KEPT (intentionally not pruned, with a documented path to future-proofing):
- *   - `clientApiKey` — `client-auth-guard.ts` reads it and fails closed on
- *     missing (every /v1/messages 401s). `headless-settings.ts` uses it for
- *     hook `x-api-key`, and `turn-runner.ts` propagates it as ANTHROPIC_API_KEY
- *     to spawned claude subprocesses. There is no `CUSTOS_CLIENT_API_KEY`
- *     env var fallback, so a future prune is a real migration -- needs an
- *     alternate auth path first.
+ *   - (none — the previous `clientApiKey` entry was a proxy-era holdover
+ *     that has now been stripped alongside the client-auth gate. See
+ *     `clientApiKey`'s `@deprecated` note on the GatewayConfig interface
+ *     for the migration story.)
  */
 function pruneStaleFields(fileConfig: Partial<GatewayConfig>): void {
   // JSON.parse can include fields the GatewayConfig type doesn't list
@@ -360,6 +365,15 @@ function pruneStaleFields(fileConfig: Partial<GatewayConfig>): void {
   const stale = fileConfig as Partial<GatewayConfig> & Record<string, unknown>;
   delete stale.complexityRouting;
   delete stale.openaiCompatibleInstances;
+  // Drop the legacy client-auth gate's stored key. custos is no longer a
+  // Claude Code proxy, the /v1/messages + /hooks/* + /memory/search
+  // surface is reachable only from custos's own spawned subprocesses,
+  // and the client-auth-guard.ts stub is a no-op. Keeping the field
+  // would just be a stale-secret-on-disk footgun for users who migrated
+  // before the strip; pruning it at read means the file converges to
+  // canonical shape on every restart, matching the same pattern
+  // openaiCompatibleInstances / complexityProvider use.
+  delete stale.clientApiKey;
   // Embeddings moved to a global agent (commit 2 of the global-agent
   // split). The on-disk field stopped being read by runtime after that
   // commit landed; keeping the type optional lets legacy config.json
@@ -419,8 +433,14 @@ export async function saveConfig(config: GatewayConfig): Promise<void> {
   if (anthropic?.apiKey && (await getApiKeySource()) === "env" && anthropic.apiKey === process.env.ANTHROPIC_API_KEY) {
     anthropic.apiKey = undefined;
   }
-  // Drop the deprecated field -- we write the new shape going forward.
+  // Drop the deprecated fields -- we write the new shape going forward.
+  // `clientApiKey` is the proxy-era shared secret for /v1/messages
+  // client access; since the surface is now internal-only we strip it on
+  // write so saving through the admin UI doesn't stomp the canonical
+  // read-time prune and re-persist a stale key back to disk in any
+  // install that hasn't yet restarted post-strip.
   delete toPersist.openaiCompatibleInstances;
+  delete toPersist.clientApiKey;
   await mkdir(dirname(CONFIG_PATH), { recursive: true });
   await writeFile(CONFIG_PATH, JSON.stringify(toPersist, null, 2), "utf8");
 }
