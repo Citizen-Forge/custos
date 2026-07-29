@@ -45,12 +45,15 @@ async function main() {
 
   // One-time migration: existing agents created before the fallback-set
   // architecture carry providerKey/model with no fallbackSet. Apply the
-  // role-appropriate default fallback set to each and reset pmConfigured
-  // so the Project Manager re-evaluates on the next tick. Safe to call
-  // on every startup — already-migrated agents are skipped.
-  const migrated = await migrateToFallbackSets();
+  // role-appropriate default fallback set to each, normalize the legacy
+  // primary pick to the fallback set's first entry, and reset pmConfigured
+  // so the Project Manager re-evaluates on the next tick. Safe to call on
+  // every startup — already-migrated agents are skipped. `runtime.config`
+  // is the source of truth for which fallback sets exist and what their
+  // first entries are; reload() above has already populated it.
+  const migrated = await migrateToFallbackSets(runtime.config);
   if (migrated > 0) {
-    console.log(`[migrate] Applied fallback-set defaults to ${migrated} agent(s) and queued PM re-evaluation.`);
+    console.log(`[migrate] Applied fallback-set defaults and primary-pick normalization to ${migrated} agent(s); queued PM re-evaluation.`);
   }
 
   const memoryStore = new MemoryStore(QDRANT_URL, EMBEDDING_VECTOR_SIZE);

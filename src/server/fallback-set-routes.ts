@@ -50,7 +50,7 @@ export function registerFallbackSetRoutes(app: FastifyInstance, runtime: Runtime
   app.post("/admin/api/projects/migrate-fallback-sets", async (_req, reply) => {
     try {
       const { migrateToFallbackSets } = await import("../pm/agents.js");
-      const migrated = await migrateToFallbackSets();
+      const migrated = await migrateToFallbackSets(runtime.config);
       return { ok: true, migrated };
     } catch (err) {
       reply.code(500);

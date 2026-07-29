@@ -156,35 +156,107 @@ export async function recordRunResult(id: string, outcome: { completed?: boolean
 }
 
 /**
- * Migrate every project and global agent that lacks a `fallbackSet` to use
- * the role-appropriate default from ROLE_DEFAULT_FALLBACK_SET, then reset
- * `pmConfigured` for each affected project so the Project Manager re-runs
- * and assigns proper fallback sets based on the current provider config.
+ * Migrate every project and global agent to the canonical fallback-set
+ * shape, in two passes per agent:
  *
- * Safe to call on every startup: agents that already have a fallbackSet
- * (or that were migrated on a previous boot) are skipped. Returns the
- * number of agents updated in this pass.
+ *   1. **Assign fallbackSet.** Agents missing one get the role-appropriate
+ *      default from ROLE_DEFAULT_FALLBACK_SET. Projects whose agents
+ *      received a new fallbackSet get `pmConfigured` reset so the Project
+ *      Manager re-evaluates against the current provider config.
+ *
+ *   2. **Normalize the "primary pick".** Every agent with a fallbackSet
+ *      has its `providerKey`/`model` set to the first entry of that
+ *      fallback set's providers. This is the operator-facing "primary
+ *      pick" displayed in the UI badge and tooltip; the runtime always
+ *      dispatches via the fallback chain, so the legacy `providerKey`/
+ *      `model` field is dashboard-decorative. Before this migration,
+ *      agents created by `ensureProjectAgents` carried `anthropic/
+ *      claude-sonnet-5` regardless of which fallback set the Project
+ *      Manager picked later — the UI then showed a stale claude-Sonnet
+ *      hint for an agent that was actually meant to run on the fallback
+ *      set's first entry.
+ *
+ * Formalizes the contract: **primary pick == first live entry of the
+ * fallback set.** Pure normalization (providerKey/model adjusted without
+ * changing the fallbackSet) does NOT trigger a pmConfigured reset, since
+ * the PM's decisions are about fallbackSet selection, not providerKey.
+ *
+ * Safe to call on every startup: agents already matching the contract
+ * are skipped (no-op). Returns the number of agents updated in this pass.
+ *
+ * Edge cases:
+ *   - Agent references a fallbackSet that no longer exists in config
+ *     (the user deleted the set) or has an empty providers array. The
+ *     agent's providerKey/model are left untouched (no valid first entry
+ *     to point at), but the project's pmConfigured is reset so the PM
+ *     re-runs on the next tick and picks a valid set. Without this, the
+ *     agent would dispatch to a non-existent set indefinitely and the
+ *     runtime would 503 on every request it tried to serve.
+ *   - Global agents (memory curator, embeddings, classifier) participate
+ *     in normalization too — they carry the same shape and benefit from
+ *     the same invariant.
  */
-export async function migrateToFallbackSets(): Promise<number> {
+
+export async function migrateToFallbackSets(config: GatewayConfig): Promise<number> {
   const allAgents = await agents.list();
   const projectIds = new Set<string>();
   let migrated = 0;
+  const fallbackSets = config.fallbackSets ?? {};
 
   for (const agent of allAgents) {
-    if (agent.fallbackSet) continue;
-    const fb = ROLE_DEFAULT_FALLBACK_SET[agent.role];
-    if (!fb) continue;
+    const updates: Partial<AgentDef> = {};
+    let fallbackSetChanged = false;
+    let orphanSet = false;
 
-    await agents.update(agent.id, (row) => {
-      row.fallbackSet = fb;
-      row.updatedAt = Date.now();
-    });
-    if (agent.projectId) projectIds.add(agent.projectId);
-    migrated++;
+    // Step 1: Apply role-default fallbackSet if missing.
+    if (!agent.fallbackSet) {
+      const fb = ROLE_DEFAULT_FALLBACK_SET[agent.role];
+      if (fb) {
+        updates.fallbackSet = fb;
+        fallbackSetChanged = true;
+      }
+    }
+
+    // Step 2: Normalize providerKey/model to the first entry of the
+    // (now-effective) fallback set, holding the contract that the
+    // operator-facing "primary pick" is always the first live entry.
+    const effectiveFb = (updates.fallbackSet ?? agent.fallbackSet) as string | undefined;
+    if (effectiveFb) {
+      const setDef = fallbackSets[effectiveFb];
+      const firstEntry = setDef?.providers[0];
+      if (firstEntry) {
+        if (agent.providerKey !== firstEntry.provider || agent.model !== firstEntry.model) {
+          updates.providerKey = firstEntry.provider;
+          updates.model = firstEntry.model;
+        }
+      } else {
+        // The agent references a fallbackSet that no longer exists in
+        // config (the user deleted the set) or has no providers. Track
+        // this so the project's pmConfigured flips false and the PM
+        // re-runs on the next tick — without that, the agent would
+        // dispatch to a non-existent set indefinitely and the runtime
+        // would 503 on every request it tried to serve.
+        orphanSet = true;
+      }
+    }
+
+    if (Object.keys(updates).length === 0 && !orphanSet) continue;
+
+    if (Object.keys(updates).length > 0) {
+      await agents.update(agent.id, (row) => {
+        Object.assign(row, updates);
+        row.updatedAt = Date.now();
+      });
+      migrated++;
+    }
+    if (agent.projectId && (fallbackSetChanged || orphanSet)) projectIds.add(agent.projectId);
   }
 
-  // Reset pmConfigured for every project whose agents were migrated so the
-  // PM re-evaluates on the next tick with the actual fallback-set config.
+  // Reset pmConfigured for every project whose agents had their fallbackSet
+  // changed, so the PM re-evaluates with the actual fallback-set config.
+  // Pure normalization (providerKey/model adjusted without changing the
+  // fallbackSet) doesn't affect PM decisions, so those projects stay
+  // pinned with pmConfigured=true.
   if (projectIds.size > 0) {
     for (const pid of projectIds) {
       const settings = await pmGetSettings(pid);
