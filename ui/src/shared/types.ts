@@ -309,6 +309,18 @@ export interface NowWorkingSummary {
   summary?: string | null;
   /** For failed runs: the error message, if any. */
   error?: string | null;
+  /** QA's verdict on this agent's most recent output. Mirrored from the
+   * src/ NowWorkingSummary defined alongside buildNowWorking in
+   * src/pm/now-working.ts -- same shape, same drift risk, same fix path.
+   * Surfaced on the engineer card's now-working row so an operator
+   * debugging a climbing `qaRejections` count sees the specific
+   * criterion + evidence QA flipped on, without re-opening the activity
+   * panel. Absent when QA has never reviewed this agent's output. */
+  lastQaBounce?: {
+    verdict: "pass" | "fail";
+    criterion?: string;
+    evidence?: string;
+  } | null;
   startedAt?: number;
   lastEventAt?: number;
   endedAt?: number | null;

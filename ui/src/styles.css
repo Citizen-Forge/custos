@@ -1424,6 +1424,37 @@ input[type='password'] {
   font-size: 11.5px;
   color: #c9ced8;
   overflow-wrap: anywhere;
+}/* Last QA bounce line -- the inline reason QA flipped on this agent's
+   most recent output. Sits below running-action inside the same
+   running-row. Uses the warn-yellow accent rather than failed-red so
+   the line reads as "look here for context" rather than compounding
+   the existing `failed` outcome badge above -- two reds in the same
+   card would compete and the eye would land on the weaker one.
+   Background is muted to the warn tint at low opacity, label is muted
+   gray, criterion text is the warn accent so the operator's eye
+   finds the criterion first. Full evidence text rides on the title
+   attribute so long evidence stays available without breaking the
+   row's single-line layout. */
+.qa-bounce {
+  margin-top: 6px;
+  padding: 5px 8px;
+  background: rgba(217, 193, 91, 0.07);
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.qa-bounce-label {
+  color: var(--muted);
+  font-weight: normal;
+}
+.qa-bounce-criterion {
+  color: var(--warn);
+  font-weight: 500;
 }
 
 .callout {

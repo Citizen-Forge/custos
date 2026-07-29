@@ -180,6 +180,24 @@ export default function TeamTab({
             ? <span className="card-error">{nw.error}</span>
             : nw.summary ?? <span className="muted">(no output)</span>}
         </div>
+        {/* Last QA bounce -- the inline reason QA flipped the verdict.
+            Hidden until runQa attaches a `lastQaBounce.verdict+criterion`
+            onto the engineer's run row (see src/pm/runs.ts:attachQaBounce
+            + src/pm/orchestrator.ts:runQa). Surfaced only on FAIL because
+            "succeeded" is already covered by the outcomeBadge above; the
+            noise asymmetry means the operator's eye lands on the line
+            when something needs attention and ignores it otherwise. The
+            evidence text goes on the title attribute so a long evidence
+            line is available on hover without breaking the row's
+            single-line layout. Operators debugging a climbing
+            qaRejections count should see the specific failing criterion
+            here, not have to open the activity panel and replay the run. */}
+        {nw.lastQaBounce?.verdict === 'fail' && nw.lastQaBounce.criterion && (
+          <div className="qa-bounce" title={nw.lastQaBounce.evidence ?? nw.lastQaBounce.criterion}>
+            <span className="qa-bounce-label">Last QA bounce:</span>{' '}
+            <span className="qa-bounce-criterion">{nw.lastQaBounce.criterion}</span>
+          </div>
+        )}
       </div>
     )
   }

@@ -35,6 +35,18 @@ export interface NowWorkingSummary {
   summary?: string | null;
   /** For failed runs: the error message, if any. */
   error?: string | null;
+  /** QA's verdict on this agent's most recent output, attached by runQa
+   * onto the engineer's run row. Surfaced on the engineer's card so a
+   * glance at "Last QA bounce: <reason>" answers why the rejection rate is
+   * climbing without clicking into run details. Absent for QA/devops/
+   * product-owner runs themselves (they produce work, not take review).
+   * Inline-fail criteria are picked at write-time -- the dataclass carries
+   * the verdict that flipped the outcome, not the full criteria array. */
+  lastQaBounce?: {
+    verdict: "pass" | "fail";
+    criterion?: string;
+    evidence?: string;
+  } | null;
   startedAt?: number;
   lastEventAt?: number;
   endedAt?: number | null;
@@ -67,7 +79,7 @@ export function buildNowWorking(
     fallbackSet?: string | null;
   }>,
   active: ReadonlyArray<{ agentId: string; id: string; status: string; workItemId: string | null; currentAction: string | null; startedAt: number; lastEventAt: number; error: string | null }>,
-  pastRuns: ReadonlyArray<{ agentId: string; id: string; status: string; workItemId: string | null; summary: string; error: string | null; startedAt: number; endedAt: number | null }>,
+  pastRuns: ReadonlyArray<{ agentId: string; id: string; status: string; workItemId: string | null; summary: string; error: string | null; startedAt: number; endedAt: number | null; qaBounce?: { verdict: "pass" | "fail"; criterion?: string; evidence?: string } }>,
   stalledIds: ReadonlyArray<string>,
   itemTitles: Record<string, string | null>,
 ): AgentNowWorking[] {
@@ -114,6 +126,10 @@ export function buildNowWorking(
           workItemDeleted: hasWid && title === null,
           summary: lastRun.summary ? lastRun.summary.slice(0, 120) : null,
           error: lastRun.error ?? null,
+          // The QA verdict carries forward from the agent-runner row
+          // populated by runQa -- no separate lookup needed because the
+          // engineer row IS the surface whose stats card shows qaRejections.
+          lastQaBounce: lastRun.qaBounce ?? null,
           startedAt: lastRun.startedAt,
           endedAt: lastRun.endedAt,
         };
