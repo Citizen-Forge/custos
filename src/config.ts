@@ -128,17 +128,29 @@ export interface ProviderDef {
    *  the global embeddings agent's `embeddingBaseUrl` field still wins
    *  over this when both are present. */
   embeddingUrl?: string;
-  /** Maximum size of a single /chat/completions request body (UTF-8
-   *  bytes). When set, the OpenAI-compatible provider strips the
-   *  oldest inline-base64 image parts until the body fits, then
-   *  returns a 413 if still over the cap (the upstream's own error
-   *  would be less specific). Set for tightly-capped hosts: Groq
-   *  is 32 MB, OpenRouter free tier varies by model. Leave unset
-   *  (no cap) for hosts that accept the full request -- Anthropic,
-   *  OpenAI API key, Mistral, etc. Carried through
-   *  `migrateInstanceToProvider` so the old `openaiCompatibleInstances`
-   *  shape keeps the value when migrating to the new shape. */
+  /** Maximum size, in bytes UTF-8, of a single /chat/completions request
+   *  body sent to this upstream. When set, `complete()` measures the
+   *  serialized OpenAI request and, if over the cap, replaces the
+   *  oldest inline-base64 image parts with a text placeholder until
+   *  the body fits. Set this for providers with smaller upstream
+   *  limits -- Groq hard-caps at 32 MB, OpenRouter free-tier has
+   *  varying per-model caps. Leaving unset keeps every image in full,
+   *  which is correct for upstream-tolerant hosts (Anthropic, OpenAI
+   *  API key, Mistral). The fit is purely best-effort: a request with
+   *  no inline images that's still over the limit fails loud so the
+   *  upstream's error surfaces to the operator instead of being
+   *  silently mangled. */
   maxRequestBytes?: number;
+  /** Pre-emptive truncation threshold, expressed as a fraction of
+   *  `maxRequestBytes`. When the serialized request exceeds
+   *  `maxRequestBytes * maxRequestBytesWarnRatio`, the oldest
+   *  conversation turns are truncated BEFORE the request reaches the
+   *  hard cap, keeping the conversation always below the limit.
+   *  Default 0.75 (truncate when the request reaches 75% of the cap).
+   *  Set to 1 to disable pre-emptive truncation and only strip on
+   *  hard cap (the pre-existing behavior). Only meaningful when
+   *  `maxRequestBytes` is also set. */
+  maxRequestBytesWarnRatio?: number;
 }
 
 export interface GatewayConfig {

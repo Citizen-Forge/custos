@@ -68,6 +68,13 @@ export interface OpenAICompatibleInstanceConfig {
    *  upstream's error surfaces to the operator instead of being
    *  silently mangled. */
   maxRequestBytes?: number;
+  /** Pre-emptive truncation threshold, expressed as a fraction of
+   *  `maxRequestBytes`. When the serialized request exceeds
+   *  `maxRequestBytes * maxRequestBytesWarnRatio`, the oldest
+   *  conversation turns are truncated BEFORE the request reaches the
+   *  hard cap, keeping the conversation always below the limit.
+   *  Default 0.75. Only meaningful when `maxRequestBytes` is set. */
+  maxRequestBytesWarnRatio?: number;
 }
 
 /**
@@ -96,21 +103,13 @@ export class OpenAICompatibleProvider implements Provider {
     // reject with its own generic message -- Groq's "accumulated images and attachments"
     // error in particular doesn't tell the operator which conversation to compact.
     if (this.config.maxRequestBytes !== undefined) {
-      const fit = fitRequestToSize(openaiRequest, this.config.maxRequestBytes);
-      if (fit.stripped > 0) {
-        // Keep an audit trail in the activity log so the operator can
-        // tell why a conversation came back smaller than claude-code
-        // sent it. Looks intimidating on stderr when working as designed
-        // (the strip is the only reason the request fit); quiet under
-        // the happy path where the body was already under the cap.
-        console.log(`[${this.name}] stripped ${fit.stripped} image(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)`);
-      }
-      openaiRequest = fit.request;
+      const warnRatio = Math.min(1, Math.max(0.1, this.config.maxRequestBytesWarnRatio ?? 0.75));
+      const fit = fitRequestToSize(openaiRequest, this.config.maxRequestBytes, warnRatio);
       if (fit.stripped > 0) {
         console.log(`[${this.name}] stripped ${fit.stripped} image(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)`);
       }
       if (fit.truncatedMessages > 0) {
-        console.log(`[${this.name}] truncated ${fit.truncatedMessages} old message(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)`);
+        console.log(`[${this.name}] truncated ${fit.truncatedMessages} old message(s) from request (${fit.initialBytes}B -> ${fit.finalBytes}B, cap=${this.config.maxRequestBytes}B, warnRatio=${warnRatio})`);
       }
       openaiRequest = fit.request;
       if (fit.stillOverLimit) {

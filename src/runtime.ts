@@ -485,6 +485,7 @@ export interface FallbackSetEntryHealth {
         priority: providerDef.priority,
         emitLateMetadataDelta: providerDef.emitLateMetadataDelta,
         maxRequestBytes: providerDef.maxRequestBytes,
+        maxRequestBytesWarnRatio: providerDef.maxRequestBytesWarnRatio,
       };
       bareProviders[name] = new OpenAICompatibleProvider(name, instanceConfig);
       stateMap.register(name, {

@@ -450,30 +450,60 @@ export interface FitRequestResult {
 
 /** Walk an OpenAIRequest and replace inline-base64 image parts with
  *  text placeholders, oldest first, until the body fits `maxBytes`.
+ *  When `warnRatio` is set (default 0.75), pre-emptively truncate
+ *  oldest conversation turns when the request exceeds `maxBytes *
+ *  warnRatio` — even if it's still under `maxBytes` — keeping the
+ *  conversation always below the warning threshold and preventing
+ *  the hard 413 entirely.
  *
  * Algorithm:
  *  1. Clone the request so the caller's reference is untouched.
- *  2. Compute initial size. If already under `maxBytes`, return
- *     unchanged (no strip).
- *  3. Build a list of all eligible strip targets (one per inline
- *     base64 image_url part, in oldest-first walk order = messages[N]
- *     then parts[N]).
- *  4. For each target, measure its byte contribution by
- *     simulating a single replacement off the original, then size
- *     delta. Summing cumulative cuts oldest-first lets us decide the
- *     minimum number of strips in O(n) work, then one final
- *     `serializeRequestBytes` confirms size.
- *  5. If the cumulative cut reaches `initialBytes - maxBytes`,
- *     strip those targets and return; if even with all targets
- *     stripped we can't fit, return `stillOverLimit: true`.
+ *  2. Compute initial size. If already under `maxBytes` AND under
+ *     `maxBytes * warnRatio`, return unchanged (no strip).
+ *  3. If `maxBytes * warnRatio < initialBytes <= maxBytes`, this is
+ *     a pre-emptive warning: run `truncateOldestMessages` to bring
+ *     the body back under the warning threshold. No images are
+ *     stripped (they were fine at the hard-cap level; the warning
+ *     is about conversation size growth).
+ *  4. If `initialBytes > maxBytes`, proceed with the existing hard-cap
+ *     path: strip oldest inline-base64 images until the body fits
+ *     `maxBytes`, falling through to text truncation as a last
+ *     resort. Returns `stillOverLimit: true` only when even
+ *     everything stripped+truncated can't fit.
  *
  * Only `data:`-prefixed image_url parts are eligible. URL-only image
  * references stay (their URL string is the byte cost and is already
  * small). Both message content and tool-result content are walked
  * because `anthropicMessageToOpenAI` emits content arrays there too. */
-export function fitRequestToSize(req: OpenAIRequest, maxBytes: number): FitRequestResult {
+export function fitRequestToSize(req: OpenAIRequest, maxBytes: number, warnRatio: number = 0.75): FitRequestResult {
   const initialBytes = serializeRequestBytes(req);
+  const warnBytes = Math.floor(maxBytes * warnRatio);
+
+  // Below both the hard cap AND the warning threshold: nothing to do.
+  if (initialBytes <= warnBytes) {
+    return { request: req, stripped: 0, truncatedMessages: 0, stillOverLimit: false, initialBytes, finalBytes: initialBytes };
+  }
+
+  // Above the warning threshold but still UNDER the hard cap: run
+  // pre-emptive text truncation to bring the body back under the
+  // warning threshold. No images are stripped (they were fine at
+  // the hard-cap level; the warning is about conversation size
+  // growth). If truncation can't bring it under the warning level
+  // (e.g. a single huge turn with no old messages), we still pass
+  // the request through — the hard cap will catch it on the next
+  // turn.
   if (initialBytes <= maxBytes) {
+    const truncated = truncateOldestMessages(req, initialBytes, warnBytes);
+    if (truncated) {
+      // Final check: if still over the warning threshold even after
+      // truncation, return what we have rather than blocking the
+      // request. The hard cap hasn't been reached yet.
+      if (truncated.stillOverLimit) {
+        return { ...truncated, stillOverLimit: false };
+      }
+      return truncated;
+    }
+    // Nothing to truncate (only 2 messages) — let the request through.
     return { request: req, stripped: 0, truncatedMessages: 0, stillOverLimit: false, initialBytes, finalBytes: initialBytes };
   }
 
