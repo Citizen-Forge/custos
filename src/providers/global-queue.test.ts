@@ -475,6 +475,64 @@ describe("GlobalQueue", () => {
     Date.now = () => origNow; // reset
   });
 
+  // -- non-2xx responses -----------------------------------------------
+
+  it("records upstream error body in activity log for non-2xx responses", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama");
+    const errorProvider: Provider = {
+      name: "ollama",
+      complete: async () => ({
+        status: 401,
+        headers: new Headers({ "content-type": "application/json" }),
+        body: new Blob([JSON.stringify({ error: { message: "invalid API key", type: "authentication_error" } })]).stream(),
+      }),
+    };
+    const q = new GlobalQueue({ ollama: errorProvider }, state);
+
+    const result = await q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ);
+    assert.equal(result.status, 401, "non-2xx response forwarded to caller");
+    assert.equal(result.providerName, "ollama", "providerName stamped on response");
+
+    const recent = q.queueActivityLog().recent(20);
+    const failedEvent = recent.find((e) => e.outcome === "failed");
+    assert.ok(failedEvent, "expected a failed event in the activity log");
+    assert.ok(failedEvent!.errorMessage, "failed event carries an errorMessage");
+    assert.ok(
+      failedEvent!.errorMessage!.startsWith("HTTP 401:"),
+      `errorMessage should start with 'HTTP 401:', got: "${failedEvent!.errorMessage}"`,
+    );
+    assert.ok(
+      failedEvent!.errorMessage!.includes("invalid API key"),
+      `errorMessage should include the upstream error text, got: "${failedEvent!.errorMessage}"`,
+    );
+  });
+
+  it("non-2xx without a response body falls back to the default error message", async () => {
+    const state = new ProviderStateMap();
+    state.register("ollama");
+    const providerWithoutBody: Provider = {
+      name: "ollama",
+      complete: async () => ({
+        status: 400,
+        headers: new Headers(),
+        body: null,
+      }),
+    };
+    const q = new GlobalQueue({ ollama: providerWithoutBody }, state);
+
+    await q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ);
+
+    const recent = q.queueActivityLog().recent(10);
+    const failedEvent = recent.find((e) => e.outcome === "failed");
+    assert.ok(failedEvent, "expected a failed event");
+    assert.equal(
+      failedEvent!.errorMessage,
+      "HTTP 400 from provider",
+      `fallback message when body is null, got: "${failedEvent!.errorMessage}"`,
+    );
+  });
+
   // -- priority queuing -------------------------------------------------------
 
   it("priority is passed through to the provider on dispatched requests", async () => {

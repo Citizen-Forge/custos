@@ -152,6 +152,33 @@ interface QueuedEntry {
   timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 }
 
+/** Read the first 200 chars of a response body for inclusion in the
+ *  activity log's error message. Tees the stream so the original body
+ *  remains available for the caller. Returns the default
+ *  `"HTTP ${status} from provider"` on any failure (no body, tee fails,
+ *  read fails) so the queue never surfaces a blank message. */
+async function extractErrorMessage(response: ProviderResponse): Promise<string> {
+  if (!response.body) return `HTTP ${response.status} from provider`;
+  try {
+    const [forLog, forCaller] = response.body.tee();
+    response.body = forCaller;
+    const reader = forLog.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode(); // flush remaining bytes
+    const trimmed = text.trim().slice(0, 200);
+    if (!trimmed) return `HTTP ${response.status} from provider`;
+    return `HTTP ${response.status}: ${trimmed}`;
+  } catch {
+    return `HTTP ${response.status} from provider`;
+  }
+}
+
 export class GlobalQueue {
   private readonly interactiveQueue: QueuedEntry[] = [];
   private readonly backgroundQueue: QueuedEntry[] = [];
@@ -284,6 +311,7 @@ export class GlobalQueue {
         // the response so the caller can forward the error upstream
         // and the claude -p subprocess can act on it.
         const okStatus = response.status >= 200 && response.status < 300;
+        const errorText = okStatus ? undefined : await extractErrorMessage(response);
         this.recordEvent({
           requestId,
           timestamp: Date.now(),
@@ -292,7 +320,7 @@ export class GlobalQueue {
           provider: entry.provider,
           model: entry.model,
           durationMs: Date.now() - startedAt,
-          ...(okStatus ? {} : { errorMessage: `HTTP ${response.status} from provider` }),
+          ...(errorText !== undefined ? { errorMessage: errorText } : {}),
           ...context,
         });
         return { ...response, providerName: entry.provider };
@@ -581,6 +609,7 @@ export class GlobalQueue {
       const response = await provider.complete(request, options);
       this.state.recordSuccess(name);
       const okStatus = response.status >= 200 && response.status < 300;
+      const errorText = okStatus ? undefined : await extractErrorMessage(response);
       this.recordEvent({
         requestId: entry.requestId,
         timestamp: Date.now(),
@@ -589,7 +618,7 @@ export class GlobalQueue {
         provider: name,
         model: options?.modelOverride,
         durationMs: Date.now() - entry.queuedAt,
-        ...(okStatus ? {} : { errorMessage: `HTTP ${response.status} from provider` }),
+        ...(errorText !== undefined ? { errorMessage: errorText } : {}),
         ...entry.context,
       });
       return { ...response, providerName: name };
