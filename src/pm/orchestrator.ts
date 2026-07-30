@@ -400,6 +400,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         "",
         "Promote conservatively — a ticket in `ready` will be picked up and worked autonomously, so a vague one costs real money. Epics are never worked directly, so only promote an epic once its stories exist and are themselves ready.",
         "",
+        "If an item is still blocked on the same thing you already noted in a previous comment and nothing has changed, do NOT add another comment repeating it — re-stating an unchanged blocker on every grooming pass (\"Re-checked: still blocked on X\", \"Re-verified: no change\") only adds noise to the ticket's history without adding information. Only comment on an item when there's something new to say: a changed circumstance, a decision only you can make, or the first time you're flagging a blocker.",
+        "",
         "## Backlog",
         "",
         backlog.map((item) => renderWorkItem(item, { includeComments: true })).join("\n\n"),
@@ -649,12 +651,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       await this.applyFacts(projectId, agent, result.parsed);
       if (!result.ok || !result.parsed) {
-        await board.addComment(workItemId, agent.id, agentStore.displayName(agent), `Run failed: ${result.error ?? "unknown error"}`);
-        // Back off rather than re-dispatching on the very next tick -- the
-        // usual cause is the agent's pinned provider being rate limited,
-        // and hammering it just burns the retry budget too.
+        // Not persisted as a board comment (see the identical note on the
+        // QA path below) -- the live activity feed below already surfaces
+        // this, and a ticket that keeps failing on a rate-limited/flaky
+        // provider would otherwise accumulate an unbounded pile of
+        // "Run failed: ..." comments, one per retry, forever.
         const backedOff = await board.recordAttemptFailure(workItemId);
-        this.emit("activity", projectId, `${agent.name} failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}); will retry.`);
+        this.emit("activity", projectId, `${agent.name} failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${result.error ?? "unknown error"}; will retry.`);
         return;
       }
       await board.clearAttempts(workItemId);
@@ -750,7 +753,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) {
-        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `QA run failed: ${result.error ?? "unknown error"}`);
+        // Not persisted as a board comment -- a ticket that keeps failing
+        // QA on the same transient cause (rate limit, spawn error, flaky
+        // provider) would otherwise accumulate an unbounded pile of
+        // "QA run failed: ..." comments, one per retry, forever. Two real
+        // tickets independently reached 4,000+ comments this way, which
+        // pushed the spawned `claude -p` subprocess's argv+environ past the
+        // OS's ARG_MAX (EBIG) on every subsequent attempt -- a ticket that
+        // could never recover once poisoned. The live activity feed still
+        // surfaces the failure without persisting it into ticket history.
+        this.emit("activity", projectId, `${ctx.agent.name} QA run failed on "${item.title}": ${result.error ?? "unknown error"}`);
         return;
       }
 
@@ -1113,7 +1125,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) {
-        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `Deployment run failed: ${result.error ?? "unknown error"}`);
+        // Not persisted as a board comment -- see the identical note on
+        // the QA path above.
+        this.emit("activity", projectId, `${ctx.agent.name} deployment run failed on "${item.title}": ${result.error ?? "unknown error"}`);
         return;
       }
 
