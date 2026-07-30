@@ -212,13 +212,29 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     if (!res.ok) {
+      // Capture the upstream's response body once -- it feeds both the
+      // diagnostic trace below (we log the first 200 chars so an
+      // operator can tell "Request too large" apart from "Daily quota
+      // exhausted" or "Model decommissioned": the byte counts alone can't
+      // disambiguate, but the upstream's literal response text can) and
+      // the existing forward-to-client path at the bottom of this
+      // block. Reads the body regardless of status because we don't
+      // know yet whether 413 / 429 / 5xx / 4xx applies -- upstream
+      // error envelopes are a few KB at most, so the cost is negligible.
+      // A failed read (already-consumed stream, network blip) leaves
+      // `upBodyText` as "" which downstream uses as an empty blob.
+      let upBodyText = "";
+      try { upBodyText = await res.text(); } catch { /* keep "" */ }
+
       // Diagnostic: distinguish an upstream 413 (we DID send a body and
-      // Groq/etc rejected its size) from our own fitRequestToSize
-      // stillOverLimit return (which never reaches the fetch). On
-      // upstream 413 we also log the bytes we actually sent.
+      // Groq/etc rejected it) from our own fitRequestToSize
+      // stillOverLimit return (which never reaches the fetch). Snippet
+      // trimmed to 200 chars and whitespace-collapsed so log lines stay
+      // readable when the upstream returns an escaped JSON block.
       if (res.status === 413 && this.config.maxRequestBytes !== undefined) {
         const sentBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
-        console.log(`[dispatch-byte-trace] ${this.name}: UPSTREAM-413 after-sending=${sentBytes}B cap=${this.config.maxRequestBytes}B`);
+        const snippet = upBodyText.slice(0, 200).replace(/\s+/g, " ").trim();
+        console.log(`[dispatch-byte-trace] ${this.name}: UPSTREAM-413 after-sending=${sentBytes}B cap=${this.config.maxRequestBytes}B body=${JSON.stringify(snippet)}`);
       }
       if (res.status === 429 || res.status >= 500) {
         // Surface the upstream's Retry-After to the router so the
@@ -237,8 +253,7 @@ export class OpenAICompatibleProvider implements Provider {
         // across providers.
         throw new ProviderUnavailableError(`${this.name}: HTTP ${res.status}`, parseRetryAfterMs(res.headers));
       }
-      const text = await res.text().catch(() => "");
-      return { status: res.status, headers: res.headers, body: new Blob([text]).stream() };
+      return { status: res.status, headers: res.headers, body: new Blob([upBodyText]).stream() };
     }
 
     if (openaiRequest.stream) {
