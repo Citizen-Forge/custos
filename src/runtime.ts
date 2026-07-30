@@ -6,6 +6,7 @@ import { ProviderStateMap } from "./providers/provider-state.js";
 import { ActivityLog, type DispatchContext } from "./providers/activity-log.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import type { AnthropicMessagesRequest } from "./types.js";
+import { ProviderUnavailableError } from "./types.js";
 import type { Provider, CompleteOptions, ProviderResponse } from "./providers/types.js";
 import type { EmbeddingConfig } from "./memory/embeddings.js";
 import { getGlobalAgent } from "./pm/global-agents.js";
@@ -146,6 +147,15 @@ export interface FallbackSetEntryHealth {
    *  No Runtime-level wrapper sits between callers and the queue —
    *  the queue is the dispatch surface. */
   private queue: GlobalQueue | null = null;
+  /** Bare provider instances keyed by name. Held here separately from
+   *  the GlobalQueue so the pre-spawn probe (see `probeProvider` below
+   *  and `pm/probe.ts`) can call a provider's `complete()` directly
+   *  without going through the queue. Going through the queue would
+   *  double-count the agent-runner's already-acquired concurrency
+   *  slot on `maxConcurrent: 1` providers like the local Ollama and
+   *  would add a needless mark-cooling event to the activity log
+   *  every time the probe rejected an upstream. */
+  private bareProviders: Record<string, Provider> = {};
   /** Unsubscribe handles for the ProviderStateMap → model-registry
    *  availability listener chain. Re-bound on every reload so the
    *  previous bindings (in case anyone else has registered listeners)
@@ -197,6 +207,51 @@ export interface FallbackSetEntryHealth {
   /** Access the GlobalQueue for direct calls (e.g. from agent-runner). */
   get globalQueue(): GlobalQueue | null {
     return this.queue;
+  }
+
+  /**
+   * Fires a 1-token probe straight at the named provider+model, bypassing
+   * the GlobalQueue entirely. Caller is responsible for inspecting the
+   * returned `ProviderResponse` and throwing if the upstream rejects
+   * (see `pm/probe.ts` for the policy). Kept here on the Runtime rather
+   * than exposed via a queue accessor because the probe is intentionally
+   * a different dispatch surface -- it goes around availability
+   * accounting, around the activity log, around cooldown writes -- so
+   * callers see only one "pre-spawn probe rejected" line on failure
+   * rather than a queue/noise/markCooling cascade.
+   *
+   * OpenAI-compatible providers throw `ProviderUnavailableError` on 429/5xx
+   * before the probe can read the response body. We catch that and reduce
+   * it to a synthetic `ProviderResponse` whose status matches what the
+   * provider WOULD have returned, so the probe's status-based policy
+   * (`429 → abort as rate-limited`, `5xx → proceed`) still fires for the
+   * common case without any per-call special casing in `probe.ts`.
+   *
+   * The `model` argument is forwarded as `modelOverride` so the probe
+   * always pins to the agent's fallback-set entry rather than the
+   * provider's constructed default. Without this the probe would send
+   * to whatever the provider was configured with first (e.g. the
+   * healthy `llama-3.1-8b-instant`) even when the failing entry is
+   * the SECOND model in the set (`llama-3.3-70b-versatile`, which has
+   * the 12k TPM cap on free Groq). The probe's signal would then be
+   * a false negative on every cycle.
+   */
+  async probeProvider(providerKey: string, model: string, request: AnthropicMessagesRequest): Promise<ProviderResponse> {
+    const provider = this.bareProviders[providerKey];
+    if (!provider) {
+      throw new Error(`runtime.probeProvider: no registered provider for "${providerKey}"`);
+    }
+    try {
+      return await provider.complete(request, { priority: "background", modelOverride: model });
+    } catch (err) {
+      if (err instanceof ProviderUnavailableError) {
+        const match = /HTTP (\d{3})/.exec(err.message);
+        const status = match ? Number(match[1]) : 503;
+        const headers = new Headers();
+        return { status, headers, body: new Blob([]).stream() };
+      }
+      throw err;
+    }
   }
 
   /** Start the periodic OAuth-mirror re-mirror timer. Idempotent — a second
@@ -553,6 +608,10 @@ export interface FallbackSetEntryHealth {
     } else {
       this.queue = new GlobalQueue(bareProviders, stateMap, this.activityLog);
     }
+    // Mirror the bare provider map onto the Runtime so pre-spawn probes
+    // can bypass the GlobalQueue without each probe call reconstructing
+    // the provider graph from config (see `probeProvider` above).
+    this.bareProviders = bareProviders;
 
     await this.refreshEmbedding();
   }

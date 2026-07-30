@@ -7,6 +7,7 @@ import { resolveAgentEnv, redactSecrets } from "./vault.js";
 import * as runs from "./runs.js";
 import * as agents from "./agents.js";
 import { RUN_TIMEOUT_MS, type AgentDef } from "./types.js";
+import { ProbeUnavailableError, runPreSpawnProbe } from "./probe.js";
 
 export interface AgentRunResult<T> {
   runId: string;
@@ -181,6 +182,41 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   const releaseSlot = resolved?.release ?? null;
   if (!effectiveProviderKey || !effectiveModel) {
     throw new Error(`agent ${agent.id} has no fallbackSet or no live primary pick; the PM must assign one before this run can be dispatched`);
+  }
+  // Pre-spawn probe: a 1-token ping to the resolved provider+model.
+  // Sits between resolveFallbackSet (which acquired the concurrency
+  // slot) and runs.startRun (which would create a run artefact) so a
+  // failed probe leaves no run record but propagates back through
+  // AgentRunResult.error -- the orchestrator's existing failure path
+  // (board.addComment + board.recordAttemptFailure) surfaces the reason
+  // to the activity feed and bumps the workItem's attempt-failure
+  // counter for the standard back-off. Probe failures bypass the
+  // GlobalQueue entirely so the pre-acquired slot isn't double-counted
+  // toward maxConcurrent and the activity log isn't polluted by a
+  // mark-cooling cascade for what is really a "don't even try" signal.
+  try {
+    await runPreSpawnProbe(runtime, effectiveProviderKey, effectiveModel);
+  } catch (err) {
+    if (err instanceof ProbeUnavailableError) {
+      if (releaseSlot) releaseSlot();
+      return {
+        runId: `probe-failed-${Date.now().toString(36)}`,
+        ok: false,
+        parsed: null,
+        text: "",
+        error: err.message,
+        costUsd: null,
+        runMs: 0,
+      };
+    }
+    // Any non-ProbeUnavailableError from the probe (network timeout,
+    // TypeError, "no registered provider", ProviderUnavailableError
+    // re-thrown from the bare provider on 429/5xx) would otherwise
+    // leave the concurrency slot acquired by `resolveFallbackSet`
+    // pinned until the next process restart. Release here so the
+    // slot is freed regardless of how the probe failed.
+    if (releaseSlot) releaseSlot();
+    throw err;
   }
   // Whether this run's reported cost is real money is decided here, from
   // the provider/model that the run will actually dispatch against --
