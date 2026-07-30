@@ -24,6 +24,24 @@ export function describeAgentPick(agent: AgentDef, config: GatewayConfig): strin
  * so every role sees a ticket described the same way -- a QA agent and the
  * engineer whose work it's judging must be reading the same fields. */
 
+/** Hard caps on how many comments/history entries `renderWorkItem` embeds
+ *  into an agent prompt. Without this, a ticket that cycles through many
+ *  failed automated attempts -- each attempt's failure logged as a new
+ *  comment via `board.addComment` -- grows its comment list without bound,
+ *  and every future render re-embeds the *entire* history, including all
+ *  the past failure comments. Once that pushes a spawned `claude -p`
+ *  subprocess's combined argv+environ past the OS's ARG_MAX, every
+ *  subsequent attempt fails at spawn time (`E2BIG`) before it can even
+ *  reach a provider -- which itself gets logged as another failure
+ *  comment, guaranteeing the ticket can never recover. Observed live on
+ *  two pre-PR-enforcement tickets that had independently reached 4,447
+ *  and 4,508 comments (~230KB each) purely from repeated QA-attempt
+ *  failure logging. Capped to the most recent entries -- exactly the ones
+ *  relevant to "what's the current state of this ticket" -- rather than
+ *  every entry ever recorded. */
+const MAX_RENDERED_COMMENTS = 30;
+const MAX_RENDERED_HISTORY = 20;
+
 export function renderWorkItem(item: WorkItem, opts: { includeComments?: boolean; includeHistory?: boolean } = {}): string {
   const lines = [
     `### ${item.type.toUpperCase()} ${item.id} — ${item.title}`,
@@ -40,10 +58,22 @@ export function renderWorkItem(item: WorkItem, opts: { includeComments?: boolean
     lines.push("", "**Subtasks**", ...item.subtasks.map((s) => `- [${s.done ? "x" : " "}] ${s.title}`));
   }
   if (opts.includeComments && item.comments.length) {
-    lines.push("", "**Comments**", ...item.comments.map((c) => `- **${c.authorLabel}**: ${c.body}`));
+    const shown = item.comments.slice(-MAX_RENDERED_COMMENTS);
+    const omitted = item.comments.length - shown.length;
+    lines.push(
+      "",
+      omitted > 0 ? `**Comments** (showing the most recent ${shown.length} of ${item.comments.length} — ${omitted} earlier omitted)` : "**Comments**",
+      ...shown.map((c) => `- **${c.authorLabel}**: ${c.body}`),
+    );
   }
   if (opts.includeHistory && item.history.length) {
-    lines.push("", "**History**", ...item.history.map((h) => `- ${new Date(h.at).toISOString()} ${h.actor}: ${h.from ?? "—"} → ${h.to}${h.note ? ` (${h.note})` : ""}`));
+    const shown = item.history.slice(-MAX_RENDERED_HISTORY);
+    const omitted = item.history.length - shown.length;
+    lines.push(
+      "",
+      omitted > 0 ? `**History** (showing the most recent ${shown.length} of ${item.history.length} — ${omitted} earlier omitted)` : "**History**",
+      ...shown.map((h) => `- ${new Date(h.at).toISOString()} ${h.actor}: ${h.from ?? "—"} → ${h.to}${h.note ? ` (${h.note})` : ""}`),
+    );
   }
   return lines.join("\n");
 }
