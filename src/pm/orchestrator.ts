@@ -768,7 +768,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // QA rounds' comments survive across bounce-rework-re-review cycles.
       if (contract.prComments?.length) {
         const existing = (await board.getWorkItem(workItemId))?.prComments ?? [];
-        await board.updateWorkItem(workItemId, { prComments: [...existing, ...contract.prComments] });
+        await board.updateWorkItem(workItemId, { prComments: [...existing, ...contract.prComments.filter(Boolean)] });
       }
 
       // QA's verdict is the only honest measure of whether the model that
