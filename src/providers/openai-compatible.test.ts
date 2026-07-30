@@ -168,6 +168,58 @@ describe("OpenAICompatibleProvider: Retry-After surfaces to ProviderUnavailableE
     );
   });
 
+  it("a 400 mentioning thought_signature routes to the next fallback entry WITHOUT cooling the provider (Gemini cross-provider tool-call mismatch)", async () => {
+    // Regression: Gemini's tool-calling protocol requires a
+    // thought_signature on every function-call turn it's asked to
+    // continue. If a fallback-set conversation's tool_use history came
+    // from a *different* provider on an earlier turn (e.g. Groq handled
+    // turn 1, Gemini picks up turn 2), that signature was never produced
+    // -- a Gemini-specific concept the other vendor doesn't have. This
+    // says nothing about whether Gemini is healthy for a *different*
+    // request, so it must NOT call markCooling/recordFailure (that's
+    // what skipCooldown is for) even though it still needs to fail over
+    // to the next fallback-set entry.
+    const body = JSON.stringify({
+      error: {
+        message: "Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly.",
+      },
+    });
+    await withStubbedFetch({ status: 400, headers: {}, body }, async () => {
+      const provider = new OpenAICompatibleProvider("gemini", {
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+        model: "gemini-3.5-flash-lite",
+      });
+      await assert.rejects(
+        () => provider.complete(VALID_REQ),
+        (err: unknown) => {
+          assert.ok(err instanceof ProviderUnavailableError,
+            `expected ProviderUnavailableError, got ${(err as Error).name}`);
+          assert.equal((err as ProviderUnavailableError).skipCooldown, true,
+            "must not cool the whole provider down over a request-specific incompatibility");
+          assert.match((err as Error).message, /thought_signature/i);
+          return true;
+        },
+      );
+    });
+  });
+
+  it("a 400 WITHOUT thought_signature wording returns upstream status unchanged (not thrown)", async () => {
+    // Contract gap guard: an ordinary 400 (malformed request, bad JSON,
+    // etc.) must not be swept into the skipCooldown fallback path -- only
+    // the specific Gemini cross-provider tool-call signature should.
+    await withStubbedFetch(
+      { status: 400, headers: {}, body: "{\"error\":\"malformed request body\"}" },
+      async () => {
+        const provider = new OpenAICompatibleProvider("gemini", {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+          model: "gemini-3.5-flash-lite",
+        });
+        const res = await provider.complete(VALID_REQ);
+        assert.equal(res.status, 400);
+      },
+    );
+  });
+
   it("non-429/5xx responses return upstream status unchanged (not thrown)", async () => {
     // Contract gap guard: a 400 (or any non-429, non-5xx) means a
     // malformed client request, not an upstream-availability

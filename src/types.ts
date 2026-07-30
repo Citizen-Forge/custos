@@ -82,6 +82,19 @@ export class ProviderUnavailableError extends Error {
   constructor(
     message: string,
     public readonly retryAfterMs?: number,
+    /** When true, the GlobalQueue advances to the next fallback-set entry
+     *  WITHOUT calling markCooling/recordFailure on this provider. Use this
+     *  for failures that are specific to the current request/conversation
+     *  (e.g. a tool-call history that carries another vendor's continuation
+     *  state Gemini won't accept) rather than genuine provider-wide
+     *  unavailability (rate limit, outage). A real rate limit legitimately
+     *  cools the provider down for every caller; a cross-provider
+     *  vendor-metadata mismatch says nothing about whether the provider can
+     *  serve a *different* request right now, so cooling it would
+     *  incorrectly penalize unrelated healthy traffic for the cooldown
+     *  window. Defaults to false so every existing caller keeps today's
+     *  cooldown behavior unless it opts in. */
+    public readonly skipCooldown?: boolean,
   ) {
     super(message);
     this.name = "ProviderUnavailableError";

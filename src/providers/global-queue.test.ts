@@ -195,6 +195,35 @@ describe("GlobalQueue", () => {
     assert.equal(state.canAccept("gemini"), false, "gemini marked cooling after 429");
   });
 
+  it("fails over WITHOUT cooling the provider when ProviderUnavailableError.skipCooldown is set", async () => {
+    // Regression: a request-specific failure (e.g. Gemini rejecting a
+    // tool-call history that came from a different provider earlier in
+    // the same fallback-set conversation) says nothing about whether
+    // Gemini can serve a *different* request right now. Cooling the
+    // whole provider over it would incorrectly block unrelated healthy
+    // traffic for the cooldown window. skipCooldown must still fail over
+    // to the next entry, just without touching ProviderStateMap.
+    const state = new ProviderStateMap();
+    state.register("gemini", { cooldownFallbackMs: 60_000 });
+    state.register("ollama");
+    const gemini: Provider = {
+      name: "gemini",
+      complete: () => Promise.reject(new ProviderUnavailableError("gemini: incompatible tool-call history", undefined, true)),
+    };
+    const { provider: ollama, resolvePromise: resolveOllama } = makeRecordingProvider("ollama");
+    const q = new GlobalQueue({ gemini, ollama }, state);
+
+    const p = q.complete(
+      [{ provider: "gemini", model: "gemini-3.5-flash-lite" }, { provider: "ollama", model: "qwen2.5:14b" }],
+      ZERO_REQ,
+    );
+
+    resolveOllama(OK_RESPONSE);
+    const result = await p;
+    assert.equal(result.providerName, "ollama", "failed over to ollama after gemini's skipCooldown error");
+    assert.equal(state.canAccept("gemini"), true, "gemini must NOT be marked cooling — the failure was request-specific");
+  });
+
   it("queues (rather than fails fast) when ALL available providers fail, and surfaces a queue-timeout if none recover in time", async () => {
     // Regression: tryExecute used to throw the last upstream error
     // immediately once every fallback-set entry had been tried and

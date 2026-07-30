@@ -335,12 +335,20 @@ export class GlobalQueue {
       } catch (err) {
         if (err instanceof ProviderUnavailableError) {
           lastError = err;
-          this.state.markCooling(entry.provider, err.retryAfterMs, this.state.get(entry.provider)?.cooldownFallbackMs ?? null);
-          // Circuit breaker check.
-          const breakerDeadline = this.state.recordFailure(entry.provider);
-          if (breakerDeadline !== null) {
-            // Update cooling until to include breaker duration.
-            this.state.markCooling(entry.provider, breakerDeadline - Date.now());
+          // skipCooldown: this failure is specific to the current request
+          // (e.g. a cross-provider tool-call vendor-metadata mismatch), not
+          // evidence the provider itself is down or rate-limited -- cooling
+          // it here would incorrectly penalize unrelated healthy requests
+          // for the cooldown window. Still advance to the next fallback
+          // entry; just don't touch the provider's availability state.
+          if (!err.skipCooldown) {
+            this.state.markCooling(entry.provider, err.retryAfterMs, this.state.get(entry.provider)?.cooldownFallbackMs ?? null);
+            // Circuit breaker check.
+            const breakerDeadline = this.state.recordFailure(entry.provider);
+            if (breakerDeadline !== null) {
+              // Update cooling until to include breaker duration.
+              this.state.markCooling(entry.provider, breakerDeadline - Date.now());
+            }
           }
           this.recordEvent({
             requestId,
@@ -651,10 +659,15 @@ export class GlobalQueue {
       return { ...response, providerName: name };
     } catch (err) {
       if (err instanceof ProviderUnavailableError) {
-        this.state.markCooling(name, err.retryAfterMs, this.state.get(name)?.cooldownFallbackMs ?? null);
-        const breakerDeadline = this.state.recordFailure(name);
-        if (breakerDeadline !== null) {
-          this.state.markCooling(name, breakerDeadline - Date.now());
+        // skipCooldown: see the identical guard in tryExecute() -- a
+        // request-specific failure (cross-provider vendor-metadata
+        // mismatch) isn't evidence this provider is down for everyone else.
+        if (!err.skipCooldown) {
+          this.state.markCooling(name, err.retryAfterMs, this.state.get(name)?.cooldownFallbackMs ?? null);
+          const breakerDeadline = this.state.recordFailure(name);
+          if (breakerDeadline !== null) {
+            this.state.markCooling(name, breakerDeadline - Date.now());
+          }
         }
         this.recordEvent({
           requestId: entry.requestId,

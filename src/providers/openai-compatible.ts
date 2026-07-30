@@ -251,6 +251,24 @@ export class OpenAICompatibleProvider implements Provider {
       if (res.status === 413 && looksRateLimited(upBodyText)) {
         throw new ProviderUnavailableError(`${this.name}: rate limited (413 TPM/RPM)`, parseRetryAfterMs(res.headers));
       }
+      // Gemini's tool-calling protocol requires a `thought_signature` on
+      // every function-call turn it's asked to continue -- if this
+      // conversation's tool_use history came from a *different* provider
+      // earlier (a fallback-set reroute mid-conversation, e.g. Groq handled
+      // an earlier turn and Gemini picked up a later one), that signature
+      // was never produced, since it's a Gemini-specific concept the other
+      // vendor doesn't have. This is unrelated to whether Gemini itself is
+      // healthy -- a fresh conversation, or the next request from a
+      // different agent, will dispatch to Gemini fine. So this routes
+      // through the fallback-set's next entry (skipCooldown: true) rather
+      // than the rate-limit path: no markCooling/recordFailure, since
+      // cooling the whole provider over one incompatible conversation would
+      // incorrectly block unrelated healthy requests. See
+      // openai-translate.ts's "VENDOR CARRIER STRATEGY" header comment for
+      // the broader limitation this is one instance of.
+      if (res.status === 400 && /thought_signature/i.test(upBodyText)) {
+        throw new ProviderUnavailableError(`${this.name}: tool-call history incompatible with this provider (missing thought_signature)`, undefined, true);
+      }
       if (res.status === 429 || res.status >= 500) {
         // Surface the upstream's Retry-After to the router so the
         // cooldown deadline matches reality. Without this, Gemini
