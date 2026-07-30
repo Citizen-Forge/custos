@@ -99,15 +99,22 @@ export default function TicketDetail({
                   )}
                   {data.item.prComments?.length > 0 && (
                     <div className="pr-comments">
-                      {data.item.prComments.map((comment, i) => (
-                        <div className="pr-comment" key={i}>
-                          <div className="comment-head">
-                            <strong>QA</strong>
-                            <span className="muted">· just now</span>
+                      {data.item.prComments.map((entry, i) => {
+                        // Handle both the new object shape ({text, createdAt})
+                        // and legacy plain strings stored before timestamps
+                        // were added to the data model.
+                        const text = typeof entry === 'string' ? entry : entry.text;
+                        const ts = typeof entry === 'string' ? null : entry.createdAt;
+                        return (
+                          <div className="pr-comment" key={i}>
+                            <div className="comment-head">
+                              <strong>QA</strong>
+                              <span className="muted">{ts ? relativeTime(ts) : '· just now'}</span>
+                            </div>
+                            <div className="comment-body">{text}</div>
                           </div>
-                          <div className="comment-body">{comment}</div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </section>

@@ -766,9 +766,15 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // exists on GitHub — it makes the review visible without leaving
       // the admin panel. Appended to any existing PR comments so earlier
       // QA rounds' comments survive across bounce-rework-re-review cycles.
+      // Each comment is stored with a createdAt timestamp so the UI can
+      // show real relative times rather than a static "just now" label.
       if (contract.prComments?.length) {
         const existing = (await board.getWorkItem(workItemId))?.prComments ?? [];
-        await board.updateWorkItem(workItemId, { prComments: [...existing, ...contract.prComments.filter(Boolean)] });
+        const now = Date.now();
+        const newEntries = contract.prComments
+          .filter(Boolean)
+          .map((text: string) => ({ text, createdAt: now }));
+        await board.updateWorkItem(workItemId, { prComments: [...existing, ...newEntries] });
       }
 
       // QA's verdict is the only honest measure of whether the model that
