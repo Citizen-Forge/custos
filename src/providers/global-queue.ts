@@ -45,13 +45,21 @@ const DEFAULT_AGED_MS = 5_000;
 /** Wall-clock the queue gives an enqueued request to find a dispatchable
  *  provider. After this elapses without successful dispatch the request
  *  is moved to the dead-letter buffer and the awaiter sees
- *  ProviderUnavailableError("queue timeout: ...", 5_000). The default
- *  is 60s — long enough to absorb a short upstream cooldown (Gemini
- *  Free tier's typical 30s reset, Ollama's transient 5xx of ~10-20s)
- *  but short enough that an operator sees stuck work within one
- *  eyeball-pass of the admin panel. Configurable via the constructor
- *  for tests (which would otherwise have to wait 60s of wall clock). */
-const DEFAULT_ENQUEUE_TIMEOUT_MS = 60_000;
+ *  ProviderUnavailableError("queue timeout: ...", 5_000). 180s — long
+ *  enough to outlast a full Groq TPM cooldown (60s, see
+ *  provider-state.ts's DEFAULT_COOLDOWN_MS) with margin for a second
+ *  attempt against the next fallback entry, plus Gemini Free's RPM
+ *  refill and Ollama finishing whatever it's currently serving. A
+ *  60s budget (the previous default) could expire at almost the exact
+ *  moment Groq's own cooldown lifted, forcing the caller (the `claude`
+ *  CLI subprocess's Anthropic SDK client) to eat a 503 and burn its own
+ *  much smaller retry budget instead of just waiting the extra few
+ *  seconds inside the gateway, where the fallback-aware retry (pumpAll)
+ *  already lives. Still short enough that an operator sees stuck work
+ *  within a few eyeball-passes of the admin panel. Configurable via the
+ *  constructor for tests (which would otherwise have to wait wall-clock
+ *  minutes). */
+const DEFAULT_ENQUEUE_TIMEOUT_MS = 180_000;
 /** retryAfterMs threaded into the ProviderUnavailableError raised when
  *  the enqueue deadline fires. 5s is a generous client-side retry
  *  hint: if the queue timed out at 60s, asking again 5s later is

@@ -409,7 +409,12 @@ describe("GlobalQueue", () => {
     const callOrder: string[] = [];
     const { provider: a, resolvePromise: resolveA } = makeRecordingProvider("a");
     const { provider: b, resolvePromise: resolveB } = makeRecordingProvider("b");
-    const q = new GlobalQueue({ a, b }, state);
+    // Explicit short timeout: this test doesn't exercise the enqueue-timeout
+    // value itself, so it shouldn't be at the mercy of the production
+    // default (raised to 180s to outlast a Groq TPM cooldown -- see
+    // DEFAULT_ENQUEUE_TIMEOUT_MS in global-queue.ts). Keeps a pre-existing,
+    // unrelated flake fast to fail instead of tripling its CI hang time.
+    const q = new GlobalQueue({ a, b }, state, undefined, { enqueueTimeoutMs: 5_000 });
 
     // Queue interactive (goes to a), then background (also waits for a).
     const interactive = q.complete([{ provider: "a", model: "m" }], ZERO_REQ, { priority: "interactive" });
@@ -554,7 +559,9 @@ describe("GlobalQueue", () => {
     const state = new ProviderStateMap();
     state.register("old");
     const { provider: old, resolvePromise: resolveOld } = makeRecordingProvider("old");
-    const q = new GlobalQueue({ old }, state);
+    // Explicit short timeout -- see the identical comment on "pump drains
+    // interactive before background" above.
+    const q = new GlobalQueue({ old }, state, undefined, { enqueueTimeoutMs: 5_000 });
 
     // Dispatch through old provider.
     const p1 = q.complete([{ provider: "old", model: "m" }], ZERO_REQ);
@@ -601,7 +608,9 @@ describe("GlobalQueue", () => {
     const release = state.acquire("a"); // saturate
 
     const { provider: a } = makeRecordingProvider("a");
-    const q = new GlobalQueue({ a }, state);
+    // Explicit short timeout -- see the identical comment on "pump drains
+    // interactive before background" above.
+    const q = new GlobalQueue({ a }, state, undefined, { enqueueTimeoutMs: 5_000 });
 
     const p = q.complete([{ provider: "a", model: "m" }], ZERO_REQ);
     assert.equal(q.queuedTotal, 1);

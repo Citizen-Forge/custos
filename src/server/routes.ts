@@ -182,6 +182,17 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     } catch (err) {
       const message = err instanceof ProviderUnavailableError ? err.message : "internal gateway error";
       reply.code(err instanceof ProviderUnavailableError ? 503 : 500);
+      // Without this, a 503 carried no Retry-After at all -- the caller
+      // (the Anthropic SDK inside the `claude` CLI subprocess, which
+      // does honor Retry-After on 5xx) had nothing to back off against
+      // and either hammered immediately on its own short retry budget
+      // or surfaced the 503 as a fatal turn error. err.retryAfterMs is
+      // already in ms (set by the queue's enqueue-timeout / provider
+      // dispatch paths); HTTP wants whole seconds, rounded up so we
+      // never advertise less wait than was actually intended.
+      if (err instanceof ProviderUnavailableError && err.retryAfterMs !== undefined) {
+        reply.header("retry-after", String(Math.ceil(err.retryAfterMs / 1000)));
+      }
       return { type: "error", error: { type: "overloaded_error", message } };
     }
 
