@@ -663,6 +663,81 @@ export function fitRequestToSize(req: OpenAIRequest, maxBytes: number, warnRatio
   };
 }
 
+/** Helper: try to fit a single message's content under the size cap by
+ *  truncating oversized text portions. Handles both string content
+ *  (existing behavior — keep head 60 % / tail 40 %) and array content
+ *  (agent conversations with tool results, file reads, etc.). Mutates
+ *  `messages[idx].content` in place when truncation is possible.
+ *  Returns `{ fits: boolean, bytes: number }` — the `bytes` field
+ *  lets the caller avoid a redundant re-serialization.
+ *
+ *  For array content, the function finds the largest text parts and
+ *  truncates them progressively (keeping head ~60 % / tail ~40 %),
+ *  skipping parts whose text is already small (< 1 KB). Inline base64
+ *  image parts are replaced with the text placeholder since they are
+ *  the largest per-part byte consumers. Returns `{ fits: false }`
+ *  when even the content at index 0 (system prompt) alone exceeds the
+ *  cap — no amount of per-part truncation can save it. */
+function truncateMessageContent(
+  messages: OpenAIMessage[],
+  idx: number,
+  maxBytes: number,
+  tools?: { type: "function"; function: { name: string; description?: string; parameters: unknown } }[],
+): { fits: boolean; bytes: number } {
+  const msg = messages[idx];
+  const measure = () => serializeRequestBytes({ model: "", messages, tools: tools ?? undefined, max_tokens: undefined, stream: undefined });
+  if (typeof msg.content === "string") {
+    if (msg.content.length <= 1024) return { fits: false, bytes: 0 };
+    const quarter = Math.max(512, Math.floor(msg.content.length * 0.25));
+    msg.content = msg.content.slice(0, Math.floor(quarter * 0.6)) +
+      "\n...[truncated by Custos to fit request size limit]...\n" +
+      msg.content.slice(-Math.floor(quarter * 0.4));
+    const bytes = measure();
+    return { fits: bytes <= maxBytes, bytes };
+  }
+  if (Array.isArray(msg.content)) {
+    const parts = msg.content;
+    let changed = false;
+
+    // Pass 1: replace inline base64 images with the text placeholder.
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (isInlineBase64ImagePart(p)) {
+        parts[i] = OMITTED_IMAGE_PLACEHOLDER;
+        changed = true;
+      }
+    }
+    if (changed) {
+      const bytes = measure();
+      if (bytes <= maxBytes) return { fits: true, bytes };
+    }
+
+    // Pass 2: find and truncate the largest text parts, one at a time,
+    // until under the cap or no part is > 1 KB.
+    const textParts: Array<{ idx: number; part: OpenAITextPart }> = [];
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (p.type === "text" && p.text.length > 1024) {
+        textParts.push({ idx: i, part: p });
+      }
+    }
+
+    // Sort largest-first by text byte length.
+    textParts.sort((a, b) => Buffer.byteLength(b.part.text, "utf8") - Buffer.byteLength(a.part.text, "utf8"));
+
+    for (const { idx, part } of textParts) {
+      const quarter = Math.max(512, Math.floor(part.text.length * 0.25));
+      const p = parts[idx] as OpenAITextPart;
+      p.text = part.text.slice(0, Math.floor(quarter * 0.6)) +
+        "\n...[truncated by Custos to fit request size limit]...\n" +
+        part.text.slice(-Math.floor(quarter * 0.4));
+      const bytes = measure();
+      if (bytes <= maxBytes) return { fits: true, bytes };
+    }
+  }
+  return { fits: false, bytes: 0 };
+}
+
 /** True when an OpenAI message looks like a provider error that was echoed
  *  back into the conversation history. The claude subprocess receives error
  *  responses and includes them as assistant/user messages in the next
@@ -803,24 +878,17 @@ function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxByt
   // original size by taking the first and last portions. The system
   // prompt is the agent instructions — losing the middle is better than
   // a 413.
-  if (clone.messages.length >= 1 && typeof clone.messages[0].content === "string") {
-    const sysContent = clone.messages[0].content;
-    if (sysContent.length > 1024) {
-      const quarter = Math.max(512, Math.floor(sysContent.length * 0.25));
-      clone.messages[0].content = sysContent.slice(0, Math.floor(quarter * 0.6)) +
-        "\n...[truncated by Custos to fit request size limit]...\n" +
-        sysContent.slice(-Math.floor(quarter * 0.4));
-      const sysBytes = serializeRequestBytes(clone);
-      if (sysBytes <= maxBytes) {
-        return {
-          request: clone,
-          stripped: 0,
-          truncatedMessages: removedCount,
-          stillOverLimit: false,
-          initialBytes: currentBytes,
-          finalBytes: sysBytes,
-        };
-      }
+  if (clone.messages.length >= 1) {
+    const result = truncateMessageContent(clone.messages, 0, maxBytes, clone.tools);
+    if (result.fits) {
+      return {
+        request: clone,
+        stripped: 0,
+        truncatedMessages: removedCount,
+        stillOverLimit: false,
+        initialBytes: currentBytes,
+        finalBytes: result.bytes,
+      };
     }
   }
 
@@ -829,24 +897,17 @@ function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxByt
   // is the session context that accumulates "Run failed" entries over
   // time. Truncating it preserves decisions and key info from the head
   // and tail while shedding the bloated middle.
-  if (clone.messages.length >= 2 && typeof clone.messages[1].content === "string") {
-    const msgContent = clone.messages[1].content;
-    if (msgContent.length > 1024) {
-      const quarter = Math.max(512, Math.floor(msgContent.length * 0.25));
-      clone.messages[1].content = msgContent.slice(0, Math.floor(quarter * 0.6)) +
-        "\n...[truncated by Custos to fit request size limit]...\n" +
-        msgContent.slice(-Math.floor(quarter * 0.4));
-      const finalBytes = serializeRequestBytes(clone);
-      if (finalBytes <= maxBytes) {
-        return {
-          request: clone,
-          stripped: 0,
-          truncatedMessages: removedCount,
-          stillOverLimit: false,
-          initialBytes: currentBytes,
-          finalBytes,
-        };
-      }
+  if (clone.messages.length >= 2) {
+    const result = truncateMessageContent(clone.messages, 1, maxBytes, clone.tools);
+    if (result.fits) {
+      return {
+        request: clone,
+        stripped: 0,
+        truncatedMessages: removedCount,
+        stillOverLimit: false,
+        initialBytes: currentBytes,
+        finalBytes: result.bytes,
+      };
     }
   }
 
