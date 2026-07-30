@@ -101,6 +101,10 @@ export default function TicketDetail({
                     <div className="pr-comments">
                       {data.item.prComments.map((comment, i) => (
                         <div className="pr-comment" key={i}>
+                          <div className="comment-head">
+                            <strong>QA</strong>
+                            <span className="muted">· just now</span>
+                          </div>
                           <div className="comment-body">{comment}</div>
                         </div>
                       ))}
