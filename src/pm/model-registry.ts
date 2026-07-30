@@ -69,7 +69,7 @@ export function classifyBilling(providerKey: string, config: GatewayConfig): Bil
   // Prefer the new providers shape, fall back to deprecated.
   const def = config.providers?.[providerKey];
   if (def) return def.costType === "metered" ? "metered" : def.costType === "subscription" ? "subscription" : "free";
-  const instance = config.openaiCompatibleInstances[providerKey];
+  const instance = config.openaiCompatibleInstances?.[providerKey];
   return instance?.pricing ? "metered" : "free";
 }
 
@@ -203,7 +203,7 @@ export async function syncFromConfig(config: GatewayConfig, anthropicModels: str
     }
   } else {
     // Fall back to deprecated openaiCompatibleInstances.
-    for (const [key, instance] of Object.entries(config.openaiCompatibleInstances)) {
+    for (const [key, instance] of Object.entries(config.openaiCompatibleInstances ?? {})) {
       await ensureModel(key, instance.model, config);
     }
   }

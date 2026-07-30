@@ -298,7 +298,7 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
     }
   }
   // Also check legacy instances in case no new-shape provider has a cap.
-  for (const instance of Object.values(config.openaiCompatibleInstances)) {
+  for (const instance of Object.values(config.openaiCompatibleInstances ?? {})) {
     if (instance.maxRequestBytes !== undefined) {
       if (maxRequestBytes === undefined || instance.maxRequestBytes < maxRequestBytes) {
         maxRequestBytes = instance.maxRequestBytes;

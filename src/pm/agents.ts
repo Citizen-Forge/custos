@@ -331,7 +331,7 @@ export function listProviderOptions(config: GatewayConfig): ProviderOption[] {
     }
   }
   // Also read from the deprecated shape for backward compat.
-  for (const [key, instance] of Object.entries(config.openaiCompatibleInstances)) {
+  for (const [key, instance] of Object.entries(config.openaiCompatibleInstances ?? {})) {
     // Skip if already covered by the new providers shape (dedup by name).
     if (options.some((o) => o.providerKey === key)) continue;
     options.push({

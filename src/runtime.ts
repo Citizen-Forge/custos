@@ -512,7 +512,7 @@ export interface FallbackSetEntryHealth {
     // they need per-vendor cooldown defaults (e.g. setting Gemini
     // Free to 5min or Ollama to 30s). Until then, the global 60s
     // default kicks in.
-    for (const [name, instance] of Object.entries(config.openaiCompatibleInstances)) {
+    for (const [name, instance] of Object.entries(config.openaiCompatibleInstances ?? {})) {
       if (bareProviders[name]) continue;
       bareProviders[name] = new OpenAICompatibleProvider(name, instance);
       stateMap.register(name, {
