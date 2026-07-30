@@ -269,6 +269,35 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
   return factsStored;
 }
 
+/** Extract text from a message content value that may be a plain string,
+ *  an array of content blocks (the format Claude Code's session files use,
+ *  and what Anthropic's Messages API returns for multi-block responses),
+ *  or any other shape.  Returns the concatenated text or null when nothing
+ *  text-shaped is present. */
+function extractContentText(content: unknown): string | null {
+  if (typeof content === "string") return content || null;
+  if (Array.isArray(content)) {
+    const texts: string[] = [];
+    for (const block of content) {
+      if (block && typeof block === "object" && "type" in block) {
+        if (block.type === "text" && typeof block.text === "string") {
+          texts.push(block.text);
+        } else if (block.type === "tool_result" && typeof block.content === "string") {
+          texts.push(block.content);
+        } else if (block.type === "tool_result" && Array.isArray(block.content)) {
+          for (const inner of block.content) {
+            if (inner && typeof inner === "object" && inner.type === "text" && typeof inner.text === "string") {
+              texts.push(inner.text);
+            }
+          }
+        }
+      }
+    }
+    return texts.length > 0 ? texts.join("\n") : null;
+  }
+  return null;
+}
+
 /** Scans session files and compacts the oldest half of exchanges when the
  *  estimated dispatch size exceeds the compaction threshold (60 % of the
  *  smallest `maxRequestBytes` across all configured providers). The oldest
@@ -366,13 +395,19 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
       }
       const messages = parsed.request?.messages;
       const msg = messages?.at?.(-1);
-      if (msg && typeof msg.content === "string") {
-        // If this is the first line and it carries a system message, emit
-        // that first so the conversation reads correctly.
-        if (accumulatedMessages.length === 0 && msg.role === "system") {
-          accumulatedMessages.push({ role: "system", content: msg.content });
-        } else if (msg.role === "user") {
-          accumulatedMessages.push({ role: "user", content: msg.content });
+      if (msg) {
+        // Content can be a plain string or an array of content blocks;
+        // Claude Code's session format uses the array shape even for
+        // simple text, so the string-only check from the original code
+        // would silently drop every message and leave the estimate at
+        // ~13 bytes — far below any plausible threshold.
+        const text = extractContentText(msg.content);
+        if (text) {
+          if (accumulatedMessages.length === 0 && msg.role === "system") {
+            accumulatedMessages.push({ role: "system", content: text });
+          } else if (msg.role === "user") {
+            accumulatedMessages.push({ role: "user", content: text });
+          }
         }
       }
       const assistantBlock = parsed.response?.content?.find((b) => b.type === "text");
@@ -392,7 +427,15 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
     const combinedReq = { messages: accumulatedMessages };
     const bytes = Buffer.byteLength(JSON.stringify(combinedReq), "utf8");
 
-    if (bytes <= compactThreshold) continue;
+    if (bytes <= compactThreshold) {
+      // Debug-visible so an operator wondering "why isn't compaction
+      // firing on this 125 MB session" can see the estimate in the
+      // container logs without deploying instrumentation.
+      if (bytes > compactThreshold * 0.5) {
+        console.log(`[compact] ${file}: ${(bytes / 1024 / 1024).toFixed(1)} MB estimated vs ${(compactThreshold / 1024 / 1024).toFixed(1)} MB threshold; skipping`);
+      }
+      continue;
+    }
 
     // Compact the oldest half of exchanges.
     const compactCount = Math.max(1, Math.floor(lines.length / 2));
