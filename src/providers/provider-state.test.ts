@@ -261,11 +261,18 @@ describe("ProviderStateMap", () => {
     assert.ok(entry.coolingUntil >= origNow + 300_000);
   });
 
-  it("markCooling is a no-op when both retryAfterMs and fallbackMs are null", () => {
+  it("markCooling applies the 60s default cooldown when both retryAfterMs and fallbackMs are null", () => {
+    // Regression: a provider with no cooldownFallbackMs configured and an
+    // upstream that sends no Retry-After header (Groq's 413 TPM envelope)
+    // must still actually cool down -- otherwise canAccept() keeps
+    // returning true and the next request hits the same exhausted
+    // provider again immediately.
     const m = new ProviderStateMap();
     m.register("ollama");
     m.markCooling("ollama", null, null);
-    assert.equal(m.get("ollama")!.coolingUntil, null);
+    const entry = m.get("ollama")!;
+    assert.ok(entry.coolingUntil !== null);
+    assert.ok(entry.coolingUntil >= origNow + 60_000);
   });
 
   it("markCooling is a no-op for an unregistered provider", () => {

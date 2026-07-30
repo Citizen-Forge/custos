@@ -1,5 +1,6 @@
 import type { Runtime } from "../runtime.js";
 import type { AnthropicMessagesRequest } from "../types.js";
+import { looksRateLimited } from "../providers/rate-limit-signature.js";
 
 export type ProbeReason =
   | "rate-limited"
@@ -45,17 +46,26 @@ export class ProbeUnavailableError extends Error {
  *  cheap (skip one turn); a false negative costs the agent thirty
  *  seconds of futile work, so the regex is biased toward catching. */
 const PROBE_KEYWORDS: ReadonlyArray<[RegExp, ProbeReason]> = [
-  [/tokens per minute|tokens-per-minute|\bTPM\b|requests per minute|requests-per-minute|\bRPM\b|rate[- ]limit|usage[- ]limit|quota exceeded|exceeded.*quota|current quota/i, "rate-limited"],
-  [/invalid api[-_ ]key|incorrect api[-_ ]key|unauthorized|authentication[- ]?(failed|error)|\b401\b/i, "auth"],
+  [/invalid api[-_ ]key|incorrect api[-_ ]key|unauthorized|authentication[- ]?(failed|error)|\b401\b|oauth.{0,80}(?:session|token|refresh).{0,40}(?:expired|fail(?:ed)?)|refresh[- ]token.{0,40}(?:fail|expired|invalid)|credential.{0,40}(?:expired|invalid)|api[-_ ]?key.{0,40}(?:expired|invalid)/i, "auth"],
   [/decommissioned|no longer (being )?served|model.{0,80}?(?:is[- ]not[- ]?available|not found)|not found|does not exist|unknown model/i, "decommissioned"],
 ];
 
 function matchReason(text: string): ProbeReason | null {
+  if (looksRateLimited(text)) return "rate-limited";
   for (const [pattern, reason] of PROBE_KEYWORDS) {
     if (pattern.test(text)) return reason;
   }
   return null;
 }
+
+/** Hard ceiling on a single probe round-trip. Slow Ollama cold-loads
+ *  (~30 s) or Anthropic cold-starts (~20 s) would otherwise gate every
+ *  agent spawn that resolves to them, which is its own retry-storm
+ *  shape. On timeout we treat the probe like a slow upstream -- abort
+ *  with reason "unknown" so the orchestrator's failure path logs a
+ *  clear "probe timed out after 5s" comment instead of letting the
+ *  real spawn burn 30 s before failing the same way. */
+const PROBE_TIMEOUT_MS = 5_000;
 
 /** Fires a 1-token ping to the resolved provider+model and decides whether
  *  the upstream is currently usable. Bypasses the GlobalQueue so:
@@ -74,13 +84,18 @@ function matchReason(text: string): ProbeReason | null {
  *                       the next minute's tokens are reserved and the
  *                       agent is going to fail anyway.
  *   - other 4xx with body matching TPM / RPM / quota / auth /
- *     decommission keywords -- abort with the matched reason.
+ *     decommission keywords -- abort with the matched reason. The
+ *     auth bucket also catches OAuth session/token-expiry envelopes
+ *     like "OAuth session expired and could not be refreshed" --
+ *     without that match an OAuth-broken run falls through to "proceed"
+ *     and burns 30 s in claude -p before failing identically.
  *   - other 4xx without keyword match -- PROCEED. The model exists
  *     (its endpoint answered); the 4xx is some model-specific oddity
  *     the real request won't repeat.
  *   - 5xx            -- proceed. Transient upstream flakes are the real
  *     run's problem too; the existing dispatch path already
- *     retries/cooldowns via ProviderStateMap on the real request. */
+ *     retries/cooldowns via ProviderStateMap on the real request.
+ *   - timeout        -- abort as unknown. */
 export async function runPreSpawnProbe(
   runtime: Runtime,
   providerKey: string,
@@ -91,7 +106,20 @@ export async function runPreSpawnProbe(
     messages: [{ role: "user", content: "ping" }],
     max_tokens: 1,
   };
-  const res = await runtime.probeProvider(providerKey, model, request);
+  let res!: Awaited<ReturnType<typeof runtime.probeProvider>>;
+  try {
+    res = await Promise.race([
+      runtime.probeProvider(providerKey, model, request),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("probe timeout")), PROBE_TIMEOUT_MS).unref(),
+      ),
+    ]);
+  } catch (err) {
+    if (err instanceof Error && err.message === "probe timeout") {
+      throw new ProbeUnavailableError(providerKey, model, 0, "unknown", `probe timed out after ${PROBE_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  }
 
   if (res.status >= 200 && res.status < 300) return;
 

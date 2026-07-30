@@ -175,6 +175,56 @@ test("pre-spawn probe: error message includes providerKey/model so the activity 
   }
 });
 
+/** OAuth-expiry envelopes aren't matched by "invalid api key" or
+ *  "401", but they ARE auth failures. Without broadening the auth
+ *  bucket to include "OAuth session expired" / "token expired" /
+ *  "refresh token failed", an Anthropic OAuth drift would slip past
+ *  the probe and trigger the 30-second claude -p storm the probe is
+ *  designed to prevent. */
+test("pre-spawn probe: 4xx with OAuth session-expired body aborts auth", async () => {
+  const runtime = fakeRuntime(() =>
+    response(
+      400,
+      '{"error":{"message":"OAuth session expired and could not be refreshed"}}',
+    ),
+  );
+  await assert.rejects(
+    runPreSpawnProbe(runtime, "anthropic", "claude-sonnet-5"),
+    (err: unknown) =>
+      err instanceof ProbeUnavailableError &&
+      err.reason === "auth" &&
+      err.message.includes("OAuth"),
+  );
+});
+
+/** The probe must not block agent spawns indefinitely when an upstream
+ *  is slow (Ollama cold-load, Anthropic cold-start). A 5-second ceiling
+ *  converts the gate from "probe blocked the agent for 30 s" into
+ *  "probe timed out, agent kicks offs immediately", which is strictly
+ *  better even if the timeout itself aborts -- the real spawn would
+ *  fail anyway. */
+test("pre-spawn probe: slow upstream times out with reason=unknown", { timeout: 10_000 }, async () => {
+  const runtime = fakeRuntime(
+    () =>
+      new Promise<ProviderResponse>((resolve) => {
+        // Never resolve within the 5s probe ceiling. `.unref()` here
+        // ensures the test doesn't keep the runner alive for 30s in
+        // the wake of the probe rejection -- once the awaiting test
+        // function returns, the unresolved promise is no longer
+        // needed and shouldn't pin the loop.
+        const t = setTimeout(() => resolve(response(200, "{}")), 30_000);
+        t.unref();
+      }),
+  );
+  await assert.rejects(
+    runPreSpawnProbe(runtime, "ollama", "llama3.1:8b"),
+    (err: unknown) =>
+      err instanceof ProbeUnavailableError &&
+      err.status === 0 &&
+      err.reason === "unknown" &&        err.message.includes("timed out"),
+  );
+});
+
 test("pre-spawn probe: body stream unreadable doesn't crash the probe", async () => {
   // Some provider implementations lock the body stream after the status
   // is read; the probe MUST still abort on 401/403 even when the body

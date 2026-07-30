@@ -147,13 +147,25 @@ export interface ProviderDef {
    *  serialized OpenAI request and, if over the cap, replaces the
    *  oldest inline-base64 image parts with a text placeholder until
    *  the body fits. Set this for providers with smaller upstream
-   *  limits -- Groq hard-caps at 32 MB, OpenRouter free-tier has
-   *  varying per-model caps. Leaving unset keeps every image in full,
-   *  which is correct for upstream-tolerant hosts (Anthropic, OpenAI
-   *  API key, Mistral). The fit is purely best-effort: a request with
-   *  no inline images that's still over the limit fails loud so the
-   *  upstream's error surfaces to the operator instead of being
-   *  silently mangled. */
+   *  limits -- Groq hard-caps the literal wire-body size at 32 MB,
+   *  OpenRouter free-tier has varying per-model caps. Leaving unset
+   *  keeps every image in full, which is correct for upstream-tolerant
+   *  hosts (Anthropic, OpenAI API key, Mistral). The fit is purely
+   *  best-effort: a request with no inline images that's still over
+   *  the limit fails loud so the upstream's error surfaces to the
+   *  operator instead of being silently mangled.
+   *
+   *  NOTE: this cap is unrelated to Groq's per-model tokens-per-minute
+   *  (TPM) limit, which is far smaller (e.g. 12,000 TPM on the
+   *  on_demand tier for llama-3.3-70b-versatile) and triggers on
+   *  ordinary-sized requests once enough tokens have been sent within
+   *  the last 60 seconds. Groq reports the TPM rejection as HTTP 413
+   *  with "... on tokens per minute (TPM)" in the body -- the same
+   *  status code this cap uses for genuine oversized payloads, but a
+   *  different failure the byte-cap logic can't fix by trimming
+   *  images. See rate-limit-signature.ts / openai-compatible.ts's
+   *  413 handling, which sniffs the body to tell the two apart and
+   *  routes the TPM case through the cooldown+fallback path instead. */
   maxRequestBytes?: number;
   /** Pre-emptive truncation threshold, expressed as a fraction of
    *  `maxRequestBytes`. When the serialized request exceeds

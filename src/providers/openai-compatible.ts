@@ -1,6 +1,7 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type VendorMetadata } from "../types.js";
 import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf, fitRequestToSize, estimateTokens, serializeRequestBytes, estimateCompactPassBytes } from "./openai-translate.js";
 import { parseRetryAfterMs } from "./retry-header.js";
+import { looksRateLimited } from "./rate-limit-signature.js";
 import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
 
@@ -235,6 +236,20 @@ export class OpenAICompatibleProvider implements Provider {
         const sentBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
         const snippet = upBodyText.slice(0, 200).replace(/\s+/g, " ").trim();
         console.log(`[dispatch-byte-trace] ${this.name}: UPSTREAM-413 after-sending=${sentBytes}B cap=${this.config.maxRequestBytes}B body=${JSON.stringify(snippet)}`);
+      }
+      // Groq (and potentially other upstreams) report their TPM/RPM rate
+      // limit as HTTP 413 ("Request too large ... on tokens per minute
+      // (TPM)") instead of 429 -- indistinguishable from a genuine
+      // payload-too-large rejection by status code alone. Sniffing the
+      // body for rate-limit keywords routes it through the same
+      // ProviderUnavailableError path as a real 429: cooldown gets
+      // recorded and the GlobalQueue advances to the next entry in the
+      // fallback set. Without this, the request "succeeds" as a 413
+      // response as far as tryExecute() is concerned -- no cooldown, no
+      // fallback -- and the caller's retry loop just hits the same
+      // exhausted provider again.
+      if (res.status === 413 && looksRateLimited(upBodyText)) {
+        throw new ProviderUnavailableError(`${this.name}: rate limited (413 TPM/RPM)`, parseRetryAfterMs(res.headers));
       }
       if (res.status === 429 || res.status >= 500) {
         // Surface the upstream's Retry-After to the router so the

@@ -51,6 +51,16 @@ export type ProviderUnavailableListener = (provider: string, retryAfterMs: numbe
  *  sooner than advertised. */
 export type ProviderAvailableListener = (provider: string) => void;
 
+/** Applied by `markCooling` when neither the upstream's Retry-After nor a
+ *  per-provider `cooldownFallbackMs` is available. Without this, a
+ *  provider with no `cooldownFallbackMs` configured (e.g. Groq, whose TPM
+ *  rate limit rides in on an HTTP 413 with no Retry-After header) never
+ *  actually cools down on a ProviderUnavailableError -- `canAccept` keeps
+ *  returning true and the next request hits the same exhausted provider
+ *  again immediately. 60s matches Groq's TPM window (limits reset every
+ *  minute) and the cooldown-fallback value already used for Ollama. */
+const DEFAULT_COOLDOWN_MS = 60_000;
+
 export class ProviderStateMap {
   private readonly state = new Map<string, ProviderStateEntry>();
   /** Subscribers called from `markCooling` and `recordSuccess`. Plain Sets
@@ -182,8 +192,7 @@ export class ProviderStateMap {
   markCooling(name: string, retryAfterMs?: number | null, fallbackMs?: number | null): void {
     const entry = this.state.get(name);
     if (!entry) return;
-    const effectiveMs = retryAfterMs ?? fallbackMs ?? null;
-    if (effectiveMs === null) return;
+    const effectiveMs = retryAfterMs ?? fallbackMs ?? DEFAULT_COOLDOWN_MS;
     entry.coolingUntil = Date.now() + Math.max(1000, effectiveMs);
     const reason = retryAfterMs !== null && retryAfterMs !== undefined
       ? "upstream retry-after"
