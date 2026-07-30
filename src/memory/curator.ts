@@ -6,7 +6,7 @@ import { embed } from "./embeddings.js";
 import { MemoryStore } from "./store.js";
 import { getGlobalAgent } from "../pm/global-agents.js";
 import { primaryPick } from "../pm/agents.js";
-import { toOpenAIRequest } from "../providers/openai-translate.js";
+
 
 const SESSIONS_DIR = process.env.GATEWAY_SESSIONS_DIR ?? "data/sessions";
 const CURSOR_PATH = process.env.GATEWAY_CURATOR_CURSOR_PATH ?? "data/curator-cursor.json";
@@ -335,18 +335,62 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
 
   for (const file of files.filter((f) => f.endsWith(".jsonl"))) {
     const filePath = join(SESSIONS_DIR, file);
-    const content = await readFile(filePath, "utf8");
+    let content: string;
+    try {
+      content = await readFile(filePath, "utf8");
+    } catch (e) {
+      console.warn(`compact: skip unreadable file ${file}: ${(e as Error).message}`);
+      continue;
+    }
     const lines = content.split("\n").filter(Boolean);
     if (lines.length < 4) continue; // Too few lines to compact (< 2 turns).
 
-    // Estimate dispatch size from the LAST line's request, which already
-    // contains the full accumulated conversation up to that turn (all prior
-    // user messages + all prior assistant responses). Iterating every line's
-    // request.messages would accumulate N copies of the conversation (O(N²))
-    // and trigger compaction far below the intended threshold.
-    const lastParsed = JSON.parse(lines[lines.length - 1]);
-    const openaiReq = toOpenAIRequest(lastParsed.request, "estimation");
-    const bytes = Buffer.byteLength(JSON.stringify(openaiReq), "utf8");
+    // Estimate dispatch size by accumulating messages from ALL exchanges
+    // in chronological order (oldest first).  Each session line stores one
+    // exchange (not the accumulated round trip), so reading the last line
+    // alone would severely under-estimate the full conversation.
+    //
+    // For each line we extract the last user message and the first
+    // assistant text block, building a system/user/assistant/user/assistant
+    // sequence.  This gives a realistic estimate of what a dispatch of the
+    // whole accumulated conversation would cost, without the O(N²) cost of
+    // serialising every intermediate snapshot.
+    const accumulatedMessages: Array<{ role: string; content: string }> = [];
+    for (const line of lines) {
+      let parsed: { request?: { messages?: Array<{ role: string; content: unknown }> }; response?: { content?: Array<{ type: string; text?: string }> } };
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        console.warn(`compact: skipping malformed line in ${file}`);
+        continue;
+      }
+      const messages = parsed.request?.messages;
+      const msg = messages?.at?.(-1);
+      if (msg && typeof msg.content === "string") {
+        // If this is the first line and it carries a system message, emit
+        // that first so the conversation reads correctly.
+        if (accumulatedMessages.length === 0 && msg.role === "system") {
+          accumulatedMessages.push({ role: "system", content: msg.content });
+        } else if (msg.role === "user") {
+          accumulatedMessages.push({ role: "user", content: msg.content });
+        }
+      }
+      const assistantBlock = parsed.response?.content?.find((b) => b.type === "text");
+      if (assistantBlock?.text) {
+        accumulatedMessages.push({ role: "assistant", content: assistantBlock.text });
+      }
+    }
+    // Drop trailing assistant if the last exchange has no response yet
+    // (in-flight turns) so we don't count a half-pair.
+    while (
+      accumulatedMessages.length > 0 &&
+      accumulatedMessages[accumulatedMessages.length - 1].role === "assistant"
+    ) {
+      accumulatedMessages.pop();
+    }
+
+    const combinedReq = { messages: accumulatedMessages };
+    const bytes = Buffer.byteLength(JSON.stringify(combinedReq), "utf8");
 
     if (bytes <= compactThreshold) continue;
 

@@ -87,12 +87,26 @@ export default function TicketDetail({
                 {data.item.worktreePath && <span>own checkout</span>}
                 {data.item.qaRounds > 0 && <span className="warn-text">bounced by QA {data.item.qaRounds}x</span>}
               </div>
-              {data.item.prUrl && (
-                <p>
-                  <a href={data.item.prUrl} target="_blank" rel="noreferrer">
-                    {data.item.prUrl}
-                  </a>
-                </p>
+              {(data.item.prUrl || data.item.prComments.length > 0) && (
+                <section className="pr-activity">
+                  <h3>PR Activity</h3>
+                  {data.item.prUrl && (
+                    <p className="pr-link">
+                      <a href={data.item.prUrl} target="_blank" rel="noreferrer">
+                        View on GitHub ↗
+                      </a>
+                    </p>
+                  )}
+                  {data.item.prComments?.length > 0 && (
+                    <div className="pr-comments">
+                      {data.item.prComments.map((comment, i) => (
+                        <div className="pr-comment" key={i}>
+                          <div className="comment-body">{comment}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
               )}
 
               {data.item.description && <div className="prose">{data.item.description}</div>}

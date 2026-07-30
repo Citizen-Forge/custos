@@ -110,6 +110,7 @@ export interface WorkItem {
   comments: WorkItemComment[];
   labels: string[];
   prUrl: string | null;
+  prComments: string[];
   branch: string | null;
   worktreePath: string | null;
   attempts: number;

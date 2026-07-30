@@ -1106,6 +1106,51 @@ input[type='password'] {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.pr-activity {
+  margin: 16px 0 0;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.pr-activity h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.pr-link {
+  margin: 0 0 8px;
+}
+.pr-link a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 12.5px;
+}
+.pr-link a:hover {
+  text-decoration: underline;
+}
+.pr-comments {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pr-comment {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.pr-comment .comment-body {
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #c9ced8;
+}
+
 .history {
   margin-top: 16px;
   font-size: 11px;

@@ -16,7 +16,7 @@ export const ROLE_TRANSITIONS: Record<string, BoardStatus[]> = {
   "product-owner": ["backlog", "ready"],
   "engineering-manager": ["ready", "in_progress"],
   engineer: ["qa", "in_progress"],
-  qa: ["complete", "in_progress"],
+  qa: ["complete", "in_progress", "ready"],
   devops: ["complete"],
   human: ["backlog", "ready", "in_progress", "qa", "complete"],
 };
@@ -79,6 +79,7 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
     comments: [],
     labels: input.labels ?? [],
     prUrl: null,
+    prComments: [],
     branch: null,
     worktreePath: null,
     attempts: 0,
@@ -106,6 +107,7 @@ export type WorkItemPatch = Partial<
     | "labels"
     | "parentId"
     | "prUrl"
+    | "prComments"
     | "branch"
     | "worktreePath"
     | "assigneeAgentId"

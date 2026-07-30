@@ -54,6 +54,7 @@ export interface WorkItem {
   comments: Comment[];
   labels: string[];
   prUrl: string | null;
+  prComments: string[];
   branch: string | null;
   /** The isolated git worktree this ticket is being worked in, so several
    * engineers can run at once without sharing a working copy. Null before

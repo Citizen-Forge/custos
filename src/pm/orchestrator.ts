@@ -633,7 +633,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           ? `You are in your own git worktree at \`${workspace.cwd}\`, with branch \`${workspace.branch}\` already checked out for you off \`${settings.defaultBranch}\`. Commit to that branch — do not create another one, and do not switch branches. Other engineers are working other tickets in their own checkouts of this same repository at the same time, so stay within the files this ticket is about.`
           : `This project is not a git repository, so you are working directly in the shared project directory and are the only engineer running. Keep your changes tightly scoped.`,
         "",
-        "Work this ticket to completion, then report. You cannot mark it complete yourself — QA will review what you produce.",
+        "Work this ticket to completion. When the acceptance criteria are met, push your branch and open a pull request against the default branch. Without a PR, QA cannot review your work — the PR is the only review surface.",
       ].join("\n");
 
       const result = await runAgent<EngineerContract>(this.runtime, {
@@ -682,6 +682,23 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         return;
       }
 
+      // PR enforcement gate: if the project has a git repository and the
+      // engineer didn't open a pull request, warn and keep the ticket
+      // in_progress. QA reviews the PR diff, not the whole checkout, so
+      // a missing PR means QA has nothing to review. The engineer can be
+      // dispatched again (the ticket is still in_progress) and should
+      // push its branch and create the PR on the next attempt.
+      if (workspace.isolated && !contract.prUrl) {
+        await board.addComment(
+          workItemId,
+          agent.id,
+          agentStore.displayName(agent),
+          "**No pull request found.** The ticket was marked as complete but no PR was created. QA reviews the PR diff, not the whole checkout — push your branch and open a pull request against the default branch before requesting QA review.",
+        );
+        this.emit("activity", projectId, `${agent.name} reported "${item.title}" done without a PR. The ticket stays in_progress until a PR is opened.`);
+        return;
+      }
+
       await board.transitionWorkItem(workItemId, "qa", agent.id, "ready for QA");
       await agentStore.recordRunResult(agent.id, { completed: true, runMs: result.runMs });
       this.emit("activity", projectId, `${agent.name} finished "${item.title}" and sent it to QA.`);
@@ -697,10 +714,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const ctx = await this.resolve(projectId, "qa");
       if (!ctx) return;
 
-      // Review in the engineer's own checkout, with its branch already
-      // checked out -- QA is asked to actually run the code, and doing that
-      // in the shared project directory would mean checking the branch out
-      // there and colliding with whatever else is in flight.
+      // Review starts with the PR diff. The worktree is available if the
+      // QA agent needs to check out and run the code, but the default
+      // surface is the pull request diff — reading the diff is faster than
+      // re-running the whole build, and inline PR comments let the
+      // engineer see exactly which lines the issue is on.
       const reviewCwd = item.worktreePath ?? ctx.project.workspaceDir;
       const prompt = [
         await this.projectHeader(ctx.project, ctx.settings),
@@ -710,13 +728,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         renderWorkItem(item, { includeComments: true, includeHistory: true }),
         "",
         item.worktreePath
-          ? `You are in the engineer's own worktree at \`${reviewCwd}\`, with branch \`${item.branch}\` checked out. Do not switch branches — other engineers are working in their own checkouts of this repository right now.`
+          ? `The engineer's worktree is at \`${reviewCwd}\` with branch \`${item.branch}\` checked out. Start by reading the PR diff — only check out the branch and run the code if the diff alone can't answer a criterion.`
           : item.branch
             ? `The work is on branch \`${item.branch}\`.`
             : "The engineer did not report a branch — find the work yourself before judging it.",
-        item.prUrl ? `Pull request: ${item.prUrl}` : "",
+        item.prUrl ? `Pull request: ${item.prUrl} — this is your primary review surface. Read the diff and post your findings as inline PR comments.` : "",
         "",
-        "Verify each acceptance criterion by actually running the code, then decide: pass it, or bounce it back with specific, actionable reasons.",
+        "Verify each acceptance criterion. Read the PR diff first, then run the code if needed. Post your verdict and findings as comments on the PR — use the \`gh pr comment\` command. If the work passes, transition the ticket to complete. If it fails, bounce it back to ready.",
       ].join("\n");
 
       const result = await runAgent<QaContract>(this.runtime, {
@@ -741,6 +759,17 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         ? `\n\n${contract.criteriaChecked.map((c) => `- **${c.result === "pass" ? "PASS" : "FAIL"}** ${c.criterion ?? ""} — ${c.evidence ?? ""}`).join("\n")}`
         : "";
       await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `${contract.summary ?? ""}${checks}`);
+
+      // Store QA's PR comments on the work item so they surface in the
+      // ticket detail UI. The QA agent posts them to the PR via `gh pr
+      // comment` during the run, so this is a mirror of what already
+      // exists on GitHub — it makes the review visible without leaving
+      // the admin panel. Appended to any existing PR comments so earlier
+      // QA rounds' comments survive across bounce-rework-re-review cycles.
+      if (contract.prComments?.length) {
+        const existing = (await board.getWorkItem(workItemId))?.prComments ?? [];
+        await board.updateWorkItem(workItemId, { prComments: [...existing, ...contract.prComments] });
+      }
 
       // QA's verdict is the only honest measure of whether the model that
       // did the work was up to it, so it feeds straight back into that
@@ -807,12 +836,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         return;
       }
 
-      await board.transitionWorkItem(workItemId, "in_progress", ctx.agent.id, "QA found problems");
+      await board.transitionWorkItem(workItemId, "ready", ctx.agent.id, "QA found problems — needs rework");
       // The bounce is charged to the engineer who produced the work, which
       // is exactly the signal the engineering manager reads back when it
       // decides whether that agent is under-modelled.
       if (item.assigneeAgentId) await agentStore.recordRunResult(item.assigneeAgentId, { qaRejected: true });
-      this.emit("activity", projectId, `QA bounced "${item.title}" back to the engineer.`);
+      this.emit("activity", projectId, `QA bounced "${item.title}" back to ready for rework.`);
     });
   }
 
