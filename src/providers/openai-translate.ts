@@ -687,13 +687,28 @@ function truncateMessageContent(
   const msg = messages[idx];
   const measure = () => serializeRequestBytes({ model: "", messages, tools: tools ?? undefined, max_tokens: undefined, stream: undefined });
   if (typeof msg.content === "string") {
+    // Keep truncating until under the cap or the content is too small to
+    // continue.  A single pass to 25 % may not suffice when the content
+    // is enormous (a tool result with a 100 MB file), so we progressively
+    // reduce the target fraction (0.25, 0.15, 0.10, 0.05) until the
+    // request fits or the content is below 100 KB (truncating further
+    // wouldn't save much).
     if (msg.content.length <= 1024) return { fits: false, bytes: 0 };
-    const quarter = Math.max(512, Math.floor(msg.content.length * 0.25));
-    msg.content = msg.content.slice(0, Math.floor(quarter * 0.6)) +
-      "\n...[truncated by Custos to fit request size limit]...\n" +
-      msg.content.slice(-Math.floor(quarter * 0.4));
-    const bytes = measure();
-    return { fits: bytes <= maxBytes, bytes };
+    const fractions = [0.25, 0.15, 0.10, 0.05];
+    for (const frac of fractions) {
+      const target = Math.max(512, Math.floor(msg.content.length * frac));
+      msg.content = msg.content.slice(0, Math.floor(target * 0.6)) +
+        "\n...[truncated by Custos to fit request size limit]...\n" +
+        msg.content.slice(-Math.floor(target * 0.4));
+      const bytes = measure();
+      if (bytes <= maxBytes) return { fits: true, bytes };
+      // If text is already small enough that further truncation is
+      // unlikely to help, stop early.
+      if (msg.content.length < 100 * 1024) break;
+    }
+    // Still over after the most aggressive truncation — measure once more
+    // and return the result.
+    return { fits: false, bytes: measure() };
   }
   if (Array.isArray(msg.content)) {
     const parts = msg.content;
@@ -713,7 +728,10 @@ function truncateMessageContent(
     }
 
     // Pass 2: find and truncate the largest text parts, one at a time,
-    // until under the cap or no part is > 1 KB.
+    // until under the cap or no part is > 1 KB.  Each text part gets
+    // the same progressive-fraction treatment as the string branch
+    // (0.25 → 0.15 → 0.10 → 0.05) so a single enormous tool-result
+    // text is progressively reduced until the full request fits.
     const textParts: Array<{ idx: number; part: OpenAITextPart }> = [];
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i];
@@ -725,14 +743,20 @@ function truncateMessageContent(
     // Sort largest-first by text byte length.
     textParts.sort((a, b) => Buffer.byteLength(b.part.text, "utf8") - Buffer.byteLength(a.part.text, "utf8"));
 
-    for (const { idx, part } of textParts) {
-      const quarter = Math.max(512, Math.floor(part.text.length * 0.25));
+    const fractions = [0.25, 0.15, 0.10, 0.05];
+    for (const { idx } of textParts) {
       const p = parts[idx] as OpenAITextPart;
-      p.text = part.text.slice(0, Math.floor(quarter * 0.6)) +
-        "\n...[truncated by Custos to fit request size limit]...\n" +
-        part.text.slice(-Math.floor(quarter * 0.4));
-      const bytes = measure();
-      if (bytes <= maxBytes) return { fits: true, bytes };
+      for (const frac of fractions) {
+        const target = Math.max(512, Math.floor(p.text.length * frac));
+        p.text = p.text.slice(0, Math.floor(target * 0.6)) +
+          "\n...[truncated by Custos to fit request size limit]...\n" +
+          p.text.slice(-Math.floor(target * 0.4));
+        const bytes = measure();
+        if (bytes <= maxBytes) return { fits: true, bytes };
+        // Stop shrinking this part if it's already small enough that
+        // further truncation won't meaningfully help.
+        if (p.text.length < 100 * 1024) break;
+      }
     }
   }
   return { fits: false, bytes: 0 };
