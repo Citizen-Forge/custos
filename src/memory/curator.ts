@@ -392,13 +392,29 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
     let estimateBytes = 0;
     let messageCount = 0;
     let hasTrailingAssistant = false;
+    // Per-line static overhead: tools definitions and system prompt are
+    // carried once per dispatch, not per-exchange.  We track the last
+    // parsed value and add it after the accumulation loop.  The session
+    // files store these on every line (redundant), and counting them
+    // once per exchange would massively overcount (99 KB tools × 803
+    // lines = ~79 MB for a conversation whose actual dispatch is ~160 KB).
+    let staticToolsBytes = 0;
+    let staticSystemBytes = 0;
     for (const line of lines) {
-      let parsed: { request?: { messages?: Array<{ role: string; content: unknown }> }; response?: { content?: Array<{ type: string; text?: string }> } };
+      let parsed: { request?: { messages?: Array<{ role: string; content: unknown }>; tools?: unknown; system?: unknown }; response?: { content?: Array<{ type: string; text?: string }> } };
       try {
         parsed = JSON.parse(line);
       } catch {
         console.warn(`compact: skipping malformed line in ${file}`);
         continue;
+      }
+      // Track static overhead from the last parsed line (tools + system
+      // are the same across all lines for a given session).
+      if (Array.isArray(parsed.request?.tools)) {
+        staticToolsBytes = Buffer.byteLength(JSON.stringify(parsed.request.tools), "utf8");
+      }
+      if (parsed.request?.system !== undefined) {
+        staticSystemBytes = Buffer.byteLength(JSON.stringify(parsed.request.system), "utf8");
       }
       const msg = parsed.request?.messages?.at?.(-1);
       if (msg) {
@@ -439,9 +455,23 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
         }
       } catch { /* best-effort */ }
     }
-    // Wrapper overhead: {"messages":[...]} adds ~14 B plus one comma
-    // between every pair of entries (messageCount - 1 commas at 1 B each).
-    const bytes = estimateBytes + 12 + (messageCount > 0 ? messageCount - 1 : 0);
+    // Wrapper overhead: {"messages":[$entries]} adds 15 B ({"messages":[
+    // = 13 B, ]} = 2 B) plus one comma between every pair of entries
+    // (messageCount - 1 at 1 B each).
+    let bytes = estimateBytes + 15 + (messageCount > 0 ? messageCount - 1 : 0);
+
+    // Add static overhead (tools + system) which is carried once per
+    // dispatch but was not counted in the per-exchange loop.  Previous
+    // analysis of the 125 MB 2026-07-25 session file showed these
+    // account for ~135 KB of every 160 KB line — the estimation was
+    // missing ~85% of the actual dispatch size, causing compaction to
+    // skip files that were 6x over the threshold.
+    bytes += staticToolsBytes;
+    bytes += staticSystemBytes;
+
+    if (bytes > compactThreshold * 0.5 && bytes <= compactThreshold) {
+      console.log(`[compact] ${file}: ~${(bytes / 1024 / 1024).toFixed(1)} MB estimated vs ${(compactThreshold / 1024 / 1024).toFixed(1)} MB threshold; skipping`);
+    }
 
     if (bytes <= compactThreshold) {
       // Debug-visible so an operator wondering "why isn't compaction
