@@ -376,8 +376,29 @@ export class GlobalQueue {
       }
     }
 
-    // If at least one provider was available but all failed, throw the
-    // last error so the caller sees the actual upstream reason.
+    // Every entry in the fallback set is now exhausted for this instant --
+    // either it was never available, or it was tried and threw
+    // ProviderUnavailableError. Either way, record the real upstream
+    // reason (when we have one) for the activity feed/admin panel, then
+    // queue rather than fail the caller outright: a provider becoming
+    // available a few hundred ms or seconds from now (a concurrency slot
+    // freeing, an RPM token refilling, a cooldown lifting) is exactly
+    // what pumpAll/enqueue already exist to wait for.
+    //
+    // Previously this branch threw `lastError` immediately whenever at
+    // least one provider had been attempted (`anyAvailable`), skipping
+    // the queue entirely. That meant a fallback set where the primary
+    // (e.g. Groq) was attempted-and-failed while the rest happened to be
+    // momentarily saturated (Gemini's RPM bucket, Ollama's concurrency
+    // cap) failed the caller fast instead of giving the other entries a
+    // chance to free up -- surfacing as the exact "agent's turn 503s
+    // even though a fallback provider was seconds away from having a
+    // slot" behavior this queue's fallback-set design is meant to avoid.
+    // A genuinely broken provider (bad API key, typo'd model) still
+    // surfaces an error -- just after the queue's own timeout instead of
+    // instantly -- with the real reason preserved below for whoever's
+    // reading the activity log rather than only the generic "queue
+    // timeout" message the enqueue path itself would log.
     if (anyAvailable && lastError) {
       this.recordEvent({
         requestId,
@@ -388,10 +409,8 @@ export class GlobalQueue {
         durationMs: Date.now() - startedAt,
         ...context,
       });
-      throw lastError;
     }
 
-    // If no provider was available at all, queue the request.
     return this.enqueue(fallbackTargets, request, options, context, requestId, startedAt);
   }
 

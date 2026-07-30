@@ -195,13 +195,23 @@ describe("GlobalQueue", () => {
     assert.equal(state.canAccept("gemini"), false, "gemini marked cooling after 429");
   });
 
-  it("throws the last ProviderUnavailableError when ALL available providers fail", async () => {
+  it("queues (rather than fails fast) when ALL available providers fail, and surfaces a queue-timeout if none recover in time", async () => {
+    // Regression: tryExecute used to throw the last upstream error
+    // immediately once every fallback-set entry had been tried and
+    // failed, bypassing the queue entirely. That meant a fallback set
+    // where the primary was attempted-and-failed while the rest were
+    // simultaneously saturated (not literally "never available") failed
+    // the caller fast instead of giving the queue's pumpAll a chance to
+    // dispatch once something freed up -- the "agent's turn 503s even
+    // though a fallback was seconds from having a slot" behavior. Now it
+    // always queues; a short enqueueTimeoutMs here stands in for "nothing
+    // ever recovered" so the test doesn't wait out the real 60s cooldown.
     const state = new ProviderStateMap();
     state.register("gemini", { cooldownFallbackMs: 60_000 });
     state.register("ollama", { cooldownFallbackMs: 30_000 });
     const { provider: gemini } = makeRecordingProvider("gemini", { throwUnavailableError: true });
     const { provider: ollama } = makeRecordingProvider("ollama", { throwUnavailableError: true });
-    const q = new GlobalQueue({ gemini, ollama }, state);
+    const q = new GlobalQueue({ gemini, ollama }, state, undefined, { enqueueTimeoutMs: 50 });
 
     await assert.rejects(
       () => q.complete(
@@ -209,8 +219,8 @@ describe("GlobalQueue", () => {
         ZERO_REQ,
       ),
       (err: unknown) => {
-        assert.ok(err instanceof ProviderUnavailableError, "should throw ProviderUnavailableError");
-        assert.ok(err.message.includes("429"), "should carry the upstream error message");
+        assert.ok(err instanceof ProviderUnavailableError, "should reject with ProviderUnavailableError");
+        assert.match((err as Error).message, /queue timeout/, "queued and timed out rather than failing fast");
         return true;
       },
     );
@@ -642,13 +652,22 @@ describe("GlobalQueue", () => {
 
     assert.equal(q.queuedTotal, 0);
 
-    q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ, { priority: "interactive" });
+    const interactive = q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ, { priority: "interactive" });
     assert.equal(q.queuedInteractive, 1);
     assert.equal(q.queuedTotal, 1);
 
-    q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ, { priority: "background" });
+    const background = q.complete([{ provider: "ollama", model: "q" }], ZERO_REQ, { priority: "background" });
     assert.equal(q.queuedBackground, 1);
     assert.equal(q.queuedTotal, 2);
+
+    // Cleanup: both complete() calls above are still queued (ollama stays
+    // saturated all test long) and were never awaited. Left alone they'd
+    // sit on the enqueue-timeout timer (180s default) and reject with an
+    // unhandled rejection well after this synchronous test already
+    // returned. abortAll clears them immediately instead.
+    q.abortAll("cleanup");
+    interactive.catch(() => {});
+    background.catch(() => {});
   });
 
   // -- enqueue timeout + dead-letter buffer ---------------------------------
