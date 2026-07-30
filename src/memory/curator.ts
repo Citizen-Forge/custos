@@ -374,17 +374,24 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
     const lines = content.split("\n").filter(Boolean);
     if (lines.length < 4) continue; // Too few lines to compact (< 2 turns).
 
-    // Estimate dispatch size by accumulating messages from ALL exchanges
-    // in chronological order (oldest first).  Each session line stores one
-    // exchange (not the accumulated round trip), so reading the last line
-    // alone would severely under-estimate the full conversation.
+    // Estimate dispatch size by accumulating the byte length of each
+    // exchange's text incrementally, WITHOUT building the full combined
+    // messages array in memory.  For a 125 MB session file with 800+ lines
+    // the combined structure + JSON.stringify can push Node past its heap
+    // limit and OOM the process, which is worse than a slightly-noisy
+    // estimate.
     //
-    // For each line we extract the last user message and the first
-    // assistant text block, building a system/user/assistant/user/assistant
-    // sequence.  This gives a realistic estimate of what a dispatch of the
-    // whole accumulated conversation would cost, without the O(N²) cost of
-    // serialising every intermediate snapshot.
-    const accumulatedMessages: Array<{ role: string; content: string }> = [];
+    // We append each exchange's text into a running estimate using the
+    // JSON-overhead formula that matches what the provider would see:
+    // \`{"messages":[$content]}\` where $content is the serialised array.
+    // Each entry adds \`{"role":"...","content":"$escaped"},\` so we can
+    // approximate bytes = overhead + sum(content.length).  This is not an
+    // exact byte count (escaping, whitespace, key length vary) but it is
+    // close enough to decide "does this exceed 60 % of 32 MB" without
+    // constructing the payload.
+    let estimateBytes = 0;
+    let messageCount = 0;
+    let hasTrailingAssistant = false;
     for (const line of lines) {
       let parsed: { request?: { messages?: Array<{ role: string; content: unknown }> }; response?: { content?: Array<{ type: string; text?: string }> } };
       try {
@@ -393,39 +400,48 @@ export async function runCompactPass(deps: CuratorDeps): Promise<number> {
         console.warn(`compact: skipping malformed line in ${file}`);
         continue;
       }
-      const messages = parsed.request?.messages;
-      const msg = messages?.at?.(-1);
+      const msg = parsed.request?.messages?.at?.(-1);
       if (msg) {
-        // Content can be a plain string or an array of content blocks;
-        // Claude Code's session format uses the array shape even for
-        // simple text, so the string-only check from the original code
-        // would silently drop every message and leave the estimate at
-        // ~13 bytes — far below any plausible threshold.
         const text = extractContentText(msg.content);
         if (text) {
-          if (accumulatedMessages.length === 0 && msg.role === "system") {
-            accumulatedMessages.push({ role: "system", content: text });
+          if (msg.role === "system" && messageCount === 0) {
+            // {"role":"system","content":"$text"} – key overhead ~30 B
+            estimateBytes += 30 + Buffer.byteLength(text, "utf8");
+            messageCount++;
           } else if (msg.role === "user") {
-            accumulatedMessages.push({ role: "user", content: text });
+            // {"role":"user","content":"$text"}
+            estimateBytes += 28 + Buffer.byteLength(text, "utf8");
+            messageCount++;
+            hasTrailingAssistant = false;
           }
         }
       }
       const assistantBlock = parsed.response?.content?.find((b) => b.type === "text");
       if (assistantBlock?.text) {
-        accumulatedMessages.push({ role: "assistant", content: assistantBlock.text });
+        estimateBytes += 34 + Buffer.byteLength(assistantBlock.text, "utf8");
+        messageCount++;
+        hasTrailingAssistant = true;
       }
     }
-    // Drop trailing assistant if the last exchange has no response yet
-    // (in-flight turns) so we don't count a half-pair.
-    while (
-      accumulatedMessages.length > 0 &&
-      accumulatedMessages[accumulatedMessages.length - 1].role === "assistant"
-    ) {
-      accumulatedMessages.pop();
+    // Remove the trailing assistant estimate if the last exchange has no
+    // response yet (in-flight turns).
+    if (hasTrailingAssistant) {
+      // Subtract the last assistant entry's contribution.  We don't store
+      // the individual contributions, so re-parse the last line.  This is
+      // a single-line parse, not O(N) — negligible cost.
+      const lastLine = lines[lines.length - 1];
+      try {
+        const lastParsed = JSON.parse(lastLine);
+        const lastBlock = lastParsed.response?.content?.find((b: { type: string; text?: string }) => b.type === "text");
+        if (lastBlock?.text) {
+          estimateBytes -= 34 + Buffer.byteLength(lastBlock.text, "utf8");
+          messageCount--;
+        }
+      } catch { /* best-effort */ }
     }
-
-    const combinedReq = { messages: accumulatedMessages };
-    const bytes = Buffer.byteLength(JSON.stringify(combinedReq), "utf8");
+    // Wrapper overhead: {"messages":[...]} adds ~14 B plus one comma
+    // between every pair of entries (messageCount - 1 commas at 1 B each).
+    const bytes = estimateBytes + 12 + (messageCount > 0 ? messageCount - 1 : 0);
 
     if (bytes <= compactThreshold) {
       // Debug-visible so an operator wondering "why isn't compaction
