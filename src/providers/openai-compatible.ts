@@ -1,5 +1,5 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest, type VendorMetadata } from "../types.js";
-import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf, fitRequestToSize, estimateTokens } from "./openai-translate.js";
+import { toOpenAIRequest, fromOpenAIResponse, mapFinishReason, vendorMetadataOf, fitRequestToSize, estimateTokens, serializeRequestBytes, estimateCompactPassBytes } from "./openai-translate.js";
 import { parseRetryAfterMs } from "./retry-header.js";
 import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
@@ -136,6 +136,20 @@ export class OpenAICompatibleProvider implements Provider {
     // to claude-code rather than silently shipping an over-limit body the upstream will
     // reject with its own generic message -- Groq's "accumulated images and attachments"
     // error in particular doesn't tell the operator which conversation to compact.
+
+    // Diagnostic: capture pre-fit bytes and what curator.ts's runCompactPass
+    // algorithm would estimate for the same conversation. The comparison
+    // (preFit vs compactPass-est) reveals both the curator's per-line
+    // underestimation and the fact that 413s often hit requests before
+    // they ever get persisted to a session file -- so the curator can't see
+    // them at all. Gated on maxRequestBytes like the block below so log
+    // volume scales with providers that carry a size cap.
+    if (this.config.maxRequestBytes !== undefined) {
+      const preFitBytes = serializeRequestBytes(openaiRequest);
+      const compactPassEstimate = estimateCompactPassBytes(openaiRequest);
+      console.log(`[dispatch-byte-trace] ${this.name}: preFit=${preFitBytes}B compactPass-est=${compactPassEstimate}B ratio=${preFitBytes > 0 ? (compactPassEstimate / preFitBytes).toFixed(3) : "n/a"} cap=${this.config.maxRequestBytes}B`);
+    }
+
     if (this.config.maxRequestBytes !== undefined) {
       const warnRatio = Math.min(1, Math.max(0.1, this.config.maxRequestBytesWarnRatio ?? 0.75));
       const fit = fitRequestToSize(openaiRequest, this.config.maxRequestBytes, warnRatio);
@@ -146,6 +160,13 @@ export class OpenAICompatibleProvider implements Provider {
         console.log(`[${this.name}] truncated ${fit.truncatedMessages} old message(s) from request (${fit.initialBytes}B -> ${fit.finalBytes}B, cap=${this.config.maxRequestBytes}B, warnRatio=${warnRatio})`);
       }
       openaiRequest = fit.request;
+      // Diagnostic: log post-fit bytes + strip/truncate count. Reached
+      // only when fit succeeded -- the stillOverLimit return exits
+      // immediately below. This is the size the upstream actually sees.
+      if (!fit.stillOverLimit) {
+        const postFitBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
+        console.log(`[dispatch-byte-trace] ${this.name}: postFit=${postFitBytes}B stripped=${fit.stripped} truncated=${fit.truncatedMessages}`);
+      }
       if (fit.stillOverLimit) {
         const hadImages = fit.stripped > 0;
         const hadTruncation = fit.truncatedMessages > 0;
@@ -171,6 +192,13 @@ export class OpenAICompatibleProvider implements Provider {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) headers.authorization = `Bearer ${this.config.apiKey}`;
 
+    // Diagnostic: log the wire bytes right before fetching, gated on
+    // maxRequestBytes set so it scales with providers that have a cap.
+    if (this.config.maxRequestBytes !== undefined) {
+      const dispatchBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
+      console.log(`[dispatch-byte-trace] ${this.name}: actually-sending=${dispatchBytes}B to ${this.config.baseUrl}/chat/completions`);
+    }
+
     let res: Response;
     try {
       res = await fetch(`${this.config.baseUrl}/chat/completions`, {
@@ -184,6 +212,14 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     if (!res.ok) {
+      // Diagnostic: distinguish an upstream 413 (we DID send a body and
+      // Groq/etc rejected its size) from our own fitRequestToSize
+      // stillOverLimit return (which never reaches the fetch). On
+      // upstream 413 we also log the bytes we actually sent.
+      if (res.status === 413 && this.config.maxRequestBytes !== undefined) {
+        const sentBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
+        console.log(`[dispatch-byte-trace] ${this.name}: UPSTREAM-413 after-sending=${sentBytes}B cap=${this.config.maxRequestBytes}B`);
+      }
       if (res.status === 429 || res.status >= 500) {
         // Surface the upstream's Retry-After to the router so the
         // cooldown deadline matches reality. Without this, Gemini

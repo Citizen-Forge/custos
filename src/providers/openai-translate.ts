@@ -90,6 +90,7 @@
 // OpenRouter free-tier: per-model) keep working as conversations
 // accumulate images.
 import type { AnthropicContentBlock, AnthropicMessage, AnthropicMessagesRequest, AnthropicMessagesResponse, VendorMetadata } from "../types.js";
+import { extractContentText } from "../memory/curator.js";
 
 interface OpenAIToolCall {
   id: string;
@@ -393,11 +394,72 @@ const OMITTED_IMAGE_PLACEHOLDER: OpenAITextPart = {
  * measured against the wire byte count (not the character count) since
  * that's what the upstream will see at its server. Buffer.byteLength
  * measures UTF-8 byte length without allocating a string. */
-function serializeRequestBytes(req: OpenAIRequest): number {
+export function serializeRequestBytes(req: OpenAIRequest): number {
   // The shape is plain JSON (no Buffers/Maps/Sets), so a round-trip is
   // safe. Using Buffer.byteLength is the cheapest UTF-8 byte counter we
   // can write without pulling in a serialization library.
   return Buffer.byteLength(JSON.stringify(req), "utf8");
+}
+
+/**
+ * Mirrors the curator's compact-pass byte estimator (see `runCompactPass`
+ * in `src/memory/curator.ts`) but operates on a live `OpenAIRequest`
+ * rather than stored session-file lines. Returns the bytes the curator
+ * WOULD report if it ever got to see this conversation -- useful for
+ * comparing "what was actually dispatched" vs "what the curator thinks
+ * the same dispatch weighs", which exposes both the curator's
+ * per-line underestimation (each session-file line stores only the
+ * current turn's user prompt, when the live cumulative dispatch carries
+ * every prior turn's user/assistant/tool messages) and the gap where
+ * failing requests never get persisted at all.
+ *
+ * Numbers pinched from curator.ts to keep both sides in lockstep:
+ *   - `30` bytes for the FIRST system message envelope,
+ *   - `28` bytes per user message envelope,
+ *   - one-time `15` bytes for the OpenAI `{"messages":[…]}` wrapper
+ *     plus `messageCount - 1` bytes for inter-message commas,
+ *   - tools and system message text counted ONCE per request (the
+ *     session-file format repeats these on every line; the recent
+ *     `staticToolsBytes` / `staticSystemBytes` accumulator
+ *     de-duplicates them). Reuses `extractContentText` from
+ *     `curator.ts` so this mirror can't drift from the curator's
+ *     actual algorithm on tool_result recursion (the most common
+ *     agent-conversation content shape).
+ */
+export function estimateCompactPassBytes(req: OpenAIRequest): number {
+  let bytes = 0;
+  let messageCount = 0;
+  let toolsBytes = 0;
+  if (req.tools && req.tools.length > 0) {
+    toolsBytes = Buffer.byteLength(JSON.stringify(req.tools), "utf8");
+  }
+  // Mirror curator's per-line accumulation: a session-file line stores
+  // only the CURRENT turn's user prompt in `request.messages`, so the
+  // curator counts `+28 + text` for the one user message per line
+  // (plus `+30 + text` for system ONLY when `messageCount === 0`,
+  // which fires once per session at most) and never counts assistant
+  // or tool messages because they are not present in any session-file
+  // line's `request.messages`. For a live cumulative request the
+  // analog is system at index 0 + every user message after, with the
+  // same assistant/tool skip — anything the curator never sees
+  // contributes a gap the diagnostic log will surface.
+  for (const msg of req.messages) {
+    const text = extractContentText(msg.content);
+    if (!text) continue;
+    if (msg.role === "system" && messageCount === 0) {
+      bytes += 30 + Buffer.byteLength(text, "utf8");
+      messageCount++;
+      continue;
+    }
+    if (msg.role === "user") {
+      bytes += 28 + Buffer.byteLength(text, "utf8");
+      messageCount++;
+    }
+    // assistant/tool fall through: matches curator's per-line skip.
+  }
+  bytes += 15 + (messageCount > 0 ? messageCount - 1 : 0);
+  bytes += toolsBytes;
+  return bytes;
 }
 
 /**

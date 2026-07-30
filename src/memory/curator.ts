@@ -274,7 +274,7 @@ export async function runCuratorPass(deps: CuratorDeps): Promise<number> {
  *  and what Anthropic's Messages API returns for multi-block responses),
  *  or any other shape.  Returns the concatenated text or null when nothing
  *  text-shaped is present. */
-function extractContentText(content: unknown): string | null {
+export function extractContentText(content: unknown): string | null {
   if (typeof content === "string") return content || null;
   if (Array.isArray(content)) {
     const texts: string[] = [];
