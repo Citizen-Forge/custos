@@ -94,7 +94,19 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     //                                   Ollama instead of failing).
     // (see providers/model-alias.ts for the parser).
     const alias = parseModelAlias(body.model);
-    const options: CompleteOptions = { clientBetaHeader };
+
+    // Wire the client's own disconnect into the outgoing dispatch so an
+    // abandoned request doesn't leak an in-flight upstream fetch (and the
+    // ProviderStateMap slot it's holding) indefinitely. Without this,
+    // nothing here ever learns the `claude` CLI subprocess gave up --
+    // reply.raw's "close" event fires on ANY connection teardown
+    // (including a normal, successful completion), so it's guarded on
+    // writableEnded to only abort the genuinely abandoned case.
+    const abortController = new AbortController();
+    reply.raw.on("close", () => {
+      if (!reply.raw.writableEnded) abortController.abort();
+    });
+    const options: CompleteOptions = { clientBetaHeader, signal: abortController.signal };
 
     // Every branch below dispatches via the GlobalQueue. Three chain
     // shapes feed it:

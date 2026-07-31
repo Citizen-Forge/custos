@@ -95,6 +95,24 @@ async function main() {
 
   const app = Fastify({ logger: true, bodyLimit: 20 * 1024 * 1024, trustProxy: true });
 
+  // Node's http.Server defaults requestTimeout to exactly 300_000ms (5
+  // minutes) as of Node 18+ -- a slow-loris mitigation that, per the docs,
+  // covers "receiving the entire request from the client" and is meant to
+  // be cleared once the request is fully read, not enforced against how
+  // long we take to respond. In practice this gateway's own long-lived
+  // /v1/messages responses (a request can legitimately spend real time
+  // parked in GlobalQueue waiting for a provider slot, then more time
+  // again on a slow upstream, all before the first byte goes back) were
+  // observed dying at almost exactly 300.0s regardless of every other
+  // timeout raised on the client (claude CLI's CLAUDE_STREAM_IDLE_TIMEOUT_MS)
+  // and upstream-fetch (undici's bodyTimeout) sides of this same
+  // connection -- neither of those changed the cutoff, which is the
+  // strongest signal that the constraint was on the SERVER socket itself,
+  // not on the client or the outgoing fetch. Disabled outright; Fastify
+  // never sets this itself, so it was silently inheriting Node's default.
+  app.server.requestTimeout = 0;
+  app.server.headersTimeout = 0;
+
   // Several admin actions are POSTs with no body (disconnect OAuth, clear
   // key, stop chat, ...). Fastify's default JSON parser rejects an empty
   // body outright (FST_ERR_CTP_EMPTY_JSON_BODY) when the request still
