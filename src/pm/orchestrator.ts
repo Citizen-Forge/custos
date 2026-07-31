@@ -105,6 +105,27 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     const active = await runs.listActiveRuns(project.id);
     if (active.length) this.emit("change", project.id);
 
+    // A run's own lastEventAt only advances on TurnEvents from ITS OWN
+    // `claude` process's stdout. A Task sub-agent it spawned reuses the
+    // same ANTHROPIC_MODEL alias (same projectId/agentId/role), so its
+    // dispatches land in the GlobalQueue's activity log under the SAME
+    // agentId -- but the parent process emits nothing on its own stream
+    // while waiting on that sub-agent, which looks identical to a
+    // genuine stall from lastEventAt alone. Cross-referencing the
+    // activity log here folds that real, otherwise-invisible progress
+    // back into the run's own tracking before the stall check below
+    // runs, so a ticket actually being worked by a sub-agent doesn't get
+    // surfaced as "doing nothing."
+    const activityLog = this.runtime.globalQueue?.queueActivityLog();
+    if (activityLog) {
+      for (const run of active) {
+        const latest = activityLog.mostRecentEventForAgent(run.agentId);
+        if (latest && latest.timestamp > run.lastEventAt) {
+          await runs.recordActivity(run.id, `sub-agent activity: ${latest.outcome} on ${latest.provider ?? "?"}/${latest.model ?? "?"}`, false);
+        }
+      }
+    }
+
     // Surface, don't kill. A long build legitimately looks like a stall, and
     // only the operator knows which is which -- the hard timeout in
     // agent-runner is what eventually stops a genuinely hung run.

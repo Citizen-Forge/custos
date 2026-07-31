@@ -152,6 +152,24 @@ export class ActivityLog {
     return this.events.slice(this.events.length - limit).reverse();
   }
 
+  /** The most recent event carrying this agentId, or null if none exists
+   *  in the buffer. Used to detect real work a sub-agent is doing on a
+   *  top-level run's behalf: a Task sub-agent spawned by the `claude` CLI
+   *  reuses the parent's ANTHROPIC_MODEL alias (same projectId/agentId/
+   *  role), so its own /v1/messages dispatches land here under the SAME
+   *  agentId even though the parent process's own stdout stream emits
+   *  nothing while it waits on that sub-agent -- from the parent run's
+   *  own TurnEvents alone, this is indistinguishable from a genuine
+   *  stall. Scans from the newest end since callers only want the latest
+   *  match and the buffer is bounded (MAX_EVENTS), so a full scan is
+   *  cheap regardless. */
+  mostRecentEventForAgent(agentId: string): QueueActivityEvent | null {
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      if (this.events[i].agentId === agentId) return this.events[i];
+    }
+    return null;
+  }
+
   /** Wipe the buffer. Used by the admin endpoint to reset the panel. */
   clear(): void {
     this.events.length = 0;
