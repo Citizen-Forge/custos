@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
 import cookie from "@fastify/cookie";
+import { Agent, setGlobalDispatcher } from "undici";
 import { Runtime } from "./runtime.js";
 import { registerRoutes } from "./server/routes.js";
 import { registerAdminRoutes } from "./server/admin-routes.js";
@@ -27,6 +28,25 @@ const PORT = Number(process.env.PORT ?? 8787);
 const QDRANT_URL = process.env.QDRANT_URL ?? "http://localhost:6333";
 const EMBEDDING_VECTOR_SIZE = Number(process.env.EMBEDDING_VECTOR_SIZE ?? 768);
 const CURATOR_INTERVAL_MS = Number(process.env.CURATOR_INTERVAL_MS ?? 15 * 60_000);
+
+// Node's global fetch() (used by every provider's dispatch -- openai-compatible.ts,
+// anthropic.ts) is built on undici, whose default Agent caps bodyTimeout AND
+// headersTimeout at 300_000ms (5 minutes) -- undici/lib/dispatcher/client.js's
+// kBodyTimeout default is literally `300e3`. A slow self-hosted model (a local
+// Ollama instance with no GPU) generating a long response for one turn can easily
+// exceed that, at which point undici tears down the connection mid-stream. That
+// doesn't surface as a clean error to the client -- our own reply pipe to the
+// spawned `claude` subprocess dies with it (logged by Fastify as "stream closed
+// prematurely" / ERR_STREAM_PREMATURE_CLOSE), and the CLI, having received a
+// SSE stream that just stops with no terminating event, doesn't reliably notice
+// and can sit "running" for the rest of its 45-minute ceiling producing nothing.
+// Raising both well past what any real generation should take (RUN_TIMEOUT_MS
+// itself is the true backstop at 45 minutes) fixes this at the source rather
+// than only bounding the damage after the fact (see agent-runner.ts's
+// dead-on-arrival watchdog, which catches the case where this still isn't
+// enough). Set once, globally, at startup -- every fetch() in the process
+// benefits, not just one call site.
+setGlobalDispatcher(new Agent({ bodyTimeout: 20 * 60_000, headersTimeout: 20 * 60_000 }));
 
 async function main() {
   await ensureAdminPassword();
