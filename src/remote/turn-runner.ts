@@ -157,6 +157,26 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   if (model) env.ANTHROPIC_MODEL = model;
   if (auth.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = auth.ANTHROPIC_API_KEY;
 
+  // The CLI's own stream-idle watchdog (confirmed by inspecting the
+  // bundled binary's source) aborts a request after
+  // max(CLAUDE_STREAM_IDLE_TIMEOUT_MS, 300_000)ms of receiving no stream
+  // chunk at all -- 300s by default if the env var is unset, clamped to
+  // [10s, 30min] however it's set. That's a real, separate mechanism
+  // from the SDK's own overall request timeout and from anything on our
+  // own gateway/upstream side: a request can legitimately spend up to
+  // enqueueTimeoutMs (180s, see global-queue.ts) parked waiting for a
+  // provider slot before it's even dispatched, then more time again
+  // waiting on a slow upstream's first token (a cold local model, a
+  // queued fallback) -- all before the CLI sees a single byte. Once that
+  // combined wait crosses ~300s, the CLI gives up and the connection
+  // dies with nothing to show for it; the spawned process doesn't
+  // reliably notice and can sit "running" for the rest of its 45-minute
+  // ceiling (see agent-runner.ts's dead-on-arrival watchdog, which
+  // bounds the damage when this still happens for some other reason).
+  // Set well above the realistic worst case for one turn, and safely
+  // under both the CLI's own 30-minute hard cap and RUN_TIMEOUT_MS.
+  env.CLAUDE_STREAM_IDLE_TIMEOUT_MS = String(20 * 60_000);
+
   // Vault secrets last: they're the caller's explicit choice for this run,
   // and should win over anything the gateway process happens to inherit.
   Object.assign(env, options.env ?? {});
