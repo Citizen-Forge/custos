@@ -108,6 +108,17 @@ export interface RunTurnOptions {
   env?: Record<string, string>;
   /** Permission posture -- see headless-settings.ts. Defaults to "chat". */
   hookProfile?: HookProfile;
+  /** Tool names to hard-deny via `--disallowedTools`, passed straight
+   *  through to the CLI (e.g. ["Bash", "Write", "Edit"]). This is a real
+   *  gate, not a prompt request -- the model cannot invoke a denied tool
+   *  regardless of how the conversation goes, unlike asking it not to in
+   *  the system prompt. Use for roles that have no legitimate reason to
+   *  touch the filesystem or run commands (e.g. the engineering manager,
+   *  whose entire job is a JSON sizing/assignment decision from what's
+   *  already in its prompt) -- a prose "don't do this" is easy for a
+   *  model to ignore once a ticket description reads like an interesting
+   *  problem to go dig into; a denied tool can't be invoked at all. */
+  disallowedTools?: string[];
   onEvent: (event: TurnEvent) => void;
   signal: AbortSignal;
 }
@@ -154,6 +165,11 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   if (resumeSessionId) args.push("--resume", resumeSessionId);
   if (appendSystemPrompt) args.push("--append-system-prompt", appendSystemPrompt);
   if (settingsPath) args.push("--settings", settingsPath);
+  // Pushed as its own flag occurrence with every tool name as a separate
+  // argv entry (not one space-joined string) so a tool name can never be
+  // misparsed as a following flag the way a bare `--disallowedTools` with
+  // no values immediately swallows whatever token comes next.
+  if (options.disallowedTools?.length) args.push("--disallowedTools", ...options.disallowedTools);
 
   // stdin = 'ignore' (i.e. /dev/null) so the CLI gets an immediate EOF
   // instead of waiting on a pipe that never receives data -- with a plain
