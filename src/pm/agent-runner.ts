@@ -6,7 +6,7 @@ import { ROLE_PROMPTS } from "./prompts.js";
 import { resolveAgentEnv, redactSecrets } from "./vault.js";
 import * as runs from "./runs.js";
 import * as agents from "./agents.js";
-import { RUN_TIMEOUT_MS, STALL_THRESHOLD_MS, type AgentDef, type AgentRole } from "./types.js";
+import { RUN_TIMEOUT_MS, STALL_THRESHOLD_MS, type AgentDef } from "./types.js";
 import { ProbeUnavailableError, runPreSpawnProbe } from "./probe.js";
 
 export interface AgentRunResult<T> {
@@ -152,29 +152,43 @@ export function buildSystemPrompt(agent: AgentDef, extra: string | undefined, co
   return parts.join("\n\n");
 }
 
-/** Every built-in Claude Code tool -- used to give the engineering manager
- *  literally none of them. Its entire job is a JSON sizing/assignment
- *  decision from content already in its prompt (the ready-ticket list, the
- *  roster, the model menu); it has no legitimate reason to touch the
- *  filesystem, run a command, or fetch a URL. Observed live: with the
- *  same full tool access as an engineer and `cwd` pointed at the real
- *  project checkout, it kept exploring and even starting to implement
- *  code for whatever ticket's description read like an interesting
- *  problem -- a prose "don't do this" in the prompt was not enough to
- *  stop a model that has the tools sitting right there. A denied tool
- *  can't be invoked regardless of what the model decides. */
+/** Every built-in Claude Code tool -- used to give a purely-judgment task
+ *  literally none of them. A decision made entirely from content already
+ *  in its prompt has no legitimate reason to touch the filesystem, run a
+ *  command, or fetch a URL. Observed live: with full tool access and
+ *  `cwd` pointed at the real project checkout, both the engineering
+ *  manager's assignReady and the product owner's groomBacklog kept
+ *  exploring the codebase (including spawning a `Task` sub-agent that
+ *  can run silently for many minutes) or starting to implement code for
+ *  whatever ticket's description read like an interesting problem -- a
+ *  prose "don't do this" in the prompt was not enough to stop a model
+ *  that has the tools sitting right there. A denied tool can't be
+ *  invoked regardless of what the model decides. */
 const ALL_TOOLS = ["Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "TodoWrite", "SlashCommand"];
 
-/** Tool names hard-denied per role. QA legitimately needs Read/Bash/Glob/
- *  Grep to check out and run the diff it's reviewing, and Task to delegate
- *  exploration -- but never Write/Edit/NotebookEdit, since its whole point
- *  is judging the engineer's diff, not modifying it. Roles not listed here
- *  (engineer, devops, product-owner, steering, project-manager) keep full
+/** Tool names hard-denied per TASK (keyed by the same `tag` passed to
+ *  runAgent, e.g. "custos-groom"), NOT per agent role. This matters
+ *  because product-owner drives two different tasks that need
+ *  genuinely different tool access from the SAME agent/role: groomBacklog
+ *  (custos-groom) is a pure sizing/promote/comment decision on tickets
+ *  already fully described in its prompt, with nothing to gain from the
+ *  filesystem -- but planIdea (custos-plan) explicitly instructs the
+ *  agent to "Research the workspace and the web as needed before you
+ *  decide on the shape," a real, legitimate need for Read/Glob/Grep/
+ *  WebFetch/WebSearch. Keying by role alone would have to pick one
+ *  answer for both tasks; keying by tag lets custos-groom go tool-free
+ *  while custos-plan keeps full access.
+ *
+ *  QA (custos-qa) legitimately needs Read/Bash/Glob/Grep to check out and
+ *  run the diff it's reviewing, and Task to delegate exploration -- but
+ *  never Write/Edit/NotebookEdit, since its whole point is judging the
+ *  engineer's diff, not modifying it. Tags not listed here keep full
  *  tool access: they have a real, legitimate reason to touch the
  *  filesystem or run commands. */
-const DISALLOWED_TOOLS_BY_ROLE: Partial<Record<AgentRole, string[]>> = {
-  "engineering-manager": ALL_TOOLS,
-  qa: ["Write", "Edit", "NotebookEdit"],
+const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
+  "custos-assign": ALL_TOOLS,
+  "custos-groom": ALL_TOOLS,
+  "custos-qa": ["Write", "Edit", "NotebookEdit"],
 };
 
 /**
@@ -368,7 +382,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       }),
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
-      disallowedTools: DISALLOWED_TOOLS_BY_ROLE[agent.role],
+      disallowedTools: DISALLOWED_TOOLS_BY_TAG[tag],
       onEvent,
       signal: controller.signal,
     });
