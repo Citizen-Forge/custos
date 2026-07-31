@@ -671,7 +671,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         ...(contract.prUrl ? { prUrl: contract.prUrl } : {}),
       });
       const followUps = contract.followUps?.length ? `\n\n**Noticed but not fixed (out of scope for this ticket):**\n${contract.followUps.map((f) => `- ${f}`).join("\n")}` : "";
-      await board.addComment(workItemId, agent.id, agentStore.displayName(agent), `${contract.summary ?? ""}${followUps}`);
+      const engineerCommentBody = `${contract.summary ?? ""}${followUps}`;
+      if (engineerCommentBody.trim()) {
+        await board.addComment(workItemId, agent.id, agentStore.displayName(agent), engineerCommentBody);
+      }
 
       if (contract.status === "blocked") {
         // Blocked work goes back to the backlog rather than sitting in
@@ -723,6 +726,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // re-running the whole build, and inline PR comments let the
       // engineer see exactly which lines the issue is on.
       const reviewCwd = item.worktreePath ?? ctx.project.workspaceDir;
+      // Tickets completed before PR-based review was enforced can be in
+      // `qa` with a worktree/branch but no prUrl -- there's no PR to read
+      // or comment on. Without this branch the prompt below told QA to
+      // "read the PR diff" and "post your verdict via `gh pr comment`"
+      // regardless, an impossible instruction for a ticket with nothing to
+      // diff against or comment on. A model (especially a smaller
+      // fallback-tier one) faced with that contradiction tended to give up
+      // on reviewing entirely and free-associate off the ticket's
+      // description instead, as if it were the one implementing it.
+      const hasPr = Boolean(item.prUrl);
       const prompt = [
         await this.projectHeader(ctx.project, ctx.settings),
         "",
@@ -731,13 +744,17 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         renderWorkItem(item, { includeComments: true, includeHistory: true }),
         "",
         item.worktreePath
-          ? `The engineer's worktree is at \`${reviewCwd}\` with branch \`${item.branch}\` checked out. Start by reading the PR diff — only check out the branch and run the code if the diff alone can't answer a criterion.`
+          ? hasPr
+            ? `The engineer's worktree is at \`${reviewCwd}\` with branch \`${item.branch}\` checked out. Start by reading the PR diff — only check out the branch and run the code if the diff alone can't answer a criterion.`
+            : `The engineer's worktree is at \`${reviewCwd}\` with branch \`${item.branch}\` checked out, but no pull request is linked (this ticket predates PR-based review). There is no PR diff to read and no PR to comment on -- instead, from inside \`${reviewCwd}\`, diff the branch against the project's default branch yourself (e.g. \`git diff main...${item.branch}\` or \`git log main..${item.branch} -p\`) to see exactly what changed, then review it the same way you would a PR diff. Post your verdict as a comment on this ticket instead of a PR comment.`
           : item.branch
             ? `The work is on branch \`${item.branch}\`.`
             : "The engineer did not report a branch — find the work yourself before judging it.",
         item.prUrl ? `Pull request: ${item.prUrl} — this is your primary review surface. Read the diff and post your findings as inline PR comments.` : "",
         "",
-        "Verify each acceptance criterion. Read the PR diff first, then run the code if needed. Post your verdict and findings as comments on the PR — use the \`gh pr comment\` command. If the work passes, transition the ticket to complete. If it fails, bounce it back to ready.",
+        hasPr
+          ? "Verify each acceptance criterion. Read the PR diff first, then run the code if needed. Post your verdict and findings as comments on the PR — use the `gh pr comment` command. If the work passes, transition the ticket to complete. If it fails, bounce it back to ready."
+          : "Verify each acceptance criterion. Diff the branch yourself first, then run the code if needed. Post your verdict and findings as a comment on this ticket (there is no PR to comment on). If the work passes, transition the ticket to complete. If it fails, bounce it back to ready.",
       ].join("\n");
 
       const result = await runAgent<QaContract>(this.runtime, {
@@ -770,7 +787,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const checks = contract.criteriaChecked?.length
         ? `\n\n${contract.criteriaChecked.map((c) => `- **${c.result === "pass" ? "PASS" : "FAIL"}** ${c.criterion ?? ""} — ${c.evidence ?? ""}`).join("\n")}`
         : "";
-      await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `${contract.summary ?? ""}${checks}`);
+      const qaCommentBody = `${contract.summary ?? ""}${checks}`;
+      // An empty summary with no criteria checked would otherwise post a
+      // blank comment -- pure noise, and it's happened in practice with a
+      // weaker fallback-tier model that returned a valid contract but an
+      // empty summary field.
+      if (qaCommentBody.trim()) {
+        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), qaCommentBody);
+      }
 
       // Store QA's PR comments on the work item so they surface in the
       // ticket detail UI. The QA agent posts them to the PR via `gh pr
@@ -1132,7 +1156,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       const contract = result.parsed;
-      await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
+      if ((contract.summary ?? "").trim()) {
+        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
+      }
       // AWS deployments must report the region the resources actually landed
       // in -- the devops gate, not a prompt nicety. The orchestrator is the
       // only place that can enforce this because the LLM-side `awsRegion`
