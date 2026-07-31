@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type { ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { Runtime } from "../runtime.js";
 import type { AnthropicMessagesRequest, AnthropicMessagesResponse } from "../types.js";
@@ -49,6 +50,29 @@ function generalChain(body: AnthropicMessagesRequest, config: GatewayConfig): Fa
     out.push({ provider: entry.provider, model: def.name });
   }
   return out;
+}
+
+/** Writes a mid-stream SSE error event, matching the real Anthropic
+ *  streaming protocol's own error event shape. Used once headers have
+ *  already committed to a 200 status, so a failure can no longer be
+ *  signaled via HTTP status code. */
+function writeSseError(raw: ServerResponse, message: string): void {
+  if (raw.writableEnded) return;
+  raw.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "overloaded_error", message } })}\n\n`);
+}
+
+/** Pipes a Web ReadableStream into a hijacked raw response. Resolves once
+ *  the stream ends, errors out, or the client disconnects -- whichever
+ *  comes first -- so the caller's await doesn't hang on an abandoned
+ *  connection. */
+function pipeWebStreamToRaw(stream: ReadableStream, raw: ServerResponse): Promise<void> {
+  return new Promise((resolve) => {
+    const nodeStream = Readable.fromWeb(stream as never);
+    nodeStream.pipe(raw);
+    nodeStream.on("end", resolve);
+    nodeStream.on("error", resolve);
+    raw.on("close", resolve);
+  });
 }
 
 export interface RouteDeps {
@@ -188,6 +212,75 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       dispatchContext = { route: "general" };
     }
 
+    // Streaming requests (every real agent turn) commit to the response
+    // immediately, before queue.complete() is even called, and keep the
+    // connection alive with periodic pings while it works. Without this,
+    // the client (the Anthropic SDK inside the spawned `claude` CLI
+    // subprocess) receives zero bytes -- not even a status line -- for
+    // however long dispatch takes. Queueing behind a saturated provider,
+    // then falling through a chain where every entry is rate-limited, can
+    // legitimately take minutes; the CLI's own client-side "waiting for a
+    // response" timeout (observed at ~300s, distinct from
+    // CLAUDE_STREAM_IDLE_TIMEOUT_MS, which only bounds idle time *after*
+    // a response has started) was giving up and tearing down the
+    // connection long before a slow-but-working fallback chain ever got a
+    // chance to succeed -- the exact "This operation was aborted" failures
+    // seen in the activity log despite the 40-minute enqueue budget and
+    // 45-minute run ceiling never having been reached.
+    if (body.stream) {
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+        ...(reply.getHeaders() as Record<string, string>),
+      });
+      // writeHead() alone only schedules the status line -- Node's
+      // http.ServerResponse doesn't actually put it on the wire until the
+      // first write()/end() call, which would otherwise be our first ping
+      // up to PING_INTERVAL_MS later. flushHeaders() forces it out now,
+      // which is the entire point of committing early.
+      reply.raw.flushHeaders();
+      const pingTimer = setInterval(() => {
+        if (!reply.raw.writableEnded) reply.raw.write('event: ping\ndata: {"type": "ping"}\n\n');
+      }, 15_000);
+
+      let providerResponse;
+      try {
+        providerResponse = await queue.complete(chain, body, options, dispatchContext);
+      } catch (err) {
+        clearInterval(pingTimer);
+        const message = err instanceof ProviderUnavailableError ? err.message : "internal gateway error";
+        writeSseError(reply.raw, message);
+        reply.raw.end();
+        return;
+      }
+      clearInterval(pingTimer);
+
+      if (!providerResponse.body) {
+        reply.raw.end();
+        return;
+      }
+      if (providerResponse.status !== 200) {
+        // Headers already committed to 200 -- relay the upstream's
+        // failure as an SSE error event instead of a status code. The
+        // CLI's SSE parser already handles this event type since it's
+        // part of the real Anthropic streaming protocol.
+        const errText = await new Response(providerResponse.body).text();
+        writeSseError(reply.raw, errText);
+        reply.raw.end();
+        return;
+      }
+      const [clientStream, ingestStream] = providerResponse.body.tee();
+      reconstructFromAnthropicSSE(ingestStream, body.model)
+        .then((reconstructed) => {
+          void ingestExchange(body, reconstructed);
+        })
+        .catch((err) => req.log.error({ err }, "failed to ingest streamed exchange"));
+      await pipeWebStreamToRaw(clientStream, reply.raw);
+      return;
+    }
+
     let providerResponse;
     try {
       providerResponse = await queue.complete(chain, body, options, dispatchContext);
@@ -225,19 +318,6 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
     if (!providerResponse.body) {
       return reply.send();
-    }
-
-    if (body.stream) {
-      if (providerResponse.status === 200) {
-        const [clientStream, ingestStream] = providerResponse.body.tee();
-        reconstructFromAnthropicSSE(ingestStream, body.model)
-          .then((reconstructed) => {
-            void ingestExchange(body, reconstructed);
-          })
-          .catch((err) => req.log.error({ err }, "failed to ingest streamed exchange"));
-        return reply.send(Readable.fromWeb(clientStream as never));
-      }
-      return reply.send(Readable.fromWeb(providerResponse.body as never));
     }
 
     const text = await new Response(providerResponse.body).text();
