@@ -6,7 +6,7 @@ import { ROLE_PROMPTS } from "./prompts.js";
 import { resolveAgentEnv, redactSecrets } from "./vault.js";
 import * as runs from "./runs.js";
 import * as agents from "./agents.js";
-import { RUN_TIMEOUT_MS, type AgentDef, type AgentRole } from "./types.js";
+import { RUN_TIMEOUT_MS, STALL_THRESHOLD_MS, type AgentDef, type AgentRole } from "./types.js";
 import { ProbeUnavailableError, runPreSpawnProbe } from "./probe.js";
 
 export interface AgentRunResult<T> {
@@ -263,9 +263,19 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   let text = "";
   let costUsd: number | null = null;
   let turnError: string | null = null;
+  // Distinct from the general staleness the orchestrator already surfaces
+  // (STALL_THRESHOLD_MS / listStalledRuns, deliberately non-destructive --
+  // a long build can legitimately go quiet). This tracks something
+  // narrower: has the run produced *any* real output at all, ever, beyond
+  // the initial session handshake. A run that's mid-build has already
+  // cleared this bar (at least one tool call happened first), so this
+  // can't misfire on legitimate slow-but-alive work -- it only catches a
+  // run that never got off the ground.
+  let hasRealProgress = false;
 
   const onEvent = (event: TurnEvent): void => {
     if (event.type === "session") void runs.setRunSession(run.id, event.sessionId);
+    else hasRealProgress = true;
 
     // Heartbeat. Every event counts, so "has this done anything lately" is
     // measured from what the agent actually did rather than from asking it
@@ -301,6 +311,25 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     timedOut = true;
     controller.abort();
   }, RUN_TIMEOUT_MS);
+
+  // Dead-on-arrival watchdog: narrower than the general staleness check
+  // above (see hasRealProgress) -- fires only if the run never produced
+  // any real output at all, never a full "surface, don't kill" quiet
+  // period for a run already underway. Observed live: the gateway logged
+  // "stream closed prematurely" (ERR_STREAM_PREMATURE_CLOSE) on the
+  // upstream connection a few minutes into two separate runs, but the
+  // spawned `claude` subprocess kept reporting "running" for 15+ minutes
+  // afterward having emitted nothing beyond its initial session
+  // handshake -- it never noticed the connection had died and had
+  // nothing further to wait for. A run that's actually mid-task can't
+  // trip this: reaching that state already requires hasRealProgress.
+  let deadOnArrival = false;
+  const deadOnArrivalTimer = setTimeout(() => {
+    if (!hasRealProgress) {
+      deadOnArrival = true;
+      controller.abort();
+    }
+  }, STALL_THRESHOLD_MS);
 
   try {
     // Look up the project here (not from the agent row) so a rename on
@@ -347,12 +376,14 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     turnError = (err as Error).message;
   } finally {
     clearTimeout(deadline);
+    clearTimeout(deadOnArrivalTimer);
     if (releaseSlot) releaseSlot();
   }
 
   const runMs = Date.now() - startedAt;
   const parsed = extractContract<T>(text, tag);
   if (timedOut) turnError = `the run was aborted after ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes without finishing`;
+  else if (deadOnArrival) turnError = `the run produced no output for ${Math.round(STALL_THRESHOLD_MS / 60_000)} minutes and was aborted (likely a dead upstream connection the subprocess never noticed)`;
   const error = turnError ?? (parsed ? null : `the agent did not return a valid \`${tag}\` block`);
   const ok = !error;
 
