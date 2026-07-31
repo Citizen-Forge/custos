@@ -42,11 +42,25 @@ export interface CreateWorkItemInput {
 
 /** Fills in fields added after a ticket was written, so reads never hand
  * back an item whose `attempts` is undefined and turns into NaN the first
- * time it's incremented. */
+ * time it's incremented. `prComments` was added to the schema after some
+ * tickets already existed on disk; the admin UI reads
+ * `item.prComments.length` unconditionally (WorkItem's type says it's
+ * always an array), so an older ticket missing the field crashed the
+ * whole ticket-detail view with "Cannot read properties of undefined
+ * (reading 'length')" -- confirmed live on a story created before the
+ * field existed. Defaulting every array-typed field here, not just the
+ * one that's crashed so far, since the next one to get a new field added
+ * without a migration step would hit the identical bug. */
 function hydrate(item: WorkItem): WorkItem {
   item.worktreePath ??= null;
   item.attempts ??= 0;
   item.nextAttemptAt ??= null;
+  item.prComments ??= [];
+  item.comments ??= [];
+  item.subtasks ??= [];
+  item.labels ??= [];
+  item.acceptanceCriteria ??= [];
+  item.history ??= [];
   return item;
 }
 
