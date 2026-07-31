@@ -55,11 +55,19 @@ const DEFAULT_AGED_MS = 5_000;
  *  CLI subprocess's Anthropic SDK client) to eat a 503 and burn its own
  *  much smaller retry budget instead of just waiting the extra few
  *  seconds inside the gateway, where the fallback-aware retry (pumpAll)
- *  already lives. Still short enough that an operator sees stuck work
- *  within a few eyeball-passes of the admin panel. Configurable via the
- *  constructor for tests (which would otherwise have to wait wall-clock
- *  minutes). */
-const DEFAULT_ENQUEUE_TIMEOUT_MS = 180_000;
+ *  already lives. Configurable via the constructor for tests (which
+ *  would otherwise have to wait wall-clock minutes).
+ *
+ *  Deliberately close to a full agent run's own ceiling rather than a
+ *  short "operator notices quickly" window: a caller stuck behind a
+ *  saturated single-concurrency local provider (or a provider cooling
+ *  down) is still making progress toward eventually getting a slot, and
+ *  killing the request early just forces the caller to retry from
+ *  scratch and re-join the same queue. Letting it keep waiting means
+ *  the only thing that can end a request before a provider ever picks
+ *  it up is the caller's own abort signal or the agent run's outer
+ *  RUN_TIMEOUT_MS. */
+const DEFAULT_ENQUEUE_TIMEOUT_MS = 40 * 60_000;
 /** retryAfterMs threaded into the ProviderUnavailableError raised when
  *  the enqueue deadline fires. 5s is a generous client-side retry
  *  hint: if the queue timed out at 60s, asking again 5s later is
