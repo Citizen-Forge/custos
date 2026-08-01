@@ -427,7 +427,7 @@ function render() {
   const app = $("#app");
   app.innerHTML = "";
   app.appendChild(makeCollapsible(renderProvidersPanel(), "providers"));
-  app.appendChild(makeCollapsible(renderGlobalServicesPanel(state.providers), "global-services"));
+  app.appendChild(makeCollapsible(renderGlobalServicesPanel(), "global-services"));
   app.appendChild(makeCollapsible(renderAllAgentsPanel(), "all-agents"));
   app.appendChild(makeCollapsible(renderFallbackSetHealthPanel(), "fallback-set-health"));
   app.appendChild(makeCollapsible(renderQueueActivityPanel(), "queue-activity"));
@@ -1267,13 +1267,18 @@ function renderProvidersPanel() {
 // -- Global services (memory curator, permission classifier, embeddings) --
 //
 // Each global service is an AgentDef with kind="global" and a built-in
-// systemRole. The same provider dropdown used for project agents shows
-// up here so the model/provider choice is answered from one place. The
-// embeddings row has one extra `embeddingBaseUrl` field — Ollama exposes
-// /api/embeddings on a different path than the OpenAI-compat chat one,
-// and someone pointing a custom Ollama host at the embeddings agent
-// needs that override to surface in the UI.
-function renderGlobalServicesPanel(providers) {
+// systemRole. Dispatch target is picked the same way as any project
+// agent: by fallbackSet, not a pinned (provider, model) pair (see
+// global-agent-routes.ts's EDITABLE_FIELDS — providerKey/model aren't
+// writable). The dropdown here selects the fallback set; "Resolves to"
+// is a read-only label showing what that set's primary entry currently
+// derives to, so an operator can see the effect without cross-referencing
+// the Fallback sets panel. The embeddings row has one extra
+// `embeddingBaseUrl` field — Ollama exposes /api/embeddings on a
+// different path than the OpenAI-compat chat one, and someone pointing a
+// custom Ollama host at the embeddings agent needs that override to
+// surface in the UI.
+function renderGlobalServicesPanel() {
   const section = el("section", { class: "panel" });
   section.appendChild(el("h2", { text: "Global services" }));
   section.appendChild(el("p", { class: "desc", text: "Project-orthogonal services the gateway runs in the background: memory curator (extracts facts from sessions), permission classifier (gates tool calls), embeddings (powers memory search). " }));
@@ -1290,31 +1295,40 @@ function renderGlobalServicesPanel(providers) {
   const order = ["memoryCurator", "permissionClassifier", "embeddings"];
   agents.sort((a, b) => order.indexOf(a.systemRole || "") - order.indexOf(b.systemRole || ""));
 
+  const fallbackSetNames = Object.keys(state.fallbackSets || {});
+
   const table = el("table", { class: "providers-table" });
   table.appendChild(el("colgroup", {}, [
+    el("col", { style: "width: 20%;" }),
+    el("col", { style: "width: 20%;" }),
     el("col", { style: "width: 22%;" }),
     el("col", { style: "width: 28%;" }),
-    el("col", { style: "width: 22%;" }),
-    el("col", { style: "width: 18%;" }),
     el("col", { style: "width: 10%;" }),
   ]));
   table.appendChild(el("tr", {}, [
     el("th", { text: "Service" }),
-    el("th", { text: "Provider" }),
-    el("th", { text: "Model" }),
+    el("th", { text: "Fallback set" }),
+    el("th", { text: "Resolves to" }),
     el("th", { text: "Endpoint" }),
     el("th", { text: "Actions" }),
   ]));
 
   for (const agent of agents) {
-    const providerOptions = ["anthropic", ...Object.keys(providers || {})];
-    const providerSelect = el("select", {});
-    for (const key of providerOptions) {
-      const opt = el("option", { value: key, text: key });
-      if (key === agent.providerKey) opt.setAttribute("selected", "selected");
-      providerSelect.appendChild(opt);
+    const fallbackSetSelect = el("select", {});
+    for (const name of fallbackSetNames) {
+      const opt = el("option", { value: name, text: name });
+      if (name === agent.fallbackSet) opt.setAttribute("selected", "selected");
+      fallbackSetSelect.appendChild(opt);
     }
-    const modelInput = el("input", { type: "text", value: agent.model, placeholder: "model name" });
+    if (!fallbackSetNames.includes(agent.fallbackSet || "")) {
+      // Current value points at a set that no longer exists (deleted
+      // out from under it) — surface it rather than silently switching
+      // the select to whatever option happens to be first.
+      const opt = el("option", { value: agent.fallbackSet || "", text: `${agent.fallbackSet || "<unset>"} (missing!)` });
+      opt.setAttribute("selected", "selected");
+      fallbackSetSelect.appendChild(opt);
+    }
+    const resolvesToText = agent.providerKey ? `${agent.providerKey} / ${agent.model}` : "—";
     const endpointInput = el("input", {
       type: "text",
       value: agent.embeddingBaseUrl || "",
@@ -1323,8 +1337,7 @@ function renderGlobalServicesPanel(providers) {
     });
     const saveBtn = el("button", { class: "row-btn primary", text: "Save", onclick: () => {
       const patch = {
-        providerKey: providerSelect.value,
-        model: modelInput.value,
+        fallbackSet: fallbackSetSelect.value,
         embeddingBaseUrl: agent.systemRole === "embeddings" ? (endpointInput.value || null) : undefined,
       };
       reloadAfter(api(`/admin/api/global-agents/${encodeURIComponent(agent.systemRole)}`, {
@@ -1338,8 +1351,8 @@ function renderGlobalServicesPanel(providers) {
         el("br"),
         el("span", { class: "small", text: agent.name }),
       ]),
-      el("td", {}, [providerSelect]),
-      el("td", {}, [modelInput]),
+      el("td", {}, [fallbackSetSelect]),
+      el("td", { class: "small", style: "font-family: monospace; font-size: 11px;", text: resolvesToText }),
       el("td", { class: "url-cell" }, [
         endpointInput,
       ]),
