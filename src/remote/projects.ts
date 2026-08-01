@@ -37,6 +37,18 @@ function slugify(name: string): string {
   return slug || "project";
 }
 
+/** Dedicated cwd for portfolio chats (see remote/chats.ts's ChatKind doc) --
+ * dot-prefixed and outside the project registry so it can never collide
+ * with a real project's slugified workspace dir, and clearly not "a
+ * project" if an operator goes browsing the workspace root directly. A
+ * portfolio chat has no project of its own to spawn `claude` in, but the
+ * CLI still needs *some* cwd. */
+export async function portfolioWorkspaceDir(): Promise<string> {
+  const dir = resolveWorkspaceDir(".portfolio");
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
 /** Resolves a project-relative directory name to an absolute path,
  * rejecting anything that escapes WORKSPACE_ROOT (e.g. a hand-crafted
  * "../../etc" dirName) instead of silently clamping it. */

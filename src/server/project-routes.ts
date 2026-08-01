@@ -4,7 +4,8 @@ import * as chats from "../remote/chats.js";
 import { RemoteSessionManager } from "../remote/session-manager.js";
 import { readTranscript } from "../remote/transcript.js";
 import { getSettings, deleteSettings, updateSettings } from "../pm/project-settings.js";
-import { STEERING_PROMPT } from "../pm/prompts.js";
+import { STEERING_PROMPT, PORTFOLIO_PROMPT } from "../pm/prompts.js";
+import { buildPortfolioMcpConfig } from "../mcp/server.js";
 import { deleteProjectAgents } from "../pm/agents.js";
 import { deleteProjectWorkItems } from "../pm/board.js";
 import { deleteProjectIdeas } from "../pm/ideas.js";
@@ -29,10 +30,11 @@ function connectUrl(token: string, initialMessage?: string): string {
  * different persona and (usually) a stronger model. Resolved here rather
  * than stored on the chat so that changing a project's steering model in
  * settings takes effect on the next reopen instead of only on new chats. */
-async function sessionOptionsFor(chat: chats.ChatRecord): Promise<{ appendSystemPrompt?: string; model?: string; kind: chats.ChatKind }> {
+async function sessionOptionsFor(chat: chats.ChatRecord): Promise<{ appendSystemPrompt?: string; model?: string; mcpConfig?: string; kind: chats.ChatKind }> {
   const kind = chat.kind ?? "chat";
+  if (kind === "portfolio") return { kind, appendSystemPrompt: PORTFOLIO_PROMPT, mcpConfig: buildPortfolioMcpConfig() };
   if (kind !== "steering") return { kind };
-  const settings = await getSettings(chat.projectId);
+  const settings = await getSettings(chat.projectId as string);
   return { kind, appendSystemPrompt: STEERING_PROMPT, model: settings.steeringModel };
 }
 
@@ -165,6 +167,36 @@ export function registerProjectRoutes(
     }
   });
 
+  // Portfolio chats aren't scoped to a project, so they get their own
+  // top-level create/list pair instead of living under
+  // /admin/api/projects/:id/chats -- everything else (rename, stop,
+  // reopen, delete, transcript) is already project-agnostic (looked up by
+  // chatId alone) and needs no portfolio-specific route.
+
+  app.get("/admin/api/portfolio-chats", async () => {
+    const records = await chats.listChats(undefined, "portfolio");
+    return {
+      chats: records.map((chat) => {
+        const live = manager.get(chat.id);
+        return { ...chat, active: !!live, connectedClients: live?.clients.size ?? 0, connectUrl: live ? connectUrl(live.token) : null };
+      }),
+    };
+  });
+
+  app.post("/admin/api/portfolio-chats", async (req, reply) => {
+    const { title } = (req.body ?? {}) as { title?: string };
+    const chat = await chats.createChat(null, title?.trim() || "New portfolio chat", "portfolio");
+    try {
+      const workspaceDir = await projects.portfolioWorkspaceDir();
+      const session = manager.start(chat.id, null, workspaceDir, await sessionOptionsFor(chat));
+      return { chat, token: session.token, connectUrl: connectUrl(session.token) };
+    } catch (err) {
+      await chats.deleteChat(chat.id);
+      reply.code(409);
+      return { error: (err as Error).message };
+    }
+  });
+
   /** A chat's past turns, replayed from Claude Code's own transcript so
    * reopening one shows the conversation instead of an empty pane. Empty
    * for a chat that never completed a turn. */
@@ -217,13 +249,19 @@ export function registerProjectRoutes(
       reply.code(404);
       return { error: "chat not found" };
     }
-    const project = await projects.getProject(chat.projectId);
-    if (!project) {
-      reply.code(404);
-      return { error: "project not found" };
+    let workspaceDir: string;
+    if (chat.projectId === null) {
+      workspaceDir = await projects.portfolioWorkspaceDir();
+    } else {
+      const project = await projects.getProject(chat.projectId);
+      if (!project) {
+        reply.code(404);
+        return { error: "project not found" };
+      }
+      workspaceDir = project.workspaceDir;
     }
     try {
-      const session = manager.start(chat.id, chat.projectId, project.workspaceDir, {
+      const session = manager.start(chat.id, chat.projectId, workspaceDir, {
         ...(await sessionOptionsFor(chat)),
         claudeSessionId: chat.claudeSessionId,
       });

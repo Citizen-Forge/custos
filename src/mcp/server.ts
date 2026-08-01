@@ -7,7 +7,26 @@ import { listWorkItems, getWorkItem, updateWorkItem, transitionWorkItem, addComm
 import { getSettings } from "../pm/project-settings.js";
 import { ensureWorkspace } from "../pm/worktrees.js";
 import { HUMAN_ASSIGNEE_ID } from "../pm/types.js";
+import { getInternalMcpKey } from "../auth/mcp-key.js";
 import type { Orchestrator } from "../pm/orchestrator.js";
+
+const PORT = process.env.PORT ?? "8787";
+
+/** The `--mcp-config` inline JSON a portfolio chat's spawned turn gets, so
+ * it can call back into this same gateway's own /mcp tools over localhost.
+ * Authenticated with the process-lifetime internal key, never the
+ * operator's own external one (see auth/mcp-key.ts). */
+export function buildPortfolioMcpConfig(): string {
+  return JSON.stringify({
+    mcpServers: {
+      custos: {
+        type: "http",
+        url: `http://localhost:${PORT}/mcp`,
+        headers: { Authorization: `Bearer ${getInternalMcpKey()}` },
+      },
+    },
+  });
+}
 
 /**
  * MCP tools for handing a fully-discussed project idea from an external

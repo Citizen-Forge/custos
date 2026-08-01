@@ -7,12 +7,17 @@ const CHATS_PATH = process.env.GATEWAY_CHATS_PATH ?? "data/chats.json";
 /** "chat" is an ordinary coding session. "steering" is a Steering Co
  * conversation: same machinery, but pinned to the project's steering model
  * and running the adversarial ideation persona, and it's the only kind that
- * can hand an idea off to the roadmap. */
-export type ChatKind = "chat" | "steering";
+ * can hand an idea off to the roadmap. "portfolio" is the only kind not
+ * scoped to a single project -- a cross-project assistant that can look
+ * up any project/ticket via its own self-referential MCP connection (see
+ * mcp/server.ts) rather than being handed one project's context up front. */
+export type ChatKind = "chat" | "steering" | "portfolio";
 
 export interface ChatRecord {
   id: string;
-  projectId: string;
+  /** Null only for kind: "portfolio" -- every other kind is scoped to
+   * exactly one project. */
+  projectId: string | null;
   title: string;
   kind: ChatKind;
   createdAt: number;
@@ -54,7 +59,7 @@ export async function getChat(id: string): Promise<ChatRecord | null> {
   return chats.find((c) => c.id === id) ?? null;
 }
 
-export async function createChat(projectId: string, title: string, kind: ChatKind = "chat"): Promise<ChatRecord> {
+export async function createChat(projectId: string | null, title: string, kind: ChatKind = "chat"): Promise<ChatRecord> {
   const chats = await readAll();
   const chat: ChatRecord = { id: randomBytes(12).toString("base64url"), projectId, title, kind, createdAt: Date.now(), endedAt: null, claudeSessionId: null };
   chats.push(chat);

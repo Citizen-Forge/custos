@@ -119,6 +119,13 @@ export interface RunTurnOptions {
    *  model to ignore once a ticket description reads like an interesting
    *  problem to go dig into; a denied tool can't be invoked at all. */
   disallowedTools?: string[];
+  /** Inline `--mcp-config` JSON string (a `{"mcpServers": {...}}` document,
+   * not a file path). Passed with `--strict-mcp-config` so the turn only
+   * ever sees the MCP servers listed here, never anything else that might
+   * be configured on the host's own ~/.claude. Used by portfolio chat
+   * sessions to give the turn a self-referential connection back to
+   * custos's own /mcp tools (see mcp/server.ts). */
+  mcpConfig?: string;
   onEvent: (event: TurnEvent) => void;
   signal: AbortSignal;
 }
@@ -190,6 +197,7 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   // misparsed as a following flag the way a bare `--disallowedTools` with
   // no values immediately swallows whatever token comes next.
   if (options.disallowedTools?.length) args.push("--disallowedTools", ...options.disallowedTools);
+  if (options.mcpConfig) args.push("--mcp-config", options.mcpConfig, "--strict-mcp-config");
 
   // stdin = 'ignore' (i.e. /dev/null) so the CLI gets an immediate EOF
   // instead of waiting on a pipe that never receives data -- with a plain

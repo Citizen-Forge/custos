@@ -71,3 +71,20 @@ export async function verifyMcpKey(candidate: string | null | undefined): Promis
   if (!stored) return false;
   return verifyHash(candidate, stored.keyHash);
 }
+
+// Generated once, lazily, on first use -- fresh every process lifetime,
+// held only in memory, never written to disk or returned from any API
+// response. This is NOT the operator's own generateMcpKey() above: that
+// one is shown once and hashed for external clients (a user's own Claude
+// Code session on their own machine); this one authenticates custos's
+// *own* spawned subprocesses (a portfolio chat's self-referential MCP
+// connection, see remote/session-manager.ts) calling back into its own
+// /mcp endpoint over localhost. Being ephemeral is fine and intentional
+// for that use -- there is nothing outside this process that ever needs
+// to remember it across a restart.
+let internalKey: string | null = null;
+
+export function getInternalMcpKey(): string {
+  if (!internalKey) internalKey = `custos_mcp_internal_${randomBytes(24).toString("base64url")}`;
+  return internalKey;
+}

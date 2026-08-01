@@ -1,6 +1,17 @@
 // Tools whose effect is always read-only/non-destructive regardless of
 // input: never worth an LLM call.
-const ALWAYS_SAFE_TOOLS = new Set(["Read", "Glob", "Grep", "NotebookRead", "TodoWrite", "WebSearch"]);
+const ALWAYS_SAFE_TOOLS = new Set([
+  "Read", "Glob", "Grep", "NotebookRead", "TodoWrite", "WebSearch",
+  // Read-only custos MCP tools (mcp/server.ts) -- a portfolio chat's own
+  // self-referential MCP connection only ever queries custos's own data
+  // through these, never mutates anything, so they're safe the same way
+  // Read/Grep are. The write tools (create_project, submit_idea,
+  // claim_ticket, submit_for_qa) deliberately stay off this list and go
+  // through the normal ask-a-human classifier flow -- they take real
+  // actions a human should confirm, the same posture the admin UI's own
+  // buttons for these actions already has.
+  "mcp__custos__list_projects", "mcp__custos__list_tickets",
+]);
 
 export function isAlwaysSafeTool(toolName: string): boolean {
   return ALWAYS_SAFE_TOOLS.has(toolName);

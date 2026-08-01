@@ -48,7 +48,8 @@ interface PendingApproval {
 
 export interface RemoteSession {
   chatId: string;
-  projectId: string;
+  /** Null only for kind: "portfolio" -- see chats.ts's ChatKind doc. */
+  projectId: string | null;
   /** Steering chats capture handoff blocks out of the assistant's text;
    * ordinary chats don't. */
   kind: ChatKind;
@@ -64,6 +65,12 @@ export interface RemoteSession {
   /** Pinned `custos:<provider>/<model>` alias for this chat, if it should
    * run somewhere other than the default route. */
   model?: string;
+  /** Inline `--mcp-config` JSON string, set for kind: "portfolio" so its
+   * turns get a self-referential connection to custos's own /mcp tools
+   * (see mcp/server.ts and auth/mcp-key.ts's internal key). Undefined for
+   * every other kind -- an ordinary or steering chat has no business
+   * calling back into custos's own API. */
+  mcpConfig?: string;
   /** Non-null while a turn's `claude -p` process is running for this chat.
    * Only one turn can run at a time per chat -- there's no persistent
    * process to queue against, each turn is a fresh spawn. */
@@ -75,6 +82,7 @@ export interface StartSessionOptions {
   appendSystemPrompt?: string;
   model?: string;
   kind?: ChatKind;
+  mcpConfig?: string;
 }
 
 /**
@@ -160,7 +168,7 @@ export class RemoteSessionManager {
    * reopened chat genuinely resume Claude Code's own conversation state
    * via `--resume` -- a real continuation, not just "same folder, fresh
    * context" like the old PTY-based reopen was. */
-  start(chatId: string, projectId: string, cwd: string, options: StartSessionOptions = {}): RemoteSession {
+  start(chatId: string, projectId: string | null, cwd: string, options: StartSessionOptions = {}): RemoteSession {
     if (this.sessions.has(chatId)) {
       throw new Error("this chat already has a live session -- stop it first");
     }
@@ -176,6 +184,7 @@ export class RemoteSessionManager {
       startedAt: Date.now(),
       appendSystemPrompt: options.appendSystemPrompt,
       model: options.model,
+      mcpConfig: options.mcpConfig,
       abortController: null,
     };
     this.sessions.set(chatId, session);
@@ -228,6 +237,7 @@ export class RemoteSessionManager {
       prompt: text,
       appendSystemPrompt: session.appendSystemPrompt,
       model: session.model,
+      mcpConfig: session.mcpConfig,
       onEvent,
       signal: controller.signal,
     };
@@ -259,6 +269,10 @@ export class RemoteSessionManager {
    * otherwise drop two ideas into the inbox.
    */
   private async captureHandoff(session: RemoteSession, text: string): Promise<void> {
+    // Only ever called for kind: "steering" (see sendUserMessage below),
+    // which is always project-scoped -- session.projectId is guaranteed
+    // non-null here even though the type is shared with "portfolio".
+    if (!session.projectId) return;
     const parsed = extractContract<HandoffContract>(text, "custos-handoff");
     if (!parsed?.title || !parsed.brief) return;
     try {

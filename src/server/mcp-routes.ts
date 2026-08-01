@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildMcpServer } from "../mcp/server.js";
-import { verifyMcpKey } from "../auth/mcp-key.js";
+import { verifyMcpKey, getInternalMcpKey } from "../auth/mcp-key.js";
 import type { Orchestrator } from "../pm/orchestrator.js";
 
 const JSON_RPC_UNAUTHORIZED = {
@@ -35,7 +35,11 @@ export function registerMcpRoutes(app: FastifyInstance, orchestrator: Orchestrat
   app.post("/mcp", async (req, reply) => {
     const auth = req.headers.authorization;
     const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
-    if (!(await verifyMcpKey(bearer))) {
+    // Accept either the operator-generated external key (hashed, see
+    // auth/mcp-key.ts) or the process-lifetime internal key a portfolio
+    // chat's own spawned subprocess authenticates with when it calls back
+    // into this same endpoint over localhost.
+    if (bearer !== getInternalMcpKey() && !(await verifyMcpKey(bearer))) {
       reply.code(401);
       return JSON_RPC_UNAUTHORIZED;
     }
