@@ -56,7 +56,7 @@ describe("ProviderStateMap", () => {
     assert.ok(e);
     assert.equal(e.maxConcurrent, 2);
     assert.equal(e.rpmLimit, 10);
-    assert.equal(e.rpmTokens, 10);
+    assert.ok(e.nextRpmSlotAt <= Date.now(), "a freshly registered provider's first request shouldn't have to wait");
     assert.equal(e.cooldownFallbackMs, 300_000);
   });
 
@@ -169,24 +169,57 @@ describe("ProviderStateMap", () => {
     r2();
   });
 
-  it("canAccept false: RPM gate", () => {
+  it("canAccept false: RPM gate -- spacing interval not yet elapsed", () => {
     const m = new ProviderStateMap();
-    m.register("gemini", { rpmLimit: 1 });
-    const release = m.acquire("gemini"); // consumes the only token
-    assert.equal(m.canAccept("gemini"), false, "no RPM tokens — should reject");
+    m.register("gemini", { rpmLimit: 1 }); // 60s spacing
+    const release = m.acquire("gemini"); // schedules the next slot 60s out
+    assert.equal(m.canAccept("gemini"), false, "next RPM slot hasn't opened yet — should reject");
     release();
   });
 
-  it("canAccept true: RPM tokens refilled", () => {
+  it("canAccept true: RPM gate opens once the spacing interval elapses", () => {
     const m = new ProviderStateMap();
-    m.register("gemini", { rpmLimit: 1 });
-    const release = m.acquire("gemini"); // token consumed
+    m.register("gemini", { rpmLimit: 1 }); // 60s spacing
+    const release = m.acquire("gemini");
 
-    // Advance past the refill window — 60s gives a full token back.
     advanceMs(60_001);
-    assert.equal(m.canAccept("gemini"), true, "tokens refilled — should accept");
+    assert.equal(m.canAccept("gemini"), true, "spacing interval elapsed — should accept");
     resetClock();
     release();
+  });
+
+  it("RPM gate spaces requests evenly rather than allowing a burst", () => {
+    const m = new ProviderStateMap();
+    m.register("gemini", { rpmLimit: 60 }); // 1s spacing
+    m.acquire("gemini");
+    // A token bucket starting full would admit several more requests
+    // back-to-back here; genuine spacing must reject all of them until
+    // a full interval has passed.
+    assert.equal(m.canAccept("gemini"), false, "second request within the same second should be rejected");
+    advanceMs(500);
+    assert.equal(m.canAccept("gemini"), false, "still within the 1s spacing interval");
+    advanceMs(501);
+    assert.equal(m.canAccept("gemini"), true, "spacing interval elapsed — should accept");
+    resetClock();
+  });
+
+  it("RPM gate: a long-idle provider doesn't let a backlog of missed slots through at once", () => {
+    const m = new ProviderStateMap();
+    m.register("gemini", { rpmLimit: 60 }); // 1s spacing
+    m.acquire("gemini");
+
+    // Advance far past several missed spacing intervals -- a naive
+    // "nextRpmSlotAt += spacingMs" without the max(now, ...) guard would
+    // leave nextRpmSlotAt many seconds in the past, and the very next
+    // acquire() would only push it forward by one spacingMs, still
+    // leaving it behind wall-clock and effectively unthrottled for a
+    // whole backlog of "already due" slots.
+    advanceMs(10_000);
+    m.acquire("gemini"); // this request itself is fine, way past due
+    assert.equal(m.canAccept("gemini"), false, "the request that just went out should still impose fresh spacing");
+    advanceMs(1001);
+    assert.equal(m.canAccept("gemini"), true);
+    resetClock();
   });
 
   it("canAccept passes all gates simultaneously", () => {
@@ -202,15 +235,15 @@ describe("ProviderStateMap", () => {
     assert.throws(() => m.acquire("ghost"), /is not registered/);
   });
 
-  it("acquire increments active and consumes an RPM token", () => {
+  it("acquire increments active and schedules the next RPM slot 6s out (rpmLimit=10 -> 60s/10)", () => {
     const m = new ProviderStateMap();
     m.register("limited", { maxConcurrent: 3, rpmLimit: 10 });
-    const initialTokens = m.get("limited")!.rpmTokens;
+    const before = Date.now();
 
     const release = m.acquire("limited");
     const entry = m.get("limited")!;
     assert.equal(entry.active, 1);
-    assert.equal(entry.rpmTokens, initialTokens - 1);
+    assert.ok(entry.nextRpmSlotAt >= before + 6_000 && entry.nextRpmSlotAt <= before + 6_001, "60s / 10rpm = 6s spacing");
 
     release();
     assert.equal(entry.active, 0);
@@ -449,7 +482,7 @@ describe("ProviderStateMap", () => {
     assert.equal(s.idle.coolingUntil, null);
     assert.equal(s.idle.breakerUntil, null);
     assert.equal(s.idle.rpmLimit, 20);
-    assert.ok(s.idle.rpmTokens !== null && s.idle.rpmTokens > 19);
+    assert.ok(s.idle.rpmReadyAt !== null && s.idle.rpmReadyAt <= Date.now(), "idle provider's next slot should already be open");
     assert.equal(s.idle.cooldownFallbackMs, null);
   });
 

@@ -104,7 +104,9 @@ export interface FallbackSetEntryHealth {
   queued: number;
   maxConcurrent: number;
   rpmLimit: number | null;
-  rpmTokens: number | null;
+  /** ms epoch of the next admissible request under the RPM spacing gate,
+   *  or null when rpmLimit is unset. May be in the past. */
+  rpmReadyAt: number | null;
 }
 
 /**
@@ -385,19 +387,14 @@ export interface FallbackSetEntryHealth {
         let queued = 0;
         let maxConcurrent = 0;
         let rpmLimit: number | null = null;
-        let rpmTokens: number | null = null;
+        let rpmReadyAt: number | null = null;
         if (!state) {
           status = "unregistered";
         } else {
-          // Snapshot to a local copy BEFORE reading or refilling so a
-          // concurrent canAccept() call from GlobalQueue doesn't race
-          // with us writing back to the shared state. The shared
-          // providerState entries are mutable (acquire/release mutate
-          // active, canAccept mutates rpmTokens/lastRpmRefill) so two
-          // readers writing back can produce a torn read where, e.g.,
-          // one reader's rpmTokens overwrite loses the other's last
-          // refill delta. snapshot-into-local is the cheapest fix that
-          // keeps ProviderStateMap's existing public API unchanged.
+          // Snapshot to a local copy before reading so a concurrent
+          // acquire()/canAccept() call from GlobalQueue can't be observed
+          // mid-mutation -- state.active/nextRpmSlotAt are mutable, this
+          // is a point-in-time read only.
           const snap = { ...state };
           coolingUntil = snap.coolingUntil;
           breakerUntil = snap.breakerUntil;
@@ -409,34 +406,19 @@ export interface FallbackSetEntryHealth {
           queued = snap.queuedInteractive + snap.queuedBackground;
           maxConcurrent = snap.maxConcurrent;
           rpmLimit = snap.rpmLimit;
-          // Refill tokens the same way canAccept does so the reported
-          // rpmTokens matches the gate decision the runtime actually
-          // uses (a bucket can refill between snapshot reads, and
-          // reporting a stale low value would falsely advertise
-          // rpm-exhausted when the next request would be admitted).
-          // This computation runs on the local snap only -- the shared
-          // state entry is untouched.
-          if (snap.rpmLimit !== null) {
-            const elapsedMs = now - snap.lastRpmRefill;
-            if (elapsedMs > 0) {
-              const add = (elapsedMs / 60_000) * snap.rpmLimit;
-              snap.rpmTokens = Math.min(snap.rpmLimit, snap.rpmTokens + add);
-              snap.lastRpmRefill = now;
-            }
-            rpmTokens = Math.max(0, Math.round(snap.rpmTokens * 100) / 100);
-          }
+          rpmReadyAt = snap.rpmLimit !== null ? snap.nextRpmSlotAt : null;
           // Classify in the same gate order canAccept uses. Cooldown
           // wins first because a 429/503 is the most transient and the
           // caller has the Retry-After to plan around; breaker second
           // because it's a recovery-state signal; capacity third
           // because that's the steady-state signal; RPM last because
-          // it's the most predictive (a momentary burst shouldn't read
-          // as "exhausted" to the operator when a refill is due in
-          // seconds).
+          // it's the most predictive (a slot due in a second or two
+          // shouldn't read as "exhausted" to the operator the same way
+          // a genuinely stuck provider does).
           if (coolingUntil !== null && now < coolingUntil) status = "cooldown";
           else if (breakerUntil !== null && now < breakerUntil) status = "circuit-broken";
           else if (maxConcurrent > 0 && active >= maxConcurrent) status = "at-capacity";
-          else if (rpmLimit !== null && rpmTokens !== null && rpmTokens < 1) status = "rpm-exhausted";
+          else if (rpmReadyAt !== null && now < rpmReadyAt) status = "rpm-exhausted";
           else status = "available";
         }
         entries.push({
@@ -449,7 +431,7 @@ export interface FallbackSetEntryHealth {
           queued,
           maxConcurrent,
           rpmLimit,
-          rpmTokens,
+          rpmReadyAt,
         });
         if (livePick === null && status === "available") {
           livePick = { provider: entry.provider, model: entry.model, index: i };

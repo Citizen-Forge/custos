@@ -26,10 +26,18 @@ export interface ProviderStateEntry {
   queuedBackground: number;
   /** Requests-per-minute limit. null = unlimited. */
   rpmLimit: number | null;
-  /** Current RPM token-bucket level. Starts at rpmLimit. */
-  rpmTokens: number;
-  /** Last RPM token refill timestamp. */
-  lastRpmRefill: number;
+  /** Earliest time (ms epoch) the next request may be admitted, when
+   *  rpmLimit is set. Requests are spaced evenly at 60_000/rpmLimit ms
+   *  apart -- deliberately not a bursty token bucket. A token bucket
+   *  starts full and lets up to rpmLimit requests through back-to-back
+   *  the moment they're all ready (e.g. right after a cooldown clears),
+   *  which is exactly what tripped repeated real 429s from Anthropic in
+   *  production: 6 near-simultaneous requests succeeded, then the next
+   *  two fired together and were both rejected, even with rpmLimit set
+   *  well above the 60s-average rate that burst worked out to. Anthropic
+   *  cared about spacing within the burst, not just the per-minute
+   *  total, and a token bucket has no notion of spacing at all. */
+  nextRpmSlotAt: number;
   /** Per-provider cooldown fallback ms (e.g. Gemini = 5min, Ollama = 30s). */
   cooldownFallbackMs: number | null;
 }
@@ -100,7 +108,6 @@ export class ProviderStateMap {
       if (init?.maxConcurrent !== undefined) existing.maxConcurrent = init.maxConcurrent;
       if (init?.rpmLimit !== undefined) {
         existing.rpmLimit = init.rpmLimit;
-        existing.rpmTokens = Math.min(existing.rpmTokens, init.rpmLimit);
       }
       if (init?.cooldownFallbackMs !== undefined) existing.cooldownFallbackMs = init.cooldownFallbackMs;
       return;
@@ -113,8 +120,9 @@ export class ProviderStateMap {
       queuedInteractive: 0,
       queuedBackground: 0,
       rpmLimit: init?.rpmLimit ?? null,
-      rpmTokens: init?.rpmLimit ?? 0,
-      lastRpmRefill: Date.now(),
+      // Ready immediately -- a freshly registered/idle provider shouldn't
+      // have to wait out a spacing interval before its first request.
+      nextRpmSlotAt: Date.now(),
       cooldownFallbackMs: init?.cooldownFallbackMs ?? null,
     });
   }
@@ -130,20 +138,10 @@ export class ProviderStateMap {
     return this.state.get(name);
   }
 
-  /** Refill RPM tokens based on elapsed time. */
-  private refillTokens(entry: ProviderStateEntry): void {
-    if (entry.rpmLimit === null) return;
-    const now = Date.now();
-    const elapsedMs = now - entry.lastRpmRefill;
-    if (elapsedMs <= 0) return;
-    const add = (elapsedMs / 60_000) * entry.rpmLimit;
-    entry.rpmTokens = Math.min(entry.rpmLimit, entry.rpmTokens + add);
-    entry.lastRpmRefill = now;
-  }
-
   /** Check if a provider can accept a request right now. Returns true if
    * all gates pass (not cooling, not circuit-broken, under concurrency cap,
-   * has RPM tokens). This is a read-only check — does NOT consume anything. */
+   * RPM spacing interval elapsed). This is a read-only check — does NOT
+   * consume anything. */
   canAccept(name: string): boolean {
     const entry = this.state.get(name);
     if (!entry) return false;
@@ -154,9 +152,8 @@ export class ProviderStateMap {
     if (entry.breakerUntil !== null && now < entry.breakerUntil) return false;
     // Concurrency gate (0 = unlimited)
     if (entry.maxConcurrent > 0 && entry.active >= entry.maxConcurrent) return false;
-    // RPM gate
-    this.refillTokens(entry);
-    if (entry.rpmLimit !== null && entry.rpmTokens < 1) return false;
+    // RPM gate: the next slot hasn't opened yet.
+    if (entry.rpmLimit !== null && now < entry.nextRpmSlotAt) return false;
     return true;
   }
 
@@ -166,9 +163,18 @@ export class ProviderStateMap {
   acquire(name: string): () => void {
     const entry = this.state.get(name);
     if (!entry) throw new Error(`Provider "${name}" is not registered`);
-    this.refillTokens(entry);
     entry.active++;
-    if (entry.rpmLimit !== null) entry.rpmTokens = Math.max(0, entry.rpmTokens - 1);
+    if (entry.rpmLimit !== null) {
+      const now = Date.now();
+      const spacingMs = 60_000 / entry.rpmLimit;
+      // max(now, nextRpmSlotAt): if the schedule fell behind wall-clock
+      // (the provider sat idle past its last scheduled slot), the next
+      // spacing interval counts from now, not from some stale past slot
+      // -- otherwise a long-idle provider would let a whole backlog of
+      // "already past due" slots through at once, which is exactly the
+      // burst behavior this replaced the token bucket to avoid.
+      entry.nextRpmSlotAt = Math.max(now, entry.nextRpmSlotAt) + spacingMs;
+    }
     return () => this.release(name);
   }
 
@@ -274,12 +280,17 @@ export class ProviderStateMap {
     coolingUntil: number | null;
     breakerUntil: number | null;
     rpmLimit: number | null;
-    rpmTokens: number | null;
+    /** ms epoch of the next admissible request, or null when rpmLimit is
+     *  unset. May be in the past (no request has come in since the last
+     *  slot opened) -- callers wanting "is it ready right now" compare
+     *  against Date.now() themselves rather than this baking in a
+     *  snapshot-time boolean that could go stale between the call and
+     *  the caller reading it. */
+    rpmReadyAt: number | null;
     cooldownFallbackMs: number | null;
   }> {
     const result: Record<string, any> = {};
     for (const [name, entry] of this.state) {
-      this.refillTokens(entry);
       result[name] = {
         active: entry.active,
         queuedInteractive: entry.queuedInteractive,
@@ -288,7 +299,7 @@ export class ProviderStateMap {
         coolingUntil: entry.coolingUntil,
         breakerUntil: entry.breakerUntil,
         rpmLimit: entry.rpmLimit,
-        rpmTokens: entry.rpmLimit !== null ? Math.max(0, Math.round(entry.rpmTokens * 100) / 100) : null,
+        rpmReadyAt: entry.rpmLimit !== null ? entry.nextRpmSlotAt : null,
         cooldownFallbackMs: entry.cooldownFallbackMs,
       };
     }

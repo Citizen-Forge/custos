@@ -1653,12 +1653,18 @@ function renderFallbackSetHealthPanel() {
 // (the agent card, the activity log, etc.) that wants to show
 // "why isn't this entry being used".
 function renderEntryStatusBadge(entry) {
+  // Requests are spaced evenly (60s / rpmLimit apart), not drawn from a
+  // bursty token bucket -- see provider-state.ts. rpmReadyAt is the ms
+  // epoch of the next admissible request.
+  const rpmSuffix = entry.rpmLimit
+    ? ` · RPM: ${entry.rpmReadyAt && entry.rpmReadyAt > Date.now() ? `ready in ${Math.ceil((entry.rpmReadyAt - Date.now()) / 1000)}s` : "ready"} (limit ${entry.rpmLimit}/min)`
+    : "";
   const labels = {
-    available: { text: "available", cls: "ok", title: `Active: ${entry.active}${entry.maxConcurrent > 0 ? `/${entry.maxConcurrent}` : ""}${entry.queued > 0 ? ` (queued: ${entry.queued})` : ""}${entry.rpmLimit ? ` · RPM: ${entry.rpmTokens}/${entry.rpmLimit}` : ""}` },
+    available: { text: "available", cls: "ok", title: `Active: ${entry.active}${entry.maxConcurrent > 0 ? `/${entry.maxConcurrent}` : ""}${entry.queued > 0 ? ` (queued: ${entry.queued})` : ""}${rpmSuffix}` },
     cooldown: { text: "cooldown", cls: "warn", title: entry.coolingUntil ? `Cooling until ${new Date(entry.coolingUntil).toISOString()}` : "Cooldown active" },
     "circuit-broken": { text: "breaker", cls: "warn", title: entry.breakerUntil ? `Circuit-broken until ${new Date(entry.breakerUntil).toISOString()}` : "Circuit breaker open" },
     "at-capacity": { text: "at-capacity", cls: "warn", title: `Active: ${entry.active}/${entry.maxConcurrent}${entry.queued > 0 ? ` · queued: ${entry.queued}` : ""}` },
-    "rpm-exhausted": { text: "rpm-empty", cls: "warn", title: `RPM bucket empty (limit ${entry.rpmLimit}/min). Waiting for refill.` },
+    "rpm-exhausted": { text: "rpm-spacing", cls: "warn", title: `Waiting for the next RPM slot (limit ${entry.rpmLimit}/min, requests spaced ${Math.round(60 / entry.rpmLimit)}s apart)${entry.rpmReadyAt ? ` -- ready in ${Math.ceil((entry.rpmReadyAt - Date.now()) / 1000)}s` : ""}.` },
     unregistered: { text: "missing", cls: "off", title: "Provider not registered — config drift, the named provider may have been removed." },
   };
   const def = labels[entry.status] || { text: entry.status, cls: "off", title: "" };
