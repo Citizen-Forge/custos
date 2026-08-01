@@ -218,7 +218,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   const resolved = runtime.resolveFallbackSet(agent);
   const effectiveProviderKey = resolved?.providerKey ?? agents.primaryPick(agent, runtime.config)?.providerKey ?? null;
   const effectiveModel = resolved?.model ?? agents.primaryPick(agent, runtime.config)?.model ?? null;
-  const releaseSlot = resolved?.release ?? null;
+  let releaseSlot = resolved?.release ?? null;
   if (!effectiveProviderKey || !effectiveModel) {
     throw new Error(`agent ${agent.id} has no fallbackSet or no live primary pick; the PM must assign one before this run can be dispatched`);
   }
@@ -257,6 +257,21 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     if (releaseSlot) releaseSlot();
     throw err;
   }
+  // Release the slot the moment the probe confirms the provider is
+  // live -- it was only ever meant to guard against spawning the
+  // (expensive) CLI subprocess against a provider that's actually
+  // unavailable, not to reserve capacity for the run's entire
+  // lifetime. Every real request this run makes goes through
+  // GlobalQueue, which does its own acquire/release per dispatch
+  // against this same ProviderStateMap; holding this slot any longer
+  // double-counts against maxConcurrent for work the queue is already
+  // accounting for. At maxConcurrent=1 that was a hard deadlock: the
+  // outer hold consumed the only slot for the run's whole duration,
+  // so the run's own dispatches -- competing for that same exhausted
+  // capacity -- could never get a slot to make the progress that
+  // would let the outer hold ever release.
+  releaseSlot?.();
+  releaseSlot = null;
   // Whether this run's reported cost is real money is decided here, from
   // the provider/model that the run will actually dispatch against --
   // see agents.listProviderOptions. A free subscription ride counts as
@@ -361,7 +376,6 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     turnError = (err as Error).message;
   } finally {
     clearTimeout(deadline);
-    if (releaseSlot) releaseSlot();
   }
 
   const runMs = Date.now() - startedAt;
