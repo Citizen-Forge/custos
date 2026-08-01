@@ -33,21 +33,17 @@ const CURATOR_INTERVAL_MS = Number(process.env.CURATOR_INTERVAL_MS ?? 15 * 60_00
 // Node's global fetch() (used by every provider's dispatch -- openai-compatible.ts,
 // anthropic.ts) is built on undici, whose default Agent caps bodyTimeout AND
 // headersTimeout at 300_000ms (5 minutes) -- undici/lib/dispatcher/client.js's
-// kBodyTimeout default is literally `300e3`. A slow self-hosted model (a local
-// Ollama instance with no GPU) generating a long response for one turn can easily
-// exceed that, at which point undici tears down the connection mid-stream. That
-// doesn't surface as a clean error to the client -- our own reply pipe to the
-// spawned `claude` subprocess dies with it (logged by Fastify as "stream closed
-// prematurely" / ERR_STREAM_PREMATURE_CLOSE), and the CLI, having received a
-// SSE stream that just stops with no terminating event, doesn't reliably notice
-// and can sit "running" for the rest of its 45-minute ceiling producing nothing.
-// Raising both well past what any real generation should take (RUN_TIMEOUT_MS
-// itself is the true backstop at 45 minutes) fixes this at the source rather
-// than only bounding the damage after the fact (see agent-runner.ts's
-// dead-on-arrival watchdog, which catches the case where this still isn't
-// enough). Set once, globally, at startup -- every fetch() in the process
-// benefits, not just one call site.
-setGlobalDispatcher(new Agent({ bodyTimeout: 20 * 60_000, headersTimeout: 20 * 60_000 }));
+// kBodyTimeout default is literally `300e3`. This was previously raised to 20
+// minutes to tolerate a slow self-hosted Ollama instance going silent for a
+// long prefill on large (complex-tier) prompts. Now that `local` is out of the
+// complex/engineer fallback set and only sees standard/fast/embeddings/classifier
+// prompts, that worst case no longer applies -- 5 minutes (undici's own default,
+// set explicitly here for clarity) is plenty, and it means a genuinely hung
+// request (upstream stopped responding mid-stream) fails over an order of
+// magnitude faster instead of blocking a provider slot for 20 minutes. Set
+// once, globally, at startup -- every fetch() in the process benefits, not
+// just one call site.
+setGlobalDispatcher(new Agent({ bodyTimeout: 5 * 60_000, headersTimeout: 5 * 60_000 }));
 
 async function main() {
   await ensureAdminPassword();
