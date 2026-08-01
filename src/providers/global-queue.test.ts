@@ -963,4 +963,39 @@ describe("GlobalQueue", () => {
 
     release();
   });
+
+  // -- periodic pump safety net ------------------------------------------------
+
+  it("periodic pump dispatches a request stranded behind a purely time-based RPM gate, with no reactive trigger", async () => {
+    const state = new ProviderStateMap();
+    // rpmLimit high enough that spacing is a few ms, not real seconds --
+    // keeps this test fast without needing to fake Date.now().
+    state.register("gemini", { rpmLimit: 6_000 }); // 60_000ms / 6000 = 10ms spacing
+    // Consume the current RPM slot directly (not through the queue) so
+    // canAccept() is genuinely false at the moment complete() is called --
+    // mirrors the live bug: something else (a pre-spawn probe, in
+    // production) took the slot outside the queue's own bookkeeping.
+    const preConsume = state.acquire("gemini");
+    preConsume();
+
+    const { provider: gemini, seenOptions, resolvePromise } = makeRecordingProvider("gemini");
+    // Resolved up front -- JS promises are safe to settle before anything
+    // awaits them, and whenever the periodic sweep eventually dispatches
+    // and calls provider.complete(), it gets back this already-resolved
+    // promise straight away.
+    resolvePromise(OK_RESPONSE);
+    // periodicPumpIntervalMs well under the 10ms RPM spacing window's
+    // typical elapse-and-check cadence, and critically: nothing in this
+    // test ever calls q.pump() or completes any other request, so the
+    // ONLY thing that can dispatch this request is the periodic sweep.
+    const q = new GlobalQueue({ gemini }, state, undefined, { periodicPumpIntervalMs: 5 });
+
+    const p = q.complete([{ provider: "gemini", model: "gemini-2.5-flash" }], ZERO_REQ);
+    assert.equal(q.queuedTotal, 1, "RPM gate closed at the moment of the call — request should queue, not dispatch immediately");
+
+    const result = await p;
+    assert.equal(result.status, 200, "periodic sweep should have found the RPM gate open and dispatched");
+    assert.equal(seenOptions.length, 1, "provider.complete() was actually invoked");
+    assert.equal(q.queuedTotal, 0);
+  });
 });

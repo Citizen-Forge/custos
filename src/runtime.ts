@@ -1,7 +1,7 @@
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { SpendTracker } from "./providers/spend-tracker.js";
-import { GlobalQueue, type QueueContext } from "./providers/global-queue.js";
+import { GlobalQueue, PERIODIC_PUMP_INTERVAL_MS, type QueueContext } from "./providers/global-queue.js";
 import { ProviderStateMap } from "./providers/provider-state.js";
 import { ActivityLog, type DispatchContext } from "./providers/activity-log.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
@@ -588,7 +588,12 @@ export interface FallbackSetEntryHealth {
       this.queue.setProviders(bareProviders);
       this.queue.setStateMap(stateMap);
     } else {
-      this.queue = new GlobalQueue(bareProviders, stateMap, this.activityLog);
+      // periodicPumpIntervalMs: opt-in on GlobalQueue (see its own doc
+      // comment) -- this is the one real production instance, so it's the
+      // one place that should actually enable the safety-net sweep.
+      this.queue = new GlobalQueue(bareProviders, stateMap, this.activityLog, {
+        periodicPumpIntervalMs: PERIODIC_PUMP_INTERVAL_MS,
+      });
     }
     // Mirror the bare provider map onto the Runtime so pre-spawn probes
     // can bypass the GlobalQueue without each probe call reconstructing

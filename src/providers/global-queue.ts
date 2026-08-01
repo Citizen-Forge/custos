@@ -74,6 +74,13 @@ const DEFAULT_ENQUEUE_TIMEOUT_MS = 40 * 60_000;
  *  likely to either find a real provider or time out again — just
  *  with a fresh budget — rather than to add load. */
 const DEFAULT_ENQUEUE_RETRY_AFTER_MS = 5_000;
+/** How often the safety-net pump sweep runs (see the constructor). Frequent
+ *  enough that a request stranded behind a purely time-based gate (RPM
+ *  spacing as short as a few seconds, a short cooldown) is picked back up
+ *  within a couple of seconds of becoming dispatchable, cheap enough
+ *  (pump() is just a scan of two in-memory arrays) that running it
+ *  unconditionally every tick has no meaningful cost. */
+export const PERIODIC_PUMP_INTERVAL_MS = 2_000;
 /** Maximum number of dropped / timed-out entries retained in memory
  *  for the admin endpoint to read. 50 keeps the buffer well under
  *  100KB even with the full fallback chain captured per entry, so it
@@ -88,6 +95,17 @@ const DEAD_LETTER_CAP = 50;
 export interface GlobalQueueOptions {
   enqueueTimeoutMs?: number;
   enqueueRetryAfterMs?: number;
+  /** Enables the periodic safety-net pump sweep (see the constructor) at
+   *  this interval. Opt-in, unlike every other option here: a long-lived
+   *  recurring timer touching every queue instance's state for the rest
+   *  of its life is a fundamentally different risk than a one-shot
+   *  per-request setTimeout, and defaulting it on tripped up the test
+   *  suite's many existing GlobalQueue instances that deliberately leave
+   *  requests queued mid-test to assert on queue depth -- the sweep would
+   *  dispatch them out from under the assertion. Production's one real
+   *  instance (runtime.ts) passes this explicitly; everything else (every
+   *  test) gets no periodic pump at all unless a test opts in itself. */
+  periodicPumpIntervalMs?: number;
 }
 
 export interface FallbackTarget {
@@ -207,13 +225,19 @@ export class GlobalQueue {
    *  aren't exposed because the deadline is per-request-watchdog, not
    *  a tunable runtime knob. Tests pass small values via the options
    *  arg in new GlobalQueue(...) to keep CI fast. */
-  private readonly options: Required<GlobalQueueOptions>;
+  private readonly options: Required<Omit<GlobalQueueOptions, "periodicPumpIntervalMs">>;
   /** Operator-facing buffer of dropped work. Fixed-size FIFO ring: the
    *  oldest entry is shifted off when DEAD_LETTER_CAP is hit so the
    *  newest overflow is the diagnostic value. Accessed through
    *  `deadLettersSnapshot()` (returns a defensive copy) to keep
    *  callers from leaking references into the queue's bookkeeping. */
   private readonly deadLetter: DeadLetterEntry[] = [];
+  /** See the constructor comment -- a reactive-only pump() can strand a
+   *  request behind a purely time-based gate (RPM spacing, cooldown) once
+   *  the system goes fully idle. Undefined unless periodicPumpIntervalMs
+   *  was passed (opt-in; production only). Not cleared anywhere when set:
+   *  it's unref()'d, so it's harmless to outlive the queue. */
+  private readonly periodicPumpTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     providers: Record<string, Provider>,
@@ -234,6 +258,32 @@ export class GlobalQueue {
       enqueueTimeoutMs: options.enqueueTimeoutMs ?? DEFAULT_ENQUEUE_TIMEOUT_MS,
       enqueueRetryAfterMs: options.enqueueRetryAfterMs ?? DEFAULT_ENQUEUE_RETRY_AFTER_MS,
     };
+    // Safety-net sweep: pump() is otherwise purely reactive, called only
+    // from a slot-release's finally block (see tryExecute/executeWithRelease
+    // below) -- there is no event for "a cooldown just expired" or "the RPM
+    // spacing interval just elapsed", both of which are gates that open on
+    // their own as time passes rather than because something completed.
+    // Observed live: with every provider genuinely idle (active=0
+    // everywhere) and several requests queued behind nothing but an
+    // elapsed RPM window, canAccept() correctly returned true but nothing
+    // was left to call pump() and notice -- the queue simply never checked
+    // again. A cheap periodic pump closes that gap; unref()'d so it can't
+    // keep the process alive.
+    //
+    // Opt-in (only starts when periodicPumpIntervalMs is passed) rather
+    // than defaulted on for every instance: this timer outlives a single
+    // request, ticking for as long as the queue exists, which is a
+    // fundamentally different risk from every other option here. The test
+    // suite has many GlobalQueue instances that deliberately leave
+    // requests queued mid-test to assert on queue depth (concurrency caps,
+    // enqueue-timeout races, dead-letter behavior) -- an always-on sweep
+    // dispatched them out from under those assertions and hung the whole
+    // file. runtime.ts's one real production instance passes this
+    // explicitly; nothing else needs to.
+    if (options.periodicPumpIntervalMs) {
+      this.periodicPumpTimer = setInterval(() => this.pump(), options.periodicPumpIntervalMs);
+      this.periodicPumpTimer.unref();
+    }
   }
 
   /** Replace providers map on config reload. */
