@@ -237,8 +237,19 @@ export interface AgentRun {
 export const STALL_THRESHOLD_MS = 6 * 60_000;
 
 /** Hard wall-clock ceiling on a single agent run. Past this it's aborted:
- * whatever it's doing, it isn't converging, and it's spending money. */
-export const RUN_TIMEOUT_MS = Number(process.env.CUSTOS_RUN_TIMEOUT_MS ?? 45 * 60_000);
+ * whatever it's doing, it isn't converging, and it's spending money.
+ *
+ * Raised from 45 to 90 minutes: with `local` sitting first in the
+ * `complex` fallback set and a single concurrency slot, a Task
+ * sub-agent's own request can land 8+ deep in `local`'s queue behind
+ * other work -- observed live taking the full 45 minutes just to clear
+ * that queue depth before the sub-agent's own dispatch even starts,
+ * with the parent run blocked on it the whole time and toolCalls stuck
+ * at 0. That's real (if slow) progress being cut off at the wire, not a
+ * hung run -- see the "This operation was aborted" investigation in the
+ * routes.ts SSE early-commit fix for the related client-timeout half of
+ * this same debugging session. */
+export const RUN_TIMEOUT_MS = Number(process.env.CUSTOS_RUN_TIMEOUT_MS ?? 90 * 60_000);
 
 export type DeployTarget = "none" | "docker-local" | "aws";
 
