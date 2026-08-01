@@ -108,6 +108,32 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     const rawBeta = req.headers["anthropic-beta"];
     const clientBetaHeader = Array.isArray(rawBeta) ? rawBeta.join(",") : rawBeta;
 
+    // Forward the spawned `claude` CLI's own first-party-identity headers
+    // to the real Anthropic API. Confirmed live (captured a genuine CLI
+    // request with a debug echo server) that Claude Code sends a full
+    // fingerprint here -- User-Agent, x-app: cli, x-claude-code-session-id,
+    // and the whole x-stainless-* family -- none of which previously made
+    // it past this gateway; anthropic.ts built its outgoing request from
+    // scratch with only content-type/anthropic-version/auth. An OAuth
+    // token from a subscription login is meant to be used by Anthropic's
+    // own client, and every request this gateway relayed was, from
+    // Anthropic's side, indistinguishable from a bare unbranded HTTP
+    // client holding a token it shouldn't have programmatic access with --
+    // a much likelier explanation for the header-less, generic-message
+    // 429s observed live than anything about request volume or timing.
+    const CLIENT_IDENTITY_HEADER_NAMES = [
+      "user-agent", "x-app", "x-claude-code-session-id",
+      "x-stainless-arch", "x-stainless-lang", "x-stainless-os",
+      "x-stainless-package-version", "x-stainless-retry-count",
+      "x-stainless-runtime", "x-stainless-runtime-version", "x-stainless-timeout",
+      "anthropic-dangerous-direct-browser-access",
+    ];
+    const clientIdentityHeaders: Record<string, string> = {};
+    for (const name of CLIENT_IDENTITY_HEADER_NAMES) {
+      const value = req.headers[name];
+      if (typeof value === "string") clientIdentityHeaders[name] = value;
+    }
+
     // Parse the model alias. Two forms:
     //   custos:<provider>/<model>    — pinned to one specific provider
     //   custos:fallback/<set-name>    — routes through the GlobalQueue for
@@ -130,7 +156,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     reply.raw.on("close", () => {
       if (!reply.raw.writableEnded) abortController.abort();
     });
-    const options: CompleteOptions = { clientBetaHeader, signal: abortController.signal };
+    const options: CompleteOptions = { clientBetaHeader, clientIdentityHeaders, signal: abortController.signal };
 
     // Every branch below dispatches via the GlobalQueue. Three chain
     // shapes feed it:

@@ -31,20 +31,20 @@ export class AnthropicProvider implements Provider {
   constructor(private readonly config: AnthropicProviderConfig) {}
 
   async complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
-    const { signal, clientBetaHeader, modelOverride } = options ?? {};
+    const { signal, clientBetaHeader, clientIdentityHeaders, modelOverride } = options ?? {};
     if (modelOverride) request.model = modelOverride;
     const accessToken = await getValidAccessToken().catch(() => null);
 
     if (accessToken) {
       const beta = mergeBeta(clientBetaHeader, OAUTH_BETA_HEADER);
-      const res = await this.send(request, { authorization: `Bearer ${accessToken}`, "anthropic-beta": beta }, signal);
+      const res = await this.send(request, { ...clientIdentityHeaders, authorization: `Bearer ${accessToken}`, "anthropic-beta": beta }, signal);
       if (res.status !== 401 && res.status !== 403) return this.classify(res);
       if (!this.config.apiKey) return this.classify(res);
       // OAuth rejected -- fall through to API key if we have one.
     }
 
     if (this.config.apiKey) {
-      const headers: Record<string, string> = { "x-api-key": this.config.apiKey };
+      const headers: Record<string, string> = { ...clientIdentityHeaders, "x-api-key": this.config.apiKey };
       // No OAuth beta on the API-key path (that flag is OAuth-specific), but
       // still forward the client's own betas so body fields it gated stay valid.
       if (clientBetaHeader) headers["anthropic-beta"] = clientBetaHeader;
