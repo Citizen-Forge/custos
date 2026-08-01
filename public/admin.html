@@ -741,15 +741,18 @@ function renderProvidersPanel() {
         anthProbeBtn.textContent = "✓";
         anthProbeBtn.style.color = "var(--ok)";
         anthProbeBtn.title = `HTTP ${result.status}${result.statusText ? ` — ${result.statusText}` : ""}`;
+        showToast(`Anthropic probe succeeded (HTTP ${result.status})`);
       } else {
         anthProbeBtn.textContent = "✕";
         anthProbeBtn.style.color = "var(--danger)";
         anthProbeBtn.title = result.error || "Probe failed";
+        showToast(result.error || "Anthropic probe failed", true);
       }
     } catch (err) {
       anthProbeBtn.textContent = "✕";
       anthProbeBtn.style.color = "var(--danger)";
       anthProbeBtn.title = err.message;
+      showToast(err.message, true);
     }
     setTimeout(() => {
       anthProbeBtn.disabled = false;

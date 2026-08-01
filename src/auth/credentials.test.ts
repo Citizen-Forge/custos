@@ -27,7 +27,7 @@ process.env.USERPROFILE = tempDir;
 // (Node's os.homedir() reads USERPROFILE on win32, $HOME on POSIX; we set
 // both so the test is portable regardless of where it runs.)
 const credentialsModule = await import("./credentials.js");
-const { isValidTokenSet, saveTokens, syncSpawnedSessionCredentials, loadStoredTokens } = credentialsModule;
+const { isValidTokenSet, saveTokens, syncSpawnedSessionCredentials, loadStoredTokens, clearTokens, getOAuthStatus } = credentialsModule;
 
 test.after(() => {
   rmSync(tempDir, { recursive: true, force: true });
@@ -210,4 +210,45 @@ test("syncSpawnedSessionCredentials writes a valid mirror when input is valid ev
     "number",
     "mirror must carry the refreshTokenExpiresAt derived from raw.refresh_token_expires_in (Claude Code's local-login check requires it)",
   );
+});
+
+// The admin panel's "Disconnect OAuth" bug: clearTokens() previously only
+// removed the gateway's own store, leaving a stale ~/.claude/.credentials.json
+// mirror in place -- since that mirror is only ever written as a projection
+// of Custos's own tokens (never an independent host login in this
+// deployment), the very next getOAuthStatus() call fell back to
+// importFromClaudeCode(), found the still-valid mirror, and reported
+// connected again with source "claude-code". Disconnect appeared to
+// silently undo itself. Pinning: after clearTokens(), both files must be
+// gone and getOAuthStatus() must report disconnected.
+test("clearTokens removes both the gateway store and the Claude Code mirror", async () => {
+  const gatewayPath = process.env.GATEWAY_CREDENTIALS_PATH!;
+  mkdirSync(join(gatewayPath, ".."), { recursive: true });
+  const validTokens = {
+    accessToken: "sk-ant-oat01-disconnect-test",
+    refreshToken: "sk-ant-ort01-disconnect-test",
+    expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+  };
+  writeFileSync(gatewayPath, JSON.stringify(validTokens, null, 2), "utf8");
+
+  // Simulate the mirror the periodic sync would have already written from
+  // this same TokenSet before the user ever clicks Disconnect.
+  const mirrorPath = join(tempDir, ".claude", ".credentials.json");
+  mkdirSync(join(tempDir, ".claude"), { recursive: true });
+  writeFileSync(
+    mirrorPath,
+    JSON.stringify({ claudeAiOauth: { accessToken: validTokens.accessToken, refreshToken: validTokens.refreshToken, expiresAt: validTokens.expiresAt } }, null, 2),
+    "utf8",
+  );
+
+  const beforeStatus = await getOAuthStatus();
+  assert.equal(beforeStatus.connected, true, "sanity check: connected before disconnect");
+
+  await clearTokens();
+
+  assert.equal(existsSync(gatewayPath), false, "gateway store removed");
+  assert.equal(existsSync(mirrorPath), false, "Claude Code mirror removed");
+
+  const afterStatus = await getOAuthStatus();
+  assert.equal(afterStatus.connected, false, "must not fall back to the now-removed mirror");
 });

@@ -63,11 +63,19 @@ export async function saveTokens(tokens: TokenSet): Promise<void> {
   await writeFile(CREDENTIALS_PATH, JSON.stringify(tokens, null, 2), "utf8");
 }
 
-/** Removes Custos's own stored tokens. Doesn't affect Claude Code's own
- * credentials file -- if Custos has no tokens of its own afterward, the
- * next request just re-imports from Claude Code again if that's present. */
+/** Removes Custos's own stored tokens AND the mirror at
+ * ~/.claude/.credentials.json. The mirror is not an independent host
+ * login in this deployment -- syncSpawnedSessionCredentials() only ever
+ * writes it as a projection of Custos's own tokens (getValidOwnTokenSet,
+ * never the import fallback), so it's purely a reflection of whatever
+ * Custos last connected. Clearing only CREDENTIALS_PATH left that stale
+ * reflection in place: the very next getOAuthStatus() call would fall
+ * back to importFromClaudeCode(), find the still-valid mirror, and
+ * report connected again with source "claude-code" -- Disconnect
+ * appearing to silently undo itself. */
 export async function clearTokens(): Promise<void> {
   await rm(CREDENTIALS_PATH, { force: true });
+  await rm(CLAUDE_CODE_CREDENTIALS_PATH, { force: true });
 }
 
 /**
