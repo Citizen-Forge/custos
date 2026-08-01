@@ -5,6 +5,14 @@ import type { Runtime } from "../runtime.js";
 import { getApiKeySource } from "../config.js";
 import { getOAuthStatus } from "../auth/credentials.js";
 import { maskApiKey, describeProviders, updateConfig, PROVIDER_PRESETS } from "./admin-shared.js";
+import { mcpKeyConfigured, generateMcpKey, revokeMcpKey } from "../auth/mcp-key.js";
+
+// `||` not `??` -- an explicitly empty GATEWAY_PUBLIC_URL should still fall
+// through to the localhost default, matching admin-routes.ts's identical
+// buildSetupInstructions precedent and project-routes.ts's own publicUrl().
+function publicUrl(): string {
+  return process.env.GATEWAY_PUBLIC_URL || `http://localhost:${process.env.PORT ?? 8787}`;
+}
 
 export function registerConfigRoutes(app: FastifyInstance, runtime: Runtime): void {
   app.get("/admin/api/version", async () => {
@@ -42,7 +50,24 @@ export function registerConfigRoutes(app: FastifyInstance, runtime: Runtime): vo
       // second source of truth the admin UI would have to reconcile.
       fallbackSets: config.fallbackSets ?? {},
       providerPresets: PROVIDER_PRESETS,
+      mcp: { configured: await mcpKeyConfigured(), url: `${publicUrl()}/mcp` },
     };
+  });
+
+  // -- MCP key ------------------------------------------------------------
+  //
+  // Generates or revokes the bearer token that gates POST /mcp (see
+  // mcp-routes.ts). The plaintext key is returned exactly once, here, at
+  // generation time -- only its hash is ever persisted (auth/mcp-key.ts),
+  // so there is no "reveal" endpoint to build or secure.
+
+  app.post("/admin/api/mcp/generate-key", async () => {
+    return { key: await generateMcpKey() };
+  });
+
+  app.post("/admin/api/mcp/revoke-key", async () => {
+    await revokeMcpKey();
+    return { ok: true };
   });
 
   // -- Runtime stats ------------------------------------------------------

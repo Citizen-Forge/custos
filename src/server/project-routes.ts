@@ -5,13 +5,14 @@ import { RemoteSessionManager } from "../remote/session-manager.js";
 import { readTranscript } from "../remote/transcript.js";
 import { getSettings, deleteSettings, updateSettings } from "../pm/project-settings.js";
 import { STEERING_PROMPT } from "../pm/prompts.js";
-import { ensureProjectAgents, deleteProjectAgents } from "../pm/agents.js";
+import { deleteProjectAgents } from "../pm/agents.js";
 import { deleteProjectWorkItems } from "../pm/board.js";
 import { deleteProjectIdeas } from "../pm/ideas.js";
 import { deleteProjectRuns } from "../pm/runs.js";
-import { releaseProjectWorkspaces, cloneInto } from "../pm/worktrees.js";
-import { deleteProjectSecrets, resolveAgentEnv } from "../pm/vault.js";
-import { deleteProjectFacts, writeFact } from "../pm/facts.js";
+import { releaseProjectWorkspaces } from "../pm/worktrees.js";
+import { deleteProjectSecrets } from "../pm/vault.js";
+import { deleteProjectFacts } from "../pm/facts.js";
+import { createProjectWithSetup } from "../pm/project-creation.js";
 import type { Runtime } from "../runtime.js";
 
 function publicUrl(): string {
@@ -69,45 +70,12 @@ export function registerProjectRoutes(
       return { error: "name is required" };
     }
 
-    let project;
     try {
-      project = await projects.createProject(name.trim(), dirName);
+      return await createProjectWithSetup({ name, dirName, repoUrl, description }, onSurveyRequested);
     } catch (err) {
       reply.code(400);
       return { error: (err as Error).message };
     }
-
-    // Seed the built-in role agents up front so the project's four tabs are
-    // all functional the moment it exists.
-    await ensureProjectAgents(project.id);
-
-    const warnings: string[] = [];
-    if (repoUrl?.trim()) {
-      try {
-        // Clone with the project's own git credentials so a private repo
-        // works without the URL ever carrying a token.
-        const env = await resolveAgentEnv(project.id);
-        const { defaultBranch } = await cloneInto(project.workspaceDir, repoUrl.trim(), env);
-        await updateSettings(project.id, { repoUrl: repoUrl.trim(), defaultBranch });
-        await writeFact({ projectId: project.id, key: "repo.url", value: repoUrl.trim(), category: "repo" });
-        await writeFact({ projectId: project.id, key: "repo.defaultBranch", value: defaultBranch, category: "repo" });
-      } catch (err) {
-        // The project still exists and is usable -- a failed clone is worth
-        // reporting, not worth destroying everything else that succeeded.
-        warnings.push(`Could not clone ${repoUrl}: ${(err as Error).message.slice(0, 300)}`);
-      }
-    }
-
-    if (description?.trim()) {
-      await writeFact({ projectId: project.id, key: "project.description", value: description.trim(), category: "docs" });
-    }
-
-    // Survey an existing codebase so the first real ticket isn't also the
-    // first attempt at working out how to build and test it.
-    const surveying = !warnings.length && !!repoUrl?.trim();
-    if (surveying) void onSurveyRequested?.(project.id);
-
-    return { project, warnings, surveying };
   });
 
   app.patch("/admin/api/projects/:id", async (req, reply) => {

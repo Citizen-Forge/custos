@@ -231,6 +231,17 @@ export interface AgentRun {
   };
 }
 
+/** Sentinel `assigneeAgentId` for a ticket a human claimed directly (via the
+ * MCP claim_ticket tool) instead of an engineer agent. Deliberately not a
+ * real row in agents.json -- every downstream reader of `assigneeAgentId`
+ * already null-checks `agentStore.getAgent()`'s result (QA capability
+ * feedback, run-result recording, the board UI's agent lookup), so this
+ * sentinel is safe wherever it's read. The one place that isn't automatic:
+ * the tick loop's engineer-dispatch filter, which must skip tickets
+ * assigned to this sentinel explicitly (see orchestrator.ts) or it would
+ * retry `runEngineer` against a nonexistent agent every tick forever. */
+export const HUMAN_ASSIGNEE_ID = "human";
+
 /** How long a run may produce no events before it's considered stalled.
  * Long enough to cover a slow model thinking or a long test suite, short
  * enough that a genuinely hung run is visible within a coffee break. */

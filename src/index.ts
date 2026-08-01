@@ -23,6 +23,7 @@ import { migrateToFallbackSets } from "./pm/agents.js";
 import { syncSpawnedSessionCredentials } from "./auth/credentials.js";
 import { StatsMonitor, DEFAULT_ALERT_RULES } from "./runtime-stats.js";
 import { registerMetricsRoute } from "./server/metrics.js";
+import { registerMcpRoutes } from "./server/mcp-routes.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const QDRANT_URL = process.env.QDRANT_URL ?? "http://localhost:6333";
@@ -162,6 +163,7 @@ async function main() {
   registerRemoteRoutes(app, remoteSessionManager);
   registerProjectRoutes(app, runtime, remoteSessionManager, (projectId) => void orchestrator.surveyProject(projectId));
   registerPmRoutes(app, runtime, orchestrator);
+  registerMcpRoutes(app, orchestrator);
   registerPmEventRoutes(app, orchestrator);
   registerUiRoutes(app);
   registerMetricsRoute(app, runtime);

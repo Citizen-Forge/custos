@@ -22,10 +22,11 @@
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
     "@fastify/websocket": "^11.3.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@qdrant/js-client-rest": "^1.13.0",
     "fastify": "^5.1.0",
     "undici": "^7.2.0",
-    "zod": "^3.24.1"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

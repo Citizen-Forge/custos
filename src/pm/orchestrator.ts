@@ -15,6 +15,7 @@ import { hasGitCredentials, listSecrets } from "./vault.js";
 import { ASSIGN_MODELS_SHAPE, ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
 import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, DeployTarget, ProjectSettings, WorkItem } from "./types.js";
+import { HUMAN_ASSIGNEE_ID } from "./types.js";
 
 const TICK_MS = Number(process.env.CUSTOS_ORCHESTRATOR_TICK_MS ?? 20_000);
 
@@ -179,7 +180,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     if (settings.autonomy.engineer) {
       const limit = await this.engineerLimit(project, settings);
       const inProgress = (await board.listWorkItems(project.id)).filter(
-        (item) => item.status === "in_progress" && item.assigneeAgentId && !board.isBackingOff(item),
+        // HUMAN_ASSIGNEE_ID tickets are excluded deliberately -- a human
+        // claimed the work directly (MCP claim_ticket), there's no agent
+        // to dispatch, and runEngineer's own agentStore.getAgent() lookup
+        // would just fail silently every tick otherwise.
+        (item) => item.status === "in_progress" && item.assigneeAgentId && item.assigneeAgentId !== HUMAN_ASSIGNEE_ID && !board.isBackingOff(item),
       );
       const live = this.countBusy("engineer:");
       const dispatchable = inProgress.filter((item) => !this.busy.has(`engineer:${item.id}`));
