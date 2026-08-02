@@ -8,10 +8,10 @@ import * as runs from "./runs.js";
 import { getSettings, updateSettings } from "./project-settings.js";
 import { listFacts, renderFacts, writeFact } from "./facts.js";
 import { runAgent } from "./agent-runner.js";
-import { ensureWorkspace, isGitRepo, releaseWorkspace } from "./worktrees.js";
+import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
 import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-registry.js";
-import { hasGitCredentials, listSecrets } from "./vault.js";
+import { hasGitCredentials, listSecrets, resolveAgentEnv } from "./vault.js";
 import { ASSIGN_MODELS_SHAPE, ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
 import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, DeployTarget, ProjectSettings, WorkItem } from "./types.js";
@@ -648,6 +648,24 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         ...(workspace.branch ? { branch: workspace.branch } : {}),
       });
 
+      // Project GitHub PATs are injected per agent process as GH_TOKEN; do
+      // not test the container's persistent gh login. Probe the same scoped
+      // environment before spending an engineer run that cannot deliver.
+      const gitEnv = workspace.isolated ? await resolveAgentEnv(projectId) : null;
+      if (workspace.isolated) {
+        if (!(await hasGitCredentials(projectId))) {
+          const backedOff = await board.recordAttemptFailure(workItemId);
+          this.emit("activity", projectId, `Held "${item.title}": no project secret is marked for Git use (attempt ${backedOff?.attempts ?? 1}).`);
+          return;
+        }
+        const access = await verifyGitHubAccess(workspace.cwd, gitEnv!);
+        if (!access.ok) {
+          const backedOff = await board.recordAttemptFailure(workItemId);
+          this.emit("activity", projectId, `Held "${item.title}": project GitHub credentials are unusable (attempt ${backedOff?.attempts ?? 1}): ${access.reason}`);
+          return;
+        }
+      }
+
       const parent = item.parentId ? await board.getWorkItem(item.parentId) : null;
       const prompt = [
         await this.projectHeader(project, settings),
@@ -686,23 +704,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.emit("activity", projectId, `${agent.name} failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${result.error ?? "unknown error"}; will retry.`);
         return;
       }
-      await board.clearAttempts(workItemId);
-
       const contract = result.parsed;
       if (contract.subtasks?.length) {
         await board.setSubtasks(workItemId, contract.subtasks.map((s) => s.title ?? "").filter(Boolean));
       }
-      await board.updateWorkItem(workItemId, {
-        ...(contract.branch ? { branch: contract.branch } : {}),
-        ...(contract.prUrl ? { prUrl: contract.prUrl } : {}),
-      });
-      const followUps = contract.followUps?.length ? `\n\n**Noticed but not fixed (out of scope for this ticket):**\n${contract.followUps.map((f) => `- ${f}`).join("\n")}` : "";
-      const engineerCommentBody = `${contract.summary ?? ""}${followUps}`;
-      if (engineerCommentBody.trim()) {
-        await board.addComment(workItemId, agent.id, agentStore.displayName(agent), engineerCommentBody);
-      }
 
       if (contract.status === "blocked") {
+        await board.clearAttempts(workItemId);
         // Blocked work goes back to the backlog rather than sitting in
         // in_progress: it needs a product decision, and the backlog is
         // where the product owner looks. Its checkout is released -- the
@@ -714,6 +722,19 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         return;
       }
 
+      // A PR URL in the final JSON is only a claim. Verify it against GitHub
+      // before allowing QA to run, using the same project-scoped PAT that
+      // the engineer received.
+      if (workspace.isolated && contract.prUrl && workspace.branch) {
+        const delivery = await verifyPullRequest(workspace.cwd, contract.prUrl, workspace.branch, settings.defaultBranch, gitEnv!);
+        if (!delivery.ok) {
+          const backedOff = await board.recordAttemptFailure(workItemId);
+          this.emit("activity", projectId, `${agent.name} could not hand off "${item.title}" to QA (attempt ${backedOff?.attempts ?? 1}): ${delivery.reason}`);
+          return;
+        }
+        contract.prUrl = delivery.url;
+      }
+
       // PR enforcement gate: if the project has a git repository and the
       // engineer didn't open a pull request, warn and keep the ticket
       // in_progress. QA reviews the PR diff, not the whole checkout, so
@@ -721,16 +742,29 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // dispatched again (the ticket is still in_progress) and should
       // push its branch and create the PR on the next attempt.
       if (workspace.isolated && !contract.prUrl) {
-        await board.addComment(
+        const backedOff = await board.recordAttemptFailure(workItemId);
+        if ((backedOff?.attempts ?? 1) === 1) {
+          await board.addComment(
           workItemId,
           agent.id,
           agentStore.displayName(agent),
           "**No pull request found.** The ticket was marked as complete but no PR was created. QA reviews the PR diff, not the whole checkout — push your branch and open a pull request against the default branch before requesting QA review.",
-        );
-        this.emit("activity", projectId, `${agent.name} reported "${item.title}" done without a PR. The ticket stays in_progress until a PR is opened.`);
+          );
+        }
+        this.emit("activity", projectId, `${agent.name} reported "${item.title}" done without a PR (attempt ${backedOff?.attempts ?? 1}); retrying after backoff.`);
         return;
       }
 
+      await board.clearAttempts(workItemId);
+      await board.updateWorkItem(workItemId, {
+        ...(contract.branch ? { branch: contract.branch } : {}),
+        ...(contract.prUrl ? { prUrl: contract.prUrl } : {}),
+      });
+      const followUps = contract.followUps?.length ? `\n\n**Noticed but not fixed (out of scope for this ticket):**\n${contract.followUps.map((f) => `- ${f}`).join("\n")}` : "";
+      const engineerCommentBody = `${contract.summary ?? ""}${followUps}`;
+      if (engineerCommentBody.trim()) {
+        await board.addComment(workItemId, agent.id, agentStore.displayName(agent), engineerCommentBody);
+      }
       await board.transitionWorkItem(workItemId, "qa", agent.id, "ready for QA");
       await agentStore.recordRunResult(agent.id, { completed: true, runMs: result.runMs });
       this.emit("activity", projectId, `${agent.name} finished "${item.title}" and sent it to QA.`);

@@ -29,6 +29,59 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+async function github(cwd: string, args: string[], env: Record<string, string>): Promise<string> {
+  const { stdout } = await run("gh", args, {
+    cwd,
+    env: { ...process.env, ...env },
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout.trim();
+}
+
+/**
+ * Checks the exact environment that an engineer will receive. `GH_TOKEN`
+ * authentication is intentionally process-scoped, so `gh auth status` run
+ * in the gateway container itself is not a meaningful test of a project PAT.
+ */
+export async function verifyGitHubAccess(cwd: string, env: Record<string, string>): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    await github(cwd, ["auth", "status", "--hostname", "github.com"], env);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message.slice(0, 500) };
+  }
+}
+
+/**
+ * The engineer's final JSON is a claim, not evidence. Before QA is allowed
+ * to run, resolve the claimed PR with the same project-scoped PAT and ensure
+ * it belongs to this ticket branch and targets the configured default branch.
+ */
+export async function verifyPullRequest(
+  cwd: string,
+  prUrl: string,
+  branch: string,
+  defaultBranch: string,
+  env: Record<string, string>,
+): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
+  try {
+    const raw = await github(cwd, ["pr", "view", prUrl, "--json", "url,headRefName,baseRefName"], env);
+    const pr = JSON.parse(raw) as { url?: unknown; headRefName?: unknown; baseRefName?: unknown };
+    if (typeof pr.url !== "string" || typeof pr.headRefName !== "string" || typeof pr.baseRefName !== "string") {
+      return { ok: false, reason: "GitHub returned an incomplete pull-request record" };
+    }
+    if (pr.headRefName !== branch) {
+      return { ok: false, reason: `PR head branch is ${pr.headRefName}, expected ${branch}` };
+    }
+    if (pr.baseRefName !== defaultBranch) {
+      return { ok: false, reason: `PR base branch is ${pr.baseRefName}, expected ${defaultBranch}` };
+    }
+    return { ok: true, url: pr.url };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message.slice(0, 500) };
+  }
+}
+
 /**
  * Whether this directory can hand out isolated checkouts. A repository with
  * no commits yet can't: its HEAD is unborn, so there is nothing for a

@@ -31,8 +31,29 @@ const SAFE_BASH_VERBS = new Set(["pwd", "ls", "echo", "cat", "head", "tail", "wc
 // pipe into something else, substitute a command).
 const SHELL_COMPOSITION_PATTERN = /[><|;`]|&&|\$\(/;
 
+/**
+ * Autonomous engineers need to be able to complete the narrowly-defined
+ * delivery sequence after writing code. Sending these commands through the
+ * small permission classifier made ordinary `git push` / `gh pr create`
+ * calls liable to stall in an unanswered approval state. Keep the exception
+ * deliberately tight: no shell composition, no force/delete pushes, and no
+ * arbitrary `gh` subcommands.
+ */
+function isRoutineDeliveryCommand(command: string): boolean {
+  const parts = command.trim().split(/\s+/);
+  const [tool, subcommand, action] = parts;
+
+  if (tool === "git" && ["status", "diff", "log", "add", "commit"].includes(subcommand ?? "")) return true;
+  if (tool === "git" && subcommand === "push") {
+    return !parts.some((part) => part === "--force" || part === "-f" || part === "--delete" || part.startsWith("--force-with-lease"));
+  }
+  if (tool === "gh" && subcommand === "pr" && ["create", "view"].includes(action ?? "")) return true;
+
+  return false;
+}
+
 export function isSafeBashCommand(command: string): boolean {
   if (SHELL_COMPOSITION_PATTERN.test(command)) return false;
   const verb = command.trim().split(/\s+/)[0] ?? "";
-  return SAFE_BASH_VERBS.has(verb);
+  return SAFE_BASH_VERBS.has(verb) || isRoutineDeliveryCommand(command);
 }
