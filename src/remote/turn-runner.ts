@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Runtime } from "../runtime.js";
-import { resolveClaudeAuthEnv } from "../auth/credentials.js";
 import { ensureHeadlessSettingsFile, type HookProfile } from "./headless-settings.js";
 
 const PORT = process.env.PORT ?? "8787";
@@ -144,7 +143,6 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   // fallback) onto the subprocess env. The policy lives in credentials.ts so
   // unit tests can pin exactly when each layer activates without spawning a
   // real `claude` subprocess.
-  const auth = await resolveClaudeAuthEnv(runtime);
   const settingsPath = await ensureHeadlessSettingsFile(options.hookProfile ?? "chat");
 
   const env: Record<string, string> = {};
@@ -162,7 +160,11 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   // needed and the CLI uses the credentials file it wrote.
   env.ANTHROPIC_BASE_URL = `http://localhost:${PORT}`;
   if (model) env.ANTHROPIC_MODEL = model;
-  if (auth.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = auth.ANTHROPIC_API_KEY;
+  // Claude Code only needs a non-empty key to pass its local startup check.
+  // Provider authentication happens later, inside Custos's global queue.
+  // Keeping this synthetic prevents expired Anthropic OAuth from blocking
+  // turns assigned to Groq or a local model before they reach the gateway.
+  env.ANTHROPIC_API_KEY = "custos-gateway";
 
   // The CLI's own stream-idle watchdog (confirmed by inspecting the
   // bundled binary's source) aborts a request after
