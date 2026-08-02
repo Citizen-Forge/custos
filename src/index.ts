@@ -71,7 +71,18 @@ async function main() {
   // were already shipping a fix for in syncSpawnedSessionCredentials.
   // Doing it once at boot guarantees the file is correct before any
   // subprocess even tries to read it.
-  await syncSpawnedSessionCredentials();
+  //
+  // Best-effort, deliberately: this runs before Fastify even exists below,
+  // so an unguarded throw here (e.g. a dead refresh token producing
+  // invalid_grant) would crash-loop the entire gateway before the admin
+  // panel -- the one place OAuth can actually be reconnected -- ever
+  // comes up. Every other provider (groq, gemini, local) and the whole
+  // admin surface must stay usable regardless of Anthropic OAuth health.
+  try {
+    await syncSpawnedSessionCredentials();
+  } catch (err) {
+    console.error(`[boot] syncSpawnedSessionCredentials failed, continuing without it: ${(err as Error).message}`);
+  }
 
   // One-time migration: existing agents created before the fallback-set
   // architecture carry providerKey/model with no fallbackSet. Apply the
