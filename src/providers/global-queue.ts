@@ -689,6 +689,15 @@ export class GlobalQueue {
     entry: QueuedEntry,
   ): Promise<ProviderResponse & { providerName: string }> {
     const release = this.state.acquire(name);
+    // Guards against a double-release: the ProviderUnavailableError branch
+    // below releases explicitly (see its comment for why), and the
+    // `finally` skips it when that's already happened.
+    let released = false;
+    const releaseOnce = (): void => {
+      if (released) return;
+      released = true;
+      release();
+    };
     this.recordEvent({
       requestId: entry.requestId,
       timestamp: Date.now(),
@@ -737,6 +746,20 @@ export class GlobalQueue {
           errorMessage: (err as Error).message,
           ...entry.context,
         });
+        // Release THIS attempt's slot now, before recursing -- not in the
+        // outer `finally`. tryExecute() below can fall through to
+        // enqueue() and sit there for up to the enqueue timeout (or
+        // recurse again through this same catch on the eventual
+        // redispatch), and the outer `finally` doesn't run until that
+        // whole chain settles. Deferring the release that long held this
+        // provider's slot "active" for the entire nested wait even though
+        // the real request against it had already finished -- with every
+        // provider down at once, repeated fail/re-queue/redispatch cycles
+        // over hours stacked these into a growing, never-recovered count
+        // (observed live: active=165 on a provider with no concurrency
+        // cap to ever surface the leak by blocking on it).
+        releaseOnce();
+        this.pump();
         // Re-queue on the same fallback set so the queue can pick the
         // next available entry. Surface the upstream's last error to
         // whoever is awaiting the request. Pass the entry's existing
@@ -769,7 +792,7 @@ export class GlobalQueue {
       });
       throw err;
     } finally {
-      release();
+      releaseOnce();
       this.pump();
     }
   }

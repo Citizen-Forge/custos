@@ -519,6 +519,66 @@ describe("GlobalQueue", () => {
     Date.now = () => origNow; // reset
   });
 
+  it("releases a provider's slot immediately on failure during a queued redispatch, not after the whole re-queue chain settles (regression: active-count leak)", async () => {
+    // Regression for a real leak observed live: with every provider down
+    // at once for hours, `active` on providers with no concurrency cap
+    // climbed into the hundreds and never recovered. Root cause was
+    // executeWithRelease() only releasing its slot in the outer `finally`,
+    // which doesn't run until the whole recursive re-queue-and-redispatch
+    // chain it kicks off on ProviderUnavailableError settles -- so a
+    // provider's slot stayed "active" for as long as the entire nested
+    // wait took (up to the enqueue timeout, or another full cycle of this
+    // same failure), even though the real attempt against it had long
+    // since finished.
+    const origNow = Date.now();
+    Date.now = () => origNow;
+
+    const state = new ProviderStateMap();
+    state.register("flaky", { cooldownFallbackMs: 30_000 });
+    const { provider: flaky } = makeRecordingProvider("flaky", { throwUnavailableError: true });
+    const q = new GlobalQueue({ flaky }, state);
+
+    // First attempt: tryExecute's own per-entry loop tries flaky, fails,
+    // cools it (60_000ms — hardcoded retryAfterMs in throwUnavailableError),
+    // and — as the only fallback target — falls through to enqueue().
+    const p1 = q.complete([{ provider: "flaky", model: "m" }], ZERO_REQ);
+    p1.catch(() => {}); // never settles in this test; only state is asserted
+    // q.complete() returns before the inner rejection has actually been
+    // caught (that's still a pending microtask) -- give it a few ticks
+    // before asserting the post-attempt state.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(q.queuedTotal, 1, "queued after the first failed attempt");
+    assert.equal(state.get("flaky")!.active, 0, "tryExecute's own loop already released this slot correctly");
+
+    // Advance past the cooldown and pump manually — this dispatches the
+    // queued entry via dispatchQueued -> executeWithRelease, acquiring a
+    // NEW slot for this second attempt.
+    Date.now = () => origNow + 61_000;
+    q.pump();
+
+    // executeWithRelease's fetch is the same always-rejecting provider, so
+    // this second attempt fails too, hits the ProviderUnavailableError
+    // branch, and recurses into tryExecute — which finds flaky freshly
+    // re-cooled (from THIS failure) and falls through to enqueue() again,
+    // a promise that won't settle until yet another cooldown clears. Give
+    // the async chain up to that point a few microtask ticks to run.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(
+      state.get("flaky")!.active,
+      0,
+      "second attempt's slot must be released immediately, not held hostage by the still-pending re-queued promise",
+    );
+
+    Date.now = () => origNow; // reset
+  });
+
   // -- non-2xx responses -----------------------------------------------
 
   it("records upstream error body in activity log for non-2xx responses", async () => {
