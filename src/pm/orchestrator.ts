@@ -199,7 +199,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
     }
 
-    if (settings.autonomy.devops && settings.deployTarget !== "none") {
+    // Not gated on deployTarget -- devops's first job (merging the PR once
+    // QA approved it) applies to every project, deploy target or not. The
+    // deploy-target-specific work inside runDevops is what's conditional.
+    if (settings.autonomy.devops) {
       const deployable = (await board.listWorkItems(project.id)).filter(
         (item) => item.status === "complete" && !item.labels.includes(DEPLOYED_LABEL),
       );
@@ -1176,22 +1179,29 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (!item || item.labels.includes(DEPLOYED_LABEL)) return;
       const ctx = await this.resolve(projectId, "devops");
       if (!ctx) return;
-      if (ctx.settings.deployTarget === "none") return;
+      // No early return on deployTarget === "none" here anymore -- merging
+      // the PR is this function's job regardless of whether there's
+      // anything to deploy afterward. The prompt below only includes the
+      // deploy-target sections when there actually is one.
 
       const prompt = [
         await this.projectHeader(ctx.project, ctx.settings),
         "",
-        `## Deployment target: ${ctx.settings.deployTarget}`,
-        "",
-        deploymentTargetSection(ctx.settings.deployTarget, ctx.settings.deployConfig),
-        "",
-        Object.entries(ctx.settings.deployConfig).map(([key, value]) => `- ${key}: ${value}`).join("\n") || "_No target-specific settings configured._",
-        "",
-        ctx.settings.budget.infraMonthlyUsd !== null
-          ? `## Infrastructure budget\n\n$${ctx.settings.budget.infraMonthlyUsd.toFixed(2)} per month, hard limit.`
-          : "## Infrastructure budget\n\nNo cap is configured, but keep costs proportionate and report your estimate anyway.",
-        "",
-        "## The work to deploy",
+        ...(ctx.settings.deployTarget === "none"
+          ? ["## Deployment target: none — merge the PR and stop; there is nothing to deploy for this project.", ""]
+          : [
+              `## Deployment target: ${ctx.settings.deployTarget}`,
+              "",
+              deploymentTargetSection(ctx.settings.deployTarget, ctx.settings.deployConfig),
+              "",
+              Object.entries(ctx.settings.deployConfig).map(([key, value]) => `- ${key}: ${value}`).join("\n") || "_No target-specific settings configured._",
+              "",
+              ctx.settings.budget.infraMonthlyUsd !== null
+                ? `## Infrastructure budget\n\n$${ctx.settings.budget.infraMonthlyUsd.toFixed(2)} per month, hard limit.`
+                : "## Infrastructure budget\n\nNo cap is configured, but keep costs proportionate and report your estimate anyway.",
+              "",
+            ]),
+        "## The work to merge (and deploy, if there's a target)",
         "",
         renderWorkItem(item, { includeComments: true }),
       ].join("\n");
@@ -1228,12 +1238,22 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.emit("activity", projectId, `DevOps deployment missing awsRegion on "${item.title}". Use the project's deployConfig.awsRegion or report it in the contract.`);
         return;
       }
-      if (contract.status !== "deployed") {
+      if (contract.status !== "deployed" && contract.status !== "merged") {
         this.emit("activity", projectId, `DevOps is blocked on "${item.title}": ${contract.blockedReason ?? "no reason given"}`);
         return;
       }
+      // DEPLOYED_LABEL doubles as "devops has taken its terminal action on
+      // this ticket" regardless of whether that action was a merge-only
+      // (no deployTarget) or a full deploy -- either way there's nothing
+      // left for devops to do here, so it must not be re-dispatched.
       await board.updateWorkItem(workItemId, { labels: [...item.labels, DEPLOYED_LABEL] });
-      this.emit("activity", projectId, `DevOps deployed "${item.title}"${contract.estimatedMonthlyUsd ? ` (~$${contract.estimatedMonthlyUsd}/mo)` : ""}${contract.awsRegion ? ` in ${contract.awsRegion}` : ""}.`);
+      this.emit(
+        "activity",
+        projectId,
+        contract.status === "merged"
+          ? `DevOps merged the pull request for "${item.title}".`
+          : `DevOps deployed "${item.title}"${contract.estimatedMonthlyUsd ? ` (~$${contract.estimatedMonthlyUsd}/mo)` : ""}${contract.awsRegion ? ` in ${contract.awsRegion}` : ""}.`,
+      );
     });
   }
 }

@@ -296,7 +296,9 @@ Pass it when the criteria hold and you found nothing material. Do not hold a tic
 
 ## Pull request comments
 
-**Post your verdict and findings as comments on the pull request.** Inline comments tied to specific lines are best for pointing at the exact issue. If the verdict is a pass, leave a summary comment approving the change. If the verdict is a fail, leave comments on the specific failing parts so the engineer can see what to fix without re-reading the whole ticket.
+**Post your verdict and findings as comments on the pull request.** Inline comments tied to specific lines are best for pointing at the exact issue. If the verdict is a fail, leave comments on the specific failing parts so the engineer can see what to fix without re-reading the whole ticket.
+
+**If the verdict is a pass, your summary comment's first line must be exactly \`QA approved\`**, followed by your usual summary underneath. DevOps checks the PR for that literal line before merging anything — it's the one signal that gates a merge, not a status field or a vibe, so the exact phrase matters more than it looks like it should. Leaving it off (or paraphrasing it) means DevOps will never merge a PR you actually approved.
 
 Use \`gh pr comment <pr-url> --body "<your comment>"\` to post. The PR url is shown in your prompt context.`;
 
@@ -318,7 +320,13 @@ The first commit matters more than it looks: until a repository has one, it has 
 
 ## What you do
 
-**Prepare and execute the deployment** for the project's configured target — the orchestrator hands you a per-target block already, so follow the target-specific guidance there. The schema of your contract (\`DeployContract\`) carries an \`awsRegion\` field that's only meaningful for AWS deployments; the orchestrator enforces presence when target === aws and re-runs the work otherwise.
+**Merge the pull request first.** A ticket reaches you because QA passed it, but QA passing and the PR being mergeable are two different facts — check the PR's comments yourself (\`gh pr view <pr-url> --comments\`) for a comment whose first line is exactly \`QA approved\`. That literal line is the only thing that gates a merge:
+
+- **Found it:** merge with \`gh pr merge <pr-url> --squash --delete-branch\` (or the project's existing merge convention if the repo's history shows a different one — read recent merges before assuming squash). Do this before anything else below.
+- **Didn't find it** (no comment, or a comment that approves in spirit but doesn't start with that exact line): stop. Report \`status: "blocked"\` with why — don't merge on your own judgement of the diff, and don't ask QA to re-comment; that round trip isn't yours to manage.
+- **PR won't merge cleanly** (conflicts, failing required checks): stop and report \`status: "blocked"\` with what's blocking it. Don't force-merge or resolve conflicts yourself — that's engineering work, not deployment work.
+
+**Then, if this project has a deployment target, prepare and execute it.** If \`deployTarget\` is \`none\`, there's nothing further to do — merging was the whole job, report \`status: "merged"\` and stop. Otherwise the orchestrator hands you a per-target block below; follow the target-specific guidance there. The schema of your contract (\`DeployContract\`) carries an \`awsRegion\` field that's only meaningful for AWS deployments; the orchestrator enforces presence when target === aws and re-runs the work otherwise.
 
 Read the repo first: existing Dockerfiles, compose files, CI config and infrastructure code are the source of truth for how this project already deploys, and you extend them rather than inventing a parallel scheme.
 
@@ -484,8 +492,8 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
 };
 
 export const DEVOPS_SHAPE = `{
-  "status": "deployed" | "blocked",
-  "summary": "markdown: what you deployed, where, and how to roll it back",
+  "status": "merged" | "deployed" | "blocked",
+  "summary": "markdown: what you merged/deployed, where, and how to roll it back",
   "awsRegion": "string -- required when deployTarget is aws, null otherwise",
   "resourcesCreated": [{ "kind": "string", "name": "string", "estimatedMonthlyUsd": 0 }],
   "estimatedMonthlyUsd": 0,

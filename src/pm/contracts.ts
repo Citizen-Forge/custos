@@ -91,7 +91,11 @@ export interface ProvisionContract extends WithFacts {
 }
 
 export interface DevopsContract extends WithFacts {
-  status?: "deployed" | "blocked";
+  /** "merged" -- PR merged, project has no deployTarget so that's the
+   *  whole job. "deployed" -- PR merged AND the deploy step completed.
+   *  "blocked" -- didn't merge (no "QA approved" comment, merge conflict)
+   *  or the deploy step itself failed. */
+  status?: "merged" | "deployed" | "blocked";
   summary?: string;
   resourcesCreated?: Array<{ kind?: string; name?: string; estimatedMonthlyUsd?: number }>;
   estimatedMonthlyUsd?: number;
