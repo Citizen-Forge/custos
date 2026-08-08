@@ -93,22 +93,32 @@ export async function verifyPullRequest(
  * is only dispatched now for the genuinely judgement-requiring part
  * (deployment), after this gate has already passed.
  */
+/** Distinguishes "will resolve on its own, just keep polling" from "this
+ *  needs an engineer to actually do something" -- the two look identical
+ *  as a bare not-ready boolean, but treating them the same means a real
+ *  conflict just sits re-checked forever with nothing ever able to fix
+ *  it, since the gate itself doesn't write code. The caller uses this to
+ *  decide between backing off in place (waiting/pending/error) and
+ *  bouncing the ticket back to in_progress (unmergeable) so an engineer
+ *  is actually dispatched at it again. */
+export type PrGateBlockKind = "waiting" | "pending" | "unmergeable" | "error";
+
 export async function checkPrReadyToMerge(
   cwd: string,
   prUrl: string,
   env: Record<string, string>,
-): Promise<{ ready: true } | { ready: false; reason: string }> {
+): Promise<{ ready: true } | { ready: false; kind: PrGateBlockKind; reason: string }> {
   let raw: string;
   try {
     raw = await github(cwd, ["pr", "view", prUrl, "--json", "mergeable,mergeStateStatus,comments"], env);
   } catch (err) {
-    return { ready: false, reason: `could not read PR state: ${(err as Error).message.slice(0, 300)}` };
+    return { ready: false, kind: "error", reason: `could not read PR state: ${(err as Error).message.slice(0, 300)}` };
   }
   let pr: { mergeable?: string; mergeStateStatus?: string; comments?: Array<{ body?: string }> };
   try {
     pr = JSON.parse(raw);
   } catch {
-    return { ready: false, reason: "GitHub returned an unparseable PR record" };
+    return { ready: false, kind: "error", reason: "GitHub returned an unparseable PR record" };
   }
   // Matches the QA prompt's exact contract: the comment's first line must
   // be precisely "QA approved", not a paraphrase or a comment that merely
@@ -116,17 +126,18 @@ export async function checkPrReadyToMerge(
   // deterministic gate.
   const approved = (pr.comments ?? []).some((c) => (c.body ?? "").trim().split("\n")[0].trim() === "QA approved");
   if (!approved) {
-    return { ready: false, reason: 'no comment on the pull request starts with the literal line "QA approved"' };
+    return { ready: false, kind: "waiting", reason: 'no comment on the pull request starts with the literal line "QA approved"' };
   }
   if (pr.mergeable === "UNKNOWN") {
     // GitHub computes this asynchronously after a push; a fresh PR can
     // sit in UNKNOWN for a few seconds. Not a real block -- just try
     // again on the next tick rather than reporting a false blocker.
-    return { ready: false, reason: "GitHub hasn't finished computing mergeability yet; will recheck" };
+    return { ready: false, kind: "pending", reason: "GitHub hasn't finished computing mergeability yet; will recheck" };
   }
   if (pr.mergeable !== "MERGEABLE") {
     return {
       ready: false,
+      kind: "unmergeable",
       reason: `pull request is not mergeable (mergeable=${pr.mergeable ?? "unknown"}, mergeStateStatus=${pr.mergeStateStatus ?? "unknown"}) -- needs an engineer to rebase and resolve conflicts`,
     };
   }

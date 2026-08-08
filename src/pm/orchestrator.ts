@@ -1197,6 +1197,25 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const gitEnv = await resolveAgentEnv(projectId);
       const gate = await checkPrReadyToMerge(ctx.project.workspaceDir, item.prUrl, gitEnv);
       if (!gate.ready) {
+        // "unmergeable" is categorically different from the other block
+        // kinds (waiting on QA, GitHub still computing mergeability, a
+        // transient read error): those resolve on their own with time,
+        // so re-checking on backoff is the right move. A real conflict
+        // never will -- the gate only reads GitHub state, it doesn't
+        // write code -- so leaving it in `complete` to be re-checked
+        // forever just means it sits stuck with nothing able to fix it.
+        // Bounce it back to in_progress instead so the engineer dispatch
+        // loop picks it up again; worktreePath/branch/prUrl are left
+        // untouched (transitionWorkItem doesn't touch them) so the
+        // engineer resumes the same checkout and force-pushes the same
+        // PR, exactly like the existing QA-bounce-back path already
+        // tells it to.
+        if (gate.kind === "unmergeable") {
+          await board.transitionWorkItem(workItemId, "in_progress", ctx.agent.id, gate.reason);
+          await board.addComment(workItemId, "system", "DevOps gate", `Sent back to engineering: ${gate.reason}`);
+          this.emit("activity", projectId, `DevOps sent "${item.title}" back to in_progress: ${gate.reason}`);
+          return;
+        }
         const backedOff = await board.recordAttemptFailure(workItemId);
         // Same reasoning as the missing-PR gate on the engineer path:
         // worth surfacing once so an operator can see why a ticket is
