@@ -2,8 +2,8 @@ FROM node:22-slim AS base
 WORKDIR /app
 
 FROM base AS deps
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 
 FROM deps AS build
 COPY tsconfig.json ./
@@ -15,8 +15,8 @@ RUN npm run build
 # the server needs them at runtime.
 FROM base AS ui
 WORKDIR /ui
-COPY ui/package.json ./
-RUN npm install
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci
 COPY ui/ ./
 RUN npm run build
 
@@ -53,8 +53,8 @@ RUN git config --system user.name "Custos Agent" \
   # what usually leaks it, since remotes end up in logs and in `git remote -v`.
   && git config --system credential.helper '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f'
 
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 # The remote-control feature spawns this CLI, one-shot per chat turn --
 # it's the thing actually being remote-controlled, distinct from Custos's
 # own OAuth client that talks to Anthropic on behalf of /v1/messages traffic.
