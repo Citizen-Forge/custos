@@ -13,7 +13,7 @@ export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime):
   });
 
   app.put("/admin/api/anthropic", async (req, reply) => {
-    const { apiKey, maxConcurrent, rpmLimit } = req.body as { apiKey?: string | null; maxConcurrent?: number | null; rpmLimit?: number | null };
+    const { apiKey, maxConcurrent, rpmLimit, enabled } = req.body as { apiKey?: string | null; maxConcurrent?: number | null; rpmLimit?: number | null; enabled?: boolean };
     if (maxConcurrent !== undefined && maxConcurrent !== null && (!Number.isInteger(maxConcurrent) || maxConcurrent < 1)) {
       reply.code(400);
       return { error: "maxConcurrent must be a positive integer (or null for unlimited)" };
@@ -22,6 +22,10 @@ export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime):
       reply.code(400);
       return { error: "rpmLimit must be a positive integer (or null for unlimited)" };
     }
+    if (enabled !== undefined && typeof enabled !== "boolean") {
+      reply.code(400);
+      return { error: "enabled must be a boolean" };
+    }
     const config = await updateConfig(runtime, (cfg) => ({
       ...cfg,
       anthropic: {
@@ -29,6 +33,7 @@ export function registerAnthropicRoutes(app: FastifyInstance, runtime: Runtime):
         apiKey: resolveApiKey(apiKey, cfg.anthropic?.apiKey),
           maxConcurrent: resolveOptionalInt(maxConcurrent, cfg.anthropic?.maxConcurrent),
           rpmLimit: resolveOptionalInt(rpmLimit, cfg.anthropic?.rpmLimit),
+          ...(enabled !== undefined ? { enabled } : {}),
       },
     }));
     const result: Record<string, unknown> = {};

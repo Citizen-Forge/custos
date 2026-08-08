@@ -283,6 +283,34 @@ export function registerProviderRoutes(app: FastifyInstance, runtime: Runtime): 
     return { ok: true };
   });
 
+  // Lightweight toggle -- distinct from the PUT above, which requires the
+  // full provider payload (baseUrl, models, ...) and is what the Edit
+  // form's Save button uses. This exists so the admin UI's inline
+  // enable/disable switch doesn't need to round-trip the entire provider
+  // shape just to flip one field.
+  app.patch("/admin/api/providers/:name", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const { enabled } = req.body as { enabled?: boolean };
+    if (enabled === undefined) {
+      reply.code(400);
+      return { error: "enabled is required" };
+    }
+    if (typeof enabled !== "boolean") {
+      reply.code(400);
+      return { error: "enabled must be a boolean" };
+    }
+    if (!runtime.config.providers?.[name]) {
+      reply.code(404);
+      return { error: `provider "${name}" not found` };
+    }
+    await updateConfig(runtime, (cfg) => {
+      const target = cfg.providers?.[name];
+      if (!target) return cfg;
+      return { ...cfg, providers: { ...cfg.providers, [name]: { ...target, enabled } } };
+    });
+    return { ok: true };
+  });
+
   // -- Legacy instances (backward compat) --------------------------------
 
   app.put("/admin/api/instances/:name", async (req, reply) => {

@@ -6,6 +6,7 @@ import { registerProviderRoutes } from "./provider-routes.js";
 import { registerRoutingRoutes } from "./routing-routes.js";
 import { registerGlobalAgentRoutes } from "./global-agent-routes.js";
 import { registerFallbackSetRoutes } from "./fallback-set-routes.js";
+import { registerSlackRoutes } from "./slack-routes.js";
 
 /**
  * Registers all /admin/api/* routes by delegating to domain-specific
@@ -18,6 +19,7 @@ import { registerFallbackSetRoutes } from "./fallback-set-routes.js";
  *   fallback-set-routes.ts  Fallback set CRUD
  *   routing-routes.ts       task priorities (legacy compat)
  *   global-agent-routes.ts  global services (memory curator, classifier, embeddings)
+ *   slack-routes.ts         Slack bot token, enabled toggle
  */
 export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): void {
   registerConfigRoutes(app, runtime);
@@ -26,4 +28,5 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: Runtime): voi
   registerFallbackSetRoutes(app, runtime);
   registerRoutingRoutes(app, runtime);
   registerGlobalAgentRoutes(app, runtime);
+  registerSlackRoutes(app, runtime);
 }

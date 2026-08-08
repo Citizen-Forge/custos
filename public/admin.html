@@ -395,6 +395,7 @@ async function loadState() {
     project.pmLastRunAt = settingsResp.settings.pmLastRunAt ?? null;
     project.pmConfigured = settingsResp.settings.pmConfigured ?? false;
     project.paused = settingsResp.settings.paused ?? false;
+    project.slackChannelId = settingsResp.settings.slackChannelId ?? null;
   }
   // Per-fallback-set health snapshot. Refreshed on demand via the
   // panel's "Refresh" button; the boot-time fetch gives operators
@@ -429,11 +430,11 @@ function render() {
   app.appendChild(makeCollapsible(renderProvidersPanel(), "providers"));
   app.appendChild(makeCollapsible(renderGlobalServicesPanel(), "global-services"));
   app.appendChild(makeCollapsible(renderAllAgentsPanel(), "all-agents"));
-  app.appendChild(makeCollapsible(renderFallbackSetHealthPanel(), "fallback-set-health"));
   app.appendChild(makeCollapsible(renderQueueActivityPanel(), "queue-activity"));
   app.appendChild(makeCollapsible(renderFallbackSetsPanel(), "fallback-sets"));
   app.appendChild(makeCollapsible(renderProjectsPanel(), "projects"));
   app.appendChild(makeCollapsible(renderMcpPanel(), "mcp"));
+  app.appendChild(makeCollapsible(renderSlackPanel(), "slack"));
   app.appendChild(makeCollapsible(renderSecurityPanel(), "security"));
 }
 
@@ -711,8 +712,20 @@ function renderProvidersPanel() {
 
   // --- Anthropic section (embedded inside Model providers panel) ---
   const { anthropic } = state;
-  const anthSection = el("div", { style: "background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;" });
-  anthSection.appendChild(el("strong", { style: "font-size: 13px;", text: "Anthropic (Claude)" }));
+  const anthEnabled = anthropic.enabled !== false;
+  const anthSection = el("div", { style: `background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;${anthEnabled ? "" : " opacity: 0.55;"}` });
+  const anthTitleRow = el("div", { class: "row", style: "align-items: center; margin-bottom: 4px;" });
+  anthTitleRow.appendChild(el("strong", { style: "font-size: 13px;", text: "Anthropic (Claude)" }));
+  const anthEnabledLabel = el("label", { style: "display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; margin-left: auto;" });
+  const anthEnabledCb = el("input", { type: "checkbox", checked: anthEnabled ? "checked" : undefined, style: "cursor: pointer;" });
+  anthEnabledCb.onchange = () => {
+    const enabled = anthEnabledCb.checked;
+    reloadAfter(api("/admin/api/anthropic", { method: "PUT", body: { enabled } }), `Anthropic ${enabled ? "enabled" : "disabled"}`);
+  };
+  anthEnabledLabel.appendChild(anthEnabledCb);
+  anthEnabledLabel.appendChild(document.createTextNode("Enabled"));
+  anthTitleRow.appendChild(anthEnabledLabel);
+  anthSection.appendChild(anthTitleRow);
 
   // OAuth row
   const oauthRow = el("div", { class: "row", style: "margin-bottom: 6px;" });
@@ -884,8 +897,30 @@ function renderProvidersPanel() {
     const priorityText = prov.priority == null ? "—" : (prov.priority === "interactive" ? "Interactive" : "Background");
     const costType = prov.costType || "free";
     const costText = { free: "Free", subscription: "Sub", metered: "Metered" }[costType] || costType;
-    const expanded = true; // start expanded
-    const dataRow = el("tr", { class: "provider-row" }, [
+    const expanded = false; // start collapsed -- individual providers were never actually wired to this before, so they always rendered fully expanded regardless of the flag's value
+    const providerEnabled = prov.enabled !== false;
+    const enabledToggle = el("input", {
+      type: "checkbox",
+      checked: providerEnabled ? "checked" : undefined,
+      title: providerEnabled ? "Disable this provider (removed from dispatch until re-enabled; every fallback set that references it falls through to its next entry)" : "Enable this provider",
+      style: "margin-right: 6px; cursor: pointer; vertical-align: middle;",
+      // Sits inside the name cell, which has its own onclick for the
+      // expand/collapse toggle -- without stopping propagation, clicking
+      // the checkbox would also toggle the model-row visibility.
+      onclick: (ev) => ev.stopPropagation(),
+    });
+    enabledToggle.onchange = async () => {
+      const enabled = enabledToggle.checked;
+      try {
+        await api(`/admin/api/providers/${encodeURIComponent(name)}`, { method: "PATCH", body: { enabled } });
+        showToast(`${name} ${enabled ? "enabled" : "disabled"}`);
+        await loadState();
+      } catch (err) {
+        enabledToggle.checked = !enabled;
+        showToast(err.message, true);
+      }
+    };
+    const dataRow = el("tr", { class: "provider-row", style: providerEnabled ? "" : "opacity: 0.55;" }, [
       el("td", {
         class: "provider-name-cell",
         onclick: () => {
@@ -900,7 +935,8 @@ function renderProvidersPanel() {
           if (toggleSpan) toggleSpan.textContent = toggleSpan.textContent === "▾" ? "▸" : "▾";
         },
       }, [
-        el("span", { class: "provider-toggle", text: "▾" }),
+        enabledToggle,
+        el("span", { class: "provider-toggle", text: expanded ? "▾" : "▸" }),
         el("strong", { text: name }),
       ]),
       el("td", { class: "url-cell", text: prov.baseUrl }),
@@ -1056,6 +1092,7 @@ function renderProvidersPanel() {
       };
       modelTd.appendChild(ctxWindowInput);
       modelRow.appendChild(modelTd);
+      if (!expanded) modelRow.style.display = "none";
       table.appendChild(modelRow);
     }
     // Separator row between providers
@@ -1535,9 +1572,12 @@ function renderQueueActivityRow(ev) {
   return tr;
 }
 
-function renderFallbackSetHealthPanel() {
-  const section = el("section", { class: "panel" });
-  section.appendChild(el("h2", { text: "Fallback set health" }));
+// Builds the health table + refresh button that used to live in its own
+// "Fallback set health" panel, now embedded at the top of the combined
+// Fallback sets panel (renderFallbackSetsPanel below) so an operator sees
+// live chain status first and only reaches for the edit form when they
+// actually need to change something.
+function renderFallbackSetHealthSection(section) {
   section.appendChild(el("p", { class: "desc", text: "For each configured fallback set, the first available provider is the \"live pick\" — what an incoming request would dispatch to. A chain with no available entry is exhausted; requests pile up in the queue until a provider recovers." }));
 
   const health = state.fallbackSetHealth || {};
@@ -1594,9 +1634,9 @@ function renderFallbackSetHealthPanel() {
       warn.appendChild(el("div", { class: "small", style: "margin-top: 4px;", text: "Click Refresh to retry. The panel is currently blind to chain health." }));
       section.appendChild(warn);
     } else {
-      section.appendChild(el("p", { class: "small", text: "No fallback sets configured. Add one below under Fallback sets." }));
+      section.appendChild(el("p", { class: "small", text: "No fallback sets configured. Add one below." }));
     }
-    return section;
+    return;
   }
 
   // Stable display order: alphabetical by name so operators can scan
@@ -1604,16 +1644,18 @@ function renderFallbackSetHealthPanel() {
   setNames.sort();
   const table = el("table", { style: "width: 100%; border-collapse: collapse; margin-bottom: 12px;" });
   table.appendChild(el("colgroup", {}, [
-    el("col", { style: "width: 18%;" }),
+    el("col", { style: "width: 16%;" }),
+    el("col", { style: "width: 26%;" }),
+    el("col", { style: "width: 14%;" }),
     el("col", { style: "width: 30%;" }),
-    el("col", { style: "width: 18%;" }),
-    el("col", { style: "width: 34%;" }),
+    el("col", { style: "width: 14%;" }),
   ]));
   table.appendChild(el("tr", {}, [
     el("th", { text: "Set" }),
     el("th", { text: "Live pick" }),
     el("th", { text: "Chain length" }),
     el("th", { text: "Chain status" }),
+    el("th", { text: "Actions" }),
   ]));
 
   for (const name of setNames) {
@@ -1643,6 +1685,7 @@ function renderFallbackSetHealthPanel() {
       });
       chainCell.appendChild(row);
     }
+    const rawSet = (state.fallbackSets || {})[name];
     table.appendChild(el("tr", {}, [
       el("td", {}, [
         el("strong", { text: name }),
@@ -1652,11 +1695,16 @@ function renderFallbackSetHealthPanel() {
       livePickCell,
       el("td", { class: set.exhausted ? "muted" : "", text: String(set.chainLength) }),
       chainCell,
+      el("td", { class: "actions-cell" }, [
+        el("button", { class: "row-btn", text: "Edit", onclick: () => enterFallbackSetEditRow(name, rawSet || { description: set.description, providers: set.entries.map((e) => ({ provider: e.provider, model: e.model })) }) }),
+        el("button", { class: "row-btn danger", text: "Delete", onclick: () => reloadAfter(
+          api(`/admin/api/fallback-sets/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
+        )}),
+      ]),
     ]));
   }
   section.appendChild(table);
   section.appendChild(el("p", { class: "small", style: "margin-top: 4px;", text: "Bordered entry = current live pick. Hover an entry for the full status detail." }));
-  return section;
 }
 
 // Maps the runtime's per-entry `status` enum onto a colored badge with
@@ -1857,41 +1905,10 @@ function renderFallbackSetsPanel() {
   section.appendChild(el("h2", { text: "Fallback sets" }));
   section.appendChild(el("p", { class: "desc", text: "Named groups of providers the Project Manager assigns to roles. A request with a fallback set tries each provider in order and falls through to the next if the current one is unavailable (cooldown, rate limit, concurrency cap)." }));
 
-  const sets = state.fallbackSets || {};
-  const keys = Object.keys(sets);
-  if (keys.length === 0) {
-    section.appendChild(el("p", { class: "small", text: "No fallback sets configured. The default config has 'complex', 'standard', and 'fast' sets." }));
-  } else {
-    const table = el("table", { style: "width: 100%; border-collapse: collapse;" });
-    table.appendChild(el("colgroup", {}, [
-      el("col", { style: "width: 18%;" }),
-      el("col", { style: "width: 27%;" }),
-      el("col", { style: "width: 45%;" }),
-      el("col", { style: "width: 10%;" }),
-    ]));
-    table.appendChild(el("tr", {}, [
-      el("th", { text: "Name" }),
-      el("th", { text: "Description" }),
-      el("th", { text: "Providers" }),
-      el("th", { text: "Actions" }),
-    ]));
-    for (const [name, set] of Object.entries(sets)) {
-      const providersStr = set.providers ? set.providers.map((p) => `${p.provider}/${p.model}`).join(" → ") : "—";
-      const row = el("tr", {}, [
-        el("td", { style: "font-weight: 600; font-size: 13px;", text: name }),
-        el("td", { class: "small", text: set.description || "" }),
-        el("td", { class: "small", style: "font-family: monospace; font-size: 11px;", text: providersStr }),
-        el("td", { class: "actions-cell" }, [
-          el("button", { class: "row-btn", text: "Edit", onclick: () => enterFallbackSetEditRow(name, set) }),
-          el("button", { class: "row-btn danger", text: "Delete", onclick: () => reloadAfter(
-            api(`/admin/api/fallback-sets/${encodeURIComponent(name)}`, { method: "DELETE" }), `Removed "${name}"`
-          )}),
-        ]),
-      ]);
-      table.appendChild(row);
-    }
-    section.appendChild(table);
-  }
+  // Health first (live pick, chain status, per-entry Edit/Delete), the
+  // add/edit form below it -- Edit scrolls down into the same form
+  // rather than opening a separate panel.
+  renderFallbackSetHealthSection(section);
 
   // --- Add/edit form ---
   section.appendChild(el("hr", { class: "sep" }));
@@ -2422,6 +2439,24 @@ function renderProjectsPanel() {
       }}));
       controlsCell.appendChild(actions);
 
+      // Slack channel row -- which channel this project's agent activity
+      // posts to and picks up dropped ideas from. Blank means this
+      // project has no Slack channel wired up (independent of the global
+      // Slack panel's Enabled toggle, which is a killswitch for the
+      // whole integration regardless of which projects have a channel).
+      const slackRow = el("div", { style: "display: flex; align-items: center; gap: 4px; margin-top: 4px;" });
+      slackRow.appendChild(el("span", { class: "small", style: "min-width: 40px;", text: "Slack" }));
+      const slackInput = el("input", { type: "text", value: project.slackChannelId || "", placeholder: "channel ID (e.g. C0123456)", style: "flex: 1; font-size: 11px; padding: 3px 6px;" });
+      slackRow.appendChild(slackInput);
+      slackRow.appendChild(el("button", { style: "font-size: 11px; padding: 2px 6px;", text: "Save", onclick: () => {
+        const value = slackInput.value.trim();
+        reloadAfter(
+          api(`/admin/api/projects/${project.id}/settings`, { method: "PATCH", body: { slackChannelId: value || null } }),
+          value ? "Slack channel saved" : "Slack channel cleared",
+        );
+      }}));
+      controlsCell.appendChild(slackRow);
+
       tr.appendChild(controlsCell);
       tbody.appendChild(tr);
 
@@ -2532,6 +2567,49 @@ function showKeyOnce(key) {
     el("div", { style: "font-size: 11px; color: var(--danger); margin-bottom: 4px;", text: "Copy this now -- it won't be shown again." }),
     el("input", { type: "text", readonly: true, value: key, style: "width: 100%; font-size: 12px; padding: 4px 7px; font-family: monospace;", onclick: (e) => e.target.select() }),
   ]));
+}
+
+// -- Slack integration -----------------------------------------------------
+//
+// One bot token for the whole gateway -- individual roles don't get their
+// own Slack login/email; outgoing messages post under a per-role
+// username/icon via chat.postMessage's override (see src/slack/personas.ts).
+// Per-project channel routing lives on each project's own settings, not
+// here -- this panel only owns the token and the global killswitch.
+function renderSlackPanel() {
+  const section = el("section", { class: "panel" });
+  section.appendChild(el("h2", { text: "Slack" }));
+  section.appendChild(el("p", { class: "desc", text: "One Slack app/bot token for the whole gateway. Agents post updates (ticket ready, blocked, merged, deployed) to each project's channel under a per-role name/icon -- no separate Slack login per agent. Requires the chat:write, chat:write.customize, channels:history, and channels:read scopes on the bot token. Set each project's Slack channel from its own settings." }));
+
+  const { slack } = state;
+
+  const enabledRow = el("div", { class: "row", style: "margin-bottom: 8px;" });
+  const enabledLabel = el("label", { style: "display: inline-flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer;" });
+  const enabledCb = el("input", { type: "checkbox", checked: slack.enabled !== false ? "checked" : undefined, style: "cursor: pointer;" });
+  enabledCb.onchange = () => {
+    const enabled = enabledCb.checked;
+    reloadAfter(api("/admin/api/slack", { method: "PUT", body: { enabled } }), `Slack integration ${enabled ? "enabled" : "disabled"}`);
+  };
+  enabledLabel.appendChild(enabledCb);
+  enabledLabel.appendChild(document.createTextNode("Enabled"));
+  enabledRow.appendChild(enabledLabel);
+  section.appendChild(enabledRow);
+
+  const tokenRow = el("div", { class: "row", style: "margin-bottom: 0;" });
+  const tokenInput = el("input", { type: "password", style: "flex: 0 0 260px; font-size: 12px; padding: 4px 7px;", placeholder: slack.botTokenMasked || "Bot token (xoxb-...)" });
+  tokenRow.appendChild(el("span", { style: "font-size: 12px; color: var(--muted); min-width: 70px;", text: "Bot token" }));
+  tokenRow.appendChild(tokenInput);
+  tokenRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", class: "primary", text: "Save", onclick: () => {
+    if (!tokenInput.value) return showToast("Enter a token first", true);
+    reloadAfter(api("/admin/api/slack", { method: "PUT", body: { botToken: tokenInput.value } }), "Slack bot token saved");
+  }}));
+  if (slack.botTokenConfigured) {
+    tokenRow.appendChild(el("button", { style: "font-size: 11px; padding: 3px 8px;", text: "Clear", onclick: () => reloadAfter(api("/admin/api/slack", { method: "PUT", body: { botToken: null } }), "Slack bot token cleared") }));
+  }
+  section.appendChild(tokenRow);
+  section.appendChild(el("p", { style: "font-size: 11px; color: var(--muted); margin: 4px 0 0;", text: slack.botTokenConfigured ? `configured (${slack.botTokenMasked})` : "not configured -- the integration stays inactive regardless of the Enabled toggle until a token is set" }));
+
+  return section;
 }
 
 loadState().catch((err) => {

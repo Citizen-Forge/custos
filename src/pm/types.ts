@@ -310,6 +310,12 @@ export interface ProjectSettings {
    * the PM has never run. Rendered in the project card so operators can see
    * whether a recent provider or budget edit needs a manual reassignment. */
   pmLastRunAt: number | null;
+  /** Slack channel ID this project's agent activity posts to and picks
+   *  up dropped ideas from (see slack.ts). Null means this project has
+   *  no Slack channel wired up -- distinct from the global slack.enabled
+   *  killswitch, which turns the whole integration off regardless of
+   *  which projects have a channel configured. */
+  slackChannelId: string | null;
   updatedAt: number;
 }
 
@@ -327,6 +333,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     paused: false,
     pmConfigured: false,
     pmLastRunAt: null,
+    slackChannelId: null,
     autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,

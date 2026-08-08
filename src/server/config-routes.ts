@@ -38,10 +38,16 @@ export function registerConfigRoutes(app: FastifyInstance, runtime: Runtime): vo
         apiKeySource,
         apiKeyMasked: config.anthropic?.apiKey ? maskApiKey(config.anthropic.apiKey) : null,
         oauth,
+        enabled: config.anthropic?.enabled ?? true,
         maxConcurrent: config.anthropic?.maxConcurrent ?? null,
         rpmLimit: config.anthropic?.rpmLimit ?? null,
       },
       providers: await describeProviders(runtime),
+      slack: {
+        botTokenConfigured: Boolean(config.slack?.botToken),
+        botTokenMasked: config.slack?.botToken ? maskApiKey(config.slack.botToken) : null,
+        enabled: config.slack?.enabled ?? true,
+      },
       // Embeddings live on the global agent with systemRole "embeddings"
       // (see /admin/api/global-agents GET). The runtime derives the
       // host/model at every reload, so the surface for "which model is

@@ -495,21 +495,30 @@ export interface FallbackSetEntryHealth {
     for (const off of this.availabilityUnsubs) off();
     this.availabilityUnsubs = [];
 
-    // Anthropic
-    const anthropicInner = new AnthropicProvider({ apiKey: config.anthropic?.apiKey });
-    bareProviders.anthropic = anthropicInner;
-    // Anthropic parses its own reset headers from upstream
-    // (`anthropic-ratelimit-unified-5h-reset` etc.) — the provider's
-    // own cooldown handling is more precise than the global fallback
-    // would be. No `cooldownFallbackMs` override on AnthropicConfig,
-    // same as the legacy router's shape: Anthropic didn't get one.
-    stateMap.register("anthropic", {
-      maxConcurrent: config.anthropic?.maxConcurrent,
-      rpmLimit: config.anthropic?.rpmLimit,
-    });
+    // Anthropic -- skipped entirely when disabled, not just gated at
+    // dispatch time. Leaving it out of bareProviders/stateMap means
+    // GlobalQueue's fallback loop (`if (!provider) continue`) and
+    // ProviderStateMap.canAccept's `if (!entry) return false` both
+    // already do the right thing with zero new logic: every fallback
+    // set that includes anthropic transparently falls through to its
+    // next entry, exactly as if it were permanently cooling.
+    if (config.anthropic?.enabled !== false) {
+      const anthropicInner = new AnthropicProvider({ apiKey: config.anthropic?.apiKey });
+      bareProviders.anthropic = anthropicInner;
+      // Anthropic parses its own reset headers from upstream
+      // (`anthropic-ratelimit-unified-5h-reset` etc.) — the provider's
+      // own cooldown handling is more precise than the global fallback
+      // would be. No `cooldownFallbackMs` override on AnthropicConfig,
+      // same as the legacy router's shape: Anthropic didn't get one.
+      stateMap.register("anthropic", {
+        maxConcurrent: config.anthropic?.maxConcurrent,
+        rpmLimit: config.anthropic?.rpmLimit,
+      });
+    }
 
     // New providers shape
     for (const [name, providerDef] of Object.entries(config.providers ?? {})) {
+      if (providerDef.enabled === false) continue;
       const defaultModel = providerDef.models.find((m) => m.enabled) ?? providerDef.models[0];
       if (!defaultModel) continue;
       // Build per-model settings map so the provider can resolve

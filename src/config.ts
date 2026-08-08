@@ -14,6 +14,14 @@ export interface ProviderEntry {
 
 export interface AnthropicConfig {
   apiKey?: string;
+  /** Whether the Anthropic provider is available for dispatch at all.
+   *  Defaults to true when unset. Disabling it removes it from the
+   *  active provider map entirely on the next reload -- every fallback
+   *  set that includes it transparently falls through to its next
+   *  entry, the same as if Anthropic were permanently cooling. Config
+   *  (API key, throttle settings) is preserved so re-enabling is a
+   *  toggle, not a re-entry of credentials. */
+  enabled?: boolean;
   /** Max concurrent requests the Anthropic provider will issue.
    * Unset means unlimited -- Anthropic's API tolerates parallel requests
    * and the gateway imposes no additional limit by default. Setting
@@ -106,6 +114,13 @@ export interface ProviderDef {
   /** How this provider is paid for. Inferred from `pricing` when not set. */
   costType: CostType;
   models: ModelDef[];
+  /** Whether this provider is available for dispatch at all. Defaults to
+   *  true when unset. Distinct from a model's own `enabled` flag -- that
+   *  picks which model this provider defaults to; this takes the whole
+   *  provider out of the active provider map on the next reload, so
+   *  every fallback set that references it transparently falls through
+   *  to its next entry. Config is preserved, so re-enabling is a toggle. */
+  enabled?: boolean;
   /** Omit for servers that don't need auth (a local Ollama). */
   apiKey?: string;
   /** Max concurrent requests. 1 forces strict serial. */
@@ -231,6 +246,32 @@ export interface GatewayConfig {
    * `client-auth-guard.ts` file is preserved as a no-op stub for any
    * leftover registrations. */
   clientApiKey?: string;
+  /** Slack bot integration -- see slack.ts. Global (one workspace, one
+   *  bot token for the whole gateway); per-project routing lives on
+   *  ProjectSettings.slackChannelId instead, since which channel a
+   *  project's activity posts to is a per-project concern, not a
+   *  global one. */
+  slack?: SlackConfig;
+}
+
+/** One Slack app/bot token for the whole gateway. Individual agent roles
+ *  don't get their own Slack identity (no per-role bot user, no email,
+ *  no login) -- outgoing messages use `chat.postMessage`'s per-message
+ *  `username`/`icon_emoji` override to visually post as "Product Owner"
+ *  etc. while all sharing this one token. Requires the `chat:write.customize`
+ *  scope on the bot token; without it Slack silently ignores the override
+ *  and every message posts under the app's own fixed name. */
+export interface SlackConfig {
+  /** xoxb-... bot token from the Slack app's OAuth & Permissions page.
+   *  Required scopes: chat:write, chat:write.customize, channels:history
+   *  (or groups:history for private channels), channels:read. */
+  botToken?: string;
+  /** Killswitch for the whole integration, independent of whether a
+   *  token is configured -- lets an operator turn Slack off without
+   *  discarding the token, and turn it back on without re-entering it.
+   *  Defaults to true (enabled) once a token is present; explicitly
+   *  false is the only thing that disables it. */
+  enabled?: boolean;
 }
 
 const OLLAMA_HOST = "http://localhost:11434";
