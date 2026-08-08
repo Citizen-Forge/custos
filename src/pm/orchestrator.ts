@@ -8,7 +8,7 @@ import * as runs from "./runs.js";
 import { getSettings, updateSettings } from "./project-settings.js";
 import { listFacts, renderFacts, writeFact } from "./facts.js";
 import { runAgent } from "./agent-runner.js";
-import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest } from "./worktrees.js";
+import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest, checkPrReadyToMerge, mergePullRequest } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
 import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-registry.js";
 import { hasGitCredentials, listSecrets, resolveAgentEnv } from "./vault.js";
@@ -1179,29 +1179,78 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (!item || item.labels.includes(DEPLOYED_LABEL)) return;
       const ctx = await this.resolve(projectId, "devops");
       if (!ctx) return;
-      // No early return on deployTarget === "none" here anymore -- merging
-      // the PR is this function's job regardless of whether there's
-      // anything to deploy afterward. The prompt below only includes the
-      // deploy-target sections when there actually is one.
 
+      // -------------------------------------------------------------
+      // Deterministic merge gate. No LLM involved: "does the PR have a
+      // QA-approved comment" and "is it mergeable" are both plain API
+      // reads with an exact yes/no answer. Running a full agent turn to
+      // re-derive them on every retry was the direct cause of a real
+      // context/cost blowup -- a blocked ticket got redispatched every
+      // tick, and each dispatch re-read an ever-growing comment history
+      // just to re-ask an LLM the same question. See worktrees.ts's
+      // checkPrReadyToMerge for the detailed reasoning.
+      if (!item.prUrl) {
+        const backedOff = await board.recordAttemptFailure(workItemId);
+        this.emit("activity", projectId, `DevOps can't merge "${item.title}" (attempt ${backedOff?.attempts ?? 1}): the ticket has no prUrl recorded.`);
+        return;
+      }
+      const gitEnv = await resolveAgentEnv(projectId);
+      const gate = await checkPrReadyToMerge(ctx.project.workspaceDir, item.prUrl, gitEnv);
+      if (!gate.ready) {
+        const backedOff = await board.recordAttemptFailure(workItemId);
+        // Same reasoning as the missing-PR gate on the engineer path:
+        // worth surfacing once so an operator can see why a ticket is
+        // stuck, but re-posting the identical reason on every retry is
+        // exactly what compounds the ticket's comment history -- and
+        // thus every future agent dispatch's prompt size -- without
+        // adding new information.
+        if ((backedOff?.attempts ?? 1) === 1) {
+          await board.addComment(workItemId, "system", "DevOps gate", `Not merged yet: ${gate.reason}`);
+        }
+        this.emit("activity", projectId, `DevOps gate held "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${gate.reason}`);
+        return;
+      }
+      const merged = await mergePullRequest(ctx.project.workspaceDir, item.prUrl, gitEnv);
+      if (!merged.ok) {
+        // The gate passed a moment ago but the merge itself failed --
+        // a genuine race (someone pushed a conflicting change in
+        // between) rather than a re-derivable fact, so this one is
+        // worth a comment every time it recurs, not just once.
+        const backedOff = await board.recordAttemptFailure(workItemId);
+        await board.addComment(workItemId, "system", "DevOps gate", `Merge attempt failed: ${merged.reason}`);
+        this.emit("activity", projectId, `DevOps failed to merge "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${merged.reason}`);
+        return;
+      }
+      await board.addComment(workItemId, "system", "DevOps gate", `Merged pull request ${item.prUrl}.`);
+
+      if (ctx.settings.deployTarget === "none") {
+        // Merging was the whole job for a project with nothing to
+        // deploy -- no agent dispatch needed at all.
+        await board.clearAttempts(workItemId);
+        await board.updateWorkItem(workItemId, { labels: [...item.labels, DEPLOYED_LABEL] });
+        this.emit("activity", projectId, `DevOps merged the pull request for "${item.title}".`);
+        return;
+      }
+
+      // -------------------------------------------------------------
+      // Past this point the PR is merged and there's an actual
+      // deployment target -- this is the part that genuinely needs
+      // agent judgement (infra choices, budget estimation, rollback
+      // planning), so it's the only part still dispatched as an agent.
       const prompt = [
         await this.projectHeader(ctx.project, ctx.settings),
         "",
-        ...(ctx.settings.deployTarget === "none"
-          ? ["## Deployment target: none — merge the PR and stop; there is nothing to deploy for this project.", ""]
-          : [
-              `## Deployment target: ${ctx.settings.deployTarget}`,
-              "",
-              deploymentTargetSection(ctx.settings.deployTarget, ctx.settings.deployConfig),
-              "",
-              Object.entries(ctx.settings.deployConfig).map(([key, value]) => `- ${key}: ${value}`).join("\n") || "_No target-specific settings configured._",
-              "",
-              ctx.settings.budget.infraMonthlyUsd !== null
-                ? `## Infrastructure budget\n\n$${ctx.settings.budget.infraMonthlyUsd.toFixed(2)} per month, hard limit.`
-                : "## Infrastructure budget\n\nNo cap is configured, but keep costs proportionate and report your estimate anyway.",
-              "",
-            ]),
-        "## The work to merge (and deploy, if there's a target)",
+        `## Deployment target: ${ctx.settings.deployTarget}`,
+        "",
+        deploymentTargetSection(ctx.settings.deployTarget, ctx.settings.deployConfig),
+        "",
+        Object.entries(ctx.settings.deployConfig).map(([key, value]) => `- ${key}: ${value}`).join("\n") || "_No target-specific settings configured._",
+        "",
+        ctx.settings.budget.infraMonthlyUsd !== null
+          ? `## Infrastructure budget\n\n$${ctx.settings.budget.infraMonthlyUsd.toFixed(2)} per month, hard limit.`
+          : "## Infrastructure budget\n\nNo cap is configured, but keep costs proportionate and report your estimate anyway.",
+        "",
+        "## The work to deploy (already merged)",
         "",
         renderWorkItem(item, { includeComments: true }),
       ].join("\n");
@@ -1220,11 +1269,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) {
         // Not persisted as a board comment -- see the identical note on
-        // the QA path above. recordAttemptFailure both backs off the next
-        // dispatch (see the isBackingOff filter above) and is what makes
-        // that backoff possible at all -- without it a stuck ticket gets
-        // redispatched, and re-reads its own ever-growing comment history,
-        // on every single tick forever.
+        // the QA path above.
         const backedOff = await board.recordAttemptFailure(workItemId);
         this.emit("activity", projectId, `${ctx.agent.name} deployment run failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${result.error ?? "unknown error"}; will retry.`);
         return;
@@ -1243,14 +1288,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.emit("activity", projectId, `DevOps deployment missing awsRegion on "${item.title}" (attempt ${backedOff?.attempts ?? 1}). Use the project's deployConfig.awsRegion or report it in the contract.`);
         return;
       }
-      if (contract.status !== "deployed" && contract.status !== "merged") {
-        // Same reasoning as the missing-PR gate on the engineer path: the
-        // blocked reason is worth surfacing once so an operator can see
-        // why a ticket is stuck, but re-posting the identical (or
-        // barely-reworded) reason on every retry is exactly what compounds
-        // the ticket's comment history -- and thus every subsequent
-        // attempt's prompt size, via renderWorkItem's includeComments --
-        // without adding any new information after the first time.
+      if (contract.status !== "deployed") {
         const backedOff = await board.recordAttemptFailure(workItemId);
         if ((backedOff?.attempts ?? 1) === 1 && (contract.summary ?? "").trim()) {
           await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
@@ -1258,25 +1296,15 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.emit("activity", projectId, `DevOps is blocked on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${contract.blockedReason ?? "no reason given"}`);
         return;
       }
-      // Genuine terminal success -- reset any backoff this ticket accrued
-      // while it was blocked, in case devops is ever needed on it again
-      // (e.g. a future hotfix ticket reuses backoff bookkeeping keyed by
-      // workItemId).
       await board.clearAttempts(workItemId);
       if ((contract.summary ?? "").trim()) {
         await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
       }
-      // DEPLOYED_LABEL doubles as "devops has taken its terminal action on
-      // this ticket" regardless of whether that action was a merge-only
-      // (no deployTarget) or a full deploy -- either way there's nothing
-      // left for devops to do here, so it must not be re-dispatched.
       await board.updateWorkItem(workItemId, { labels: [...item.labels, DEPLOYED_LABEL] });
       this.emit(
         "activity",
         projectId,
-        contract.status === "merged"
-          ? `DevOps merged the pull request for "${item.title}".`
-          : `DevOps deployed "${item.title}"${contract.estimatedMonthlyUsd ? ` (~$${contract.estimatedMonthlyUsd}/mo)` : ""}${contract.awsRegion ? ` in ${contract.awsRegion}` : ""}.`,
+        `DevOps deployed "${item.title}"${contract.estimatedMonthlyUsd ? ` (~$${contract.estimatedMonthlyUsd}/mo)` : ""}${contract.awsRegion ? ` in ${contract.awsRegion}` : ""}.`,
       );
     });
   }

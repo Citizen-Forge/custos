@@ -83,6 +83,73 @@ export async function verifyPullRequest(
 }
 
 /**
+ * Deterministic devops merge gate -- no LLM involved. Checking "is there a
+ * QA-approved comment on this PR" and "is this PR actually mergeable" are
+ * both plain API reads with an exact answer; running a full agent turn to
+ * re-derive them on every retry was the direct cause of a real context/
+ * cost blowup (a blocked ticket got redispatched every orchestrator tick,
+ * each dispatch re-reading an ever-growing comment history via
+ * renderWorkItem to re-ask an LLM the same yes/no question). Devops itself
+ * is only dispatched now for the genuinely judgement-requiring part
+ * (deployment), after this gate has already passed.
+ */
+export async function checkPrReadyToMerge(
+  cwd: string,
+  prUrl: string,
+  env: Record<string, string>,
+): Promise<{ ready: true } | { ready: false; reason: string }> {
+  let raw: string;
+  try {
+    raw = await github(cwd, ["pr", "view", prUrl, "--json", "mergeable,mergeStateStatus,comments"], env);
+  } catch (err) {
+    return { ready: false, reason: `could not read PR state: ${(err as Error).message.slice(0, 300)}` };
+  }
+  let pr: { mergeable?: string; mergeStateStatus?: string; comments?: Array<{ body?: string }> };
+  try {
+    pr = JSON.parse(raw);
+  } catch {
+    return { ready: false, reason: "GitHub returned an unparseable PR record" };
+  }
+  // Matches the QA prompt's exact contract: the comment's first line must
+  // be precisely "QA approved", not a paraphrase or a comment that merely
+  // mentions it in passing -- an exact string is the whole point of a
+  // deterministic gate.
+  const approved = (pr.comments ?? []).some((c) => (c.body ?? "").trim().split("\n")[0].trim() === "QA approved");
+  if (!approved) {
+    return { ready: false, reason: 'no comment on the pull request starts with the literal line "QA approved"' };
+  }
+  if (pr.mergeable === "UNKNOWN") {
+    // GitHub computes this asynchronously after a push; a fresh PR can
+    // sit in UNKNOWN for a few seconds. Not a real block -- just try
+    // again on the next tick rather than reporting a false blocker.
+    return { ready: false, reason: "GitHub hasn't finished computing mergeability yet; will recheck" };
+  }
+  if (pr.mergeable !== "MERGEABLE") {
+    return {
+      ready: false,
+      reason: `pull request is not mergeable (mergeable=${pr.mergeable ?? "unknown"}, mergeStateStatus=${pr.mergeStateStatus ?? "unknown"}) -- needs an engineer to rebase and resolve conflicts`,
+    };
+  }
+  return { ready: true };
+}
+
+/** Merges a PR that's already passed `checkPrReadyToMerge`. Squash +
+ *  branch-delete matches the convention devops's own prompt used to
+ *  document; kept here now that the action itself is deterministic. */
+export async function mergePullRequest(
+  cwd: string,
+  prUrl: string,
+  env: Record<string, string>,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    await github(cwd, ["pr", "merge", prUrl, "--squash", "--delete-branch"], env);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message.slice(0, 500) };
+  }
+}
+
+/**
  * Whether this directory can hand out isolated checkouts. A repository with
  * no commits yet can't: its HEAD is unborn, so there is nothing for a
  * worktree to be created from. That's exactly the state a brand-new project
