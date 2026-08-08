@@ -204,7 +204,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     // deploy-target-specific work inside runDevops is what's conditional.
     if (settings.autonomy.devops) {
       const deployable = (await board.listWorkItems(project.id)).filter(
-        (item) => item.status === "complete" && !item.labels.includes(DEPLOYED_LABEL),
+        (item) => item.status === "complete" && !item.labels.includes(DEPLOYED_LABEL) && !board.isBackingOff(item),
       );
       for (const item of deployable) void this.runDevops(project.id, item.id);
     }
@@ -1220,27 +1220,51 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       await this.applyFacts(projectId, ctx.agent, result.parsed);
       if (!result.ok || !result.parsed) {
         // Not persisted as a board comment -- see the identical note on
-        // the QA path above.
-        this.emit("activity", projectId, `${ctx.agent.name} deployment run failed on "${item.title}": ${result.error ?? "unknown error"}`);
+        // the QA path above. recordAttemptFailure both backs off the next
+        // dispatch (see the isBackingOff filter above) and is what makes
+        // that backoff possible at all -- without it a stuck ticket gets
+        // redispatched, and re-reads its own ever-growing comment history,
+        // on every single tick forever.
+        const backedOff = await board.recordAttemptFailure(workItemId);
+        this.emit("activity", projectId, `${ctx.agent.name} deployment run failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${result.error ?? "unknown error"}; will retry.`);
         return;
       }
 
       const contract = result.parsed;
-      if ((contract.summary ?? "").trim()) {
-        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
-      }
       // AWS deployments must report the region the resources actually landed
       // in -- the devops gate, not a prompt nicety. The orchestrator is the
       // only place that can enforce this because the LLM-side `awsRegion`
       // field is loose by design.
       if (ctx.settings.deployTarget === "aws" && (!contract.awsRegion || contract.awsRegion.trim() === "")) {
-        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `DevOps deployment missing awsRegion: required when deployTarget is aws.`);
-        this.emit("activity", projectId, `DevOps deployment missing awsRegion on "${item.title}". Use the project's deployConfig.awsRegion or report it in the contract.`);
+        const backedOff = await board.recordAttemptFailure(workItemId);
+        if ((backedOff?.attempts ?? 1) === 1) {
+          await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `DevOps deployment missing awsRegion: required when deployTarget is aws.`);
+        }
+        this.emit("activity", projectId, `DevOps deployment missing awsRegion on "${item.title}" (attempt ${backedOff?.attempts ?? 1}). Use the project's deployConfig.awsRegion or report it in the contract.`);
         return;
       }
       if (contract.status !== "deployed" && contract.status !== "merged") {
-        this.emit("activity", projectId, `DevOps is blocked on "${item.title}": ${contract.blockedReason ?? "no reason given"}`);
+        // Same reasoning as the missing-PR gate on the engineer path: the
+        // blocked reason is worth surfacing once so an operator can see
+        // why a ticket is stuck, but re-posting the identical (or
+        // barely-reworded) reason on every retry is exactly what compounds
+        // the ticket's comment history -- and thus every subsequent
+        // attempt's prompt size, via renderWorkItem's includeComments --
+        // without adding any new information after the first time.
+        const backedOff = await board.recordAttemptFailure(workItemId);
+        if ((backedOff?.attempts ?? 1) === 1 && (contract.summary ?? "").trim()) {
+          await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
+        }
+        this.emit("activity", projectId, `DevOps is blocked on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${contract.blockedReason ?? "no reason given"}`);
         return;
+      }
+      // Genuine terminal success -- reset any backoff this ticket accrued
+      // while it was blocked, in case devops is ever needed on it again
+      // (e.g. a future hotfix ticket reuses backoff bookkeeping keyed by
+      // workItemId).
+      await board.clearAttempts(workItemId);
+      if ((contract.summary ?? "").trim()) {
+        await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
       }
       // DEPLOYED_LABEL doubles as "devops has taken its terminal action on
       // this ticket" regardless of whether that action was a merge-only
