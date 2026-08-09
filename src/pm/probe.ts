@@ -118,7 +118,19 @@ export async function runPreSpawnProbe(
     if (err instanceof Error && err.message === "probe timeout") {
       throw new ProbeUnavailableError(providerKey, model, 0, "unknown", `probe timed out after ${PROBE_TIMEOUT_MS}ms`);
     }
-    throw err;
+    // Anything else -- a network error, or runtime.probeProvider's own
+    // "no registered provider" throw when the resolved primary pick names
+    // a provider that's been disabled or removed since the agent's
+    // fallbackSet was assigned -- is still just "this probe didn't work,"
+    // not a reason to blow up the caller. Re-throwing the raw error here
+    // used to propagate uncaught all the way through runAgent -> the
+    // orchestrator's guard() (which has no catch) -> an unhandled
+    // rejection that crashed the entire gateway process, not just this
+    // one run. Wrapping it keeps the failure inside the agent-runner's
+    // existing ProbeUnavailableError handling (a clean "blocked" outcome
+    // for this one ticket) instead.
+    const message = err instanceof Error ? err.message : String(err);
+    throw new ProbeUnavailableError(providerKey, model, 0, "unknown", message);
   }
 
   if (res.status >= 200 && res.status < 300) return;

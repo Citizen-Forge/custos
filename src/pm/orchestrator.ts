@@ -245,6 +245,21 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     this.emit("change", projectId);
     try {
       return await fn(controller.signal);
+    } catch (err) {
+      // Every dispatch path (engineer/QA/devops/EM/PM tick) routes through
+      // here. Each of them already emits its own "activity" line for the
+      // failure modes it anticipates (see the many `this.emit("activity", ...)`
+      // call sites below), but an *unanticipated* throw -- a bug, a raw
+      // Error from deep in a provider call -- skips all of that and used to
+      // propagate straight out of guard() as an unhandled rejection, which
+      // crashes the whole gateway process (every project, not just this
+      // one). This is the last line of defense: log it to the global
+      // activity feed so it's visible next to every other failure instead
+      // of only surviving in a per-ticket comment (or nowhere), and swallow
+      // it so one tick's bug can't take down the process.
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit("activity", projectId, `${key} failed unexpectedly: ${message}`);
+      return null;
     } finally {
       this.busy.delete(key);
       this.emit("change", projectId);
