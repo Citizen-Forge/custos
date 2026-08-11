@@ -214,6 +214,14 @@ export interface AgentRun {
   /** One line describing what it is doing right now, derived from its most
    * recent tool call ("Bash: npm test", "Edit: src/index.ts"). */
   currentAction: string | null;
+  /** The dispatch tag this run was started with (e.g. "custos-groom",
+   * "custos-assign") -- see agent-runner.ts's `tag` param. Project-level
+   * tasks (groomBacklog, assignReady, surveyProject, ...) have no
+   * workItemId/ideaId to describe them, so the UI falls back to this to
+   * show "Grooming backlog" instead of a generic "Project duties" for
+   * every kind of housekeeping tick. Nullable only for rows written before
+   * this field existed. */
+  tag: string | null;
   /** Rolling count of tool calls, as a cheap progress signal. */
   toolCalls: number;
   /** QA's verdict on this run's output, attached by runQa after the

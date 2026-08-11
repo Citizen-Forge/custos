@@ -306,6 +306,10 @@ export interface NowWorkingSummary {
   workItemDeleted?: boolean;
   /** For "running": the latest heartbeat text (truncated server-side). */
   currentAction?: string | null;
+  /** The dispatch tag this run was started with (e.g. "custos-groom"),
+   * used to label project-level runs that have no workItemId/ideaId --
+   * see TeamTab's TAG_LABELS. */
+  tag?: string | null;
   /** For completed runs: the run's summary text (truncated server-side). */
   summary?: string | null;
   /** For failed runs: the error message, if any. */

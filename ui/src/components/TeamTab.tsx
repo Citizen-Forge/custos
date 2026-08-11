@@ -4,6 +4,26 @@ import { useCall, relativeTime } from '../api'
 import Avatar, { agentLabel } from './Avatar'
 import AgentModelSelect, { isOrphaned, parseModelSelectValue } from './AgentModelSelect'
 
+/** Human labels for the project-level dispatch tags (see agent-runner.ts's
+ * `tag` param and orchestrator.ts's runAgent call sites) that have no
+ * workItemId/ideaId to describe themselves. Ticket- and idea-scoped tags
+ * (custos-engineer, custos-qa, custos-devops, custos-plan) aren't listed
+ * here because workItemTitle already covers them -- this map only backs
+ * the "no ticket" fallback below. Falls back to "Project duties" for any
+ * tag not listed (including null, for runs recorded before this field
+ * existed) rather than showing nothing. */
+const TAG_LABELS: Record<string, string> = {
+  'custos-groom': 'Grooming backlog',
+  'custos-assign': 'Assigning ready work',
+  'custos-survey': 'Surveying codebase',
+  'custos-assign-models': 'Assigning models',
+  'custos-provision': 'Provisioning repository',
+}
+
+function projectLevelLabel(tag: string | null | undefined): string {
+  return (tag && TAG_LABELS[tag]) || 'Project duties'
+}
+
 /**
  * Agent roster and run activity — the team that works on this project, who's
  * active right now, and what they've been doing. Moved out of the DevOps tab
@@ -143,7 +163,7 @@ export default function TeamTab({
         >
           <div className="running-head">
             {stateBadge}
-            <strong>{nw.workItemTitle ?? 'Project duties'}</strong>
+            <strong>{nw.workItemTitle ?? projectLevelLabel(nw.tag)}</strong>
             {nw.workItemDeleted && <span className="badge deleted" title="work item was deleted">deleted</span>}
           </div>
           <div className="running-action" title={nw.currentAction ?? ''}>

@@ -31,6 +31,12 @@ export interface NowWorkingSummary {
   workItemDeleted?: boolean;
   /** For "running": the latest heartbeat text (truncated). */
   currentAction?: string | null;
+  /** The dispatch tag this run was started with (see AgentRun.tag). The UI
+   * maps this to a human label ("Grooming backlog", "Assigning ready
+   * work", ...) for project-level runs that have no workItemId/ideaId to
+   * describe themselves -- otherwise every housekeeping tick reads as the
+   * same generic "Project duties" regardless of what it's actually doing. */
+  tag?: string | null;
   /** For completed runs: the run's summary text (truncated). */
   summary?: string | null;
   /** For failed runs: the error message, if any. */
@@ -78,8 +84,8 @@ export function buildNowWorking(
     role: string;
     fallbackSet?: string | null;
   }>,
-  active: ReadonlyArray<{ agentId: string; id: string; status: string; workItemId: string | null; currentAction: string | null; startedAt: number; lastEventAt: number; error: string | null }>,
-  pastRuns: ReadonlyArray<{ agentId: string; id: string; status: string; workItemId: string | null; summary: string; error: string | null; startedAt: number; endedAt: number | null; qaBounce?: { verdict: "pass" | "fail"; criterion?: string; evidence?: string } }>,
+  active: ReadonlyArray<{ agentId: string; id: string; status: string; workItemId: string | null; currentAction: string | null; startedAt: number; lastEventAt: number; error: string | null; tag?: string | null }>,
+  pastRuns: ReadonlyArray<{ agentId: string; id: string; status: string; workItemId: string | null; summary: string; error: string | null; startedAt: number; endedAt: number | null; qaBounce?: { verdict: "pass" | "fail"; criterion?: string; evidence?: string }; tag?: string | null }>,
   stalledIds: ReadonlyArray<string>,
   itemTitles: Record<string, string | null>,
 ): AgentNowWorking[] {
@@ -108,6 +114,7 @@ export function buildNowWorking(
         workItemTitle: title ?? (hasWid ? `${activeRun.workItemId} (deleted)` : null),
         workItemDeleted: hasWid && title === null,
         currentAction: activeRun.currentAction ? activeRun.currentAction.slice(0, 120) : null,
+        tag: activeRun.tag ?? null,
         startedAt: activeRun.startedAt,
         lastEventAt: activeRun.lastEventAt,
       };
@@ -130,6 +137,7 @@ export function buildNowWorking(
           // populated by runQa -- no separate lookup needed because the
           // engineer row IS the surface whose stats card shows qaRejections.
           lastQaBounce: lastRun.qaBounce ?? null,
+          tag: lastRun.tag ?? null,
           startedAt: lastRun.startedAt,
           endedAt: lastRun.endedAt,
         };

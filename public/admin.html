@@ -2160,6 +2160,17 @@ function renderAllAgentsPanel() {
   void refreshTable();
   return section;
 
+  // Mirrors TeamTab.tsx's TAG_LABELS. Ticket/idea-scoped tags aren't
+  // listed since workItemTitle already covers them -- this only backs the
+  // "no ticket" fallback below.
+  const TAG_LABELS = {
+    "custos-groom": "Grooming backlog",
+    "custos-assign": "Assigning ready work",
+    "custos-survey": "Surveying codebase",
+    "custos-assign-models": "Assigning models",
+    "custos-provision": "Provisioning repository",
+  };
+
   function renderRow(project, agent) {
     const summary = agent.summary;
     const stateBadge = (() => {
@@ -2178,7 +2189,7 @@ function renderAllAgentsPanel() {
     })();
     const workingOn = summary.workItemTitle
       || (summary.currentAction ? summary.currentAction.slice(0, 60) : null)
-      || (summary.status === "idle" ? "—" : "Project duties");
+      || (summary.status === "idle" ? "—" : (TAG_LABELS[summary.tag] || "Project duties"));
 
     let lastMovedCell;
     if (summary.lastEventAt) lastMovedCell = formatTimeAgo(summary.lastEventAt, now);

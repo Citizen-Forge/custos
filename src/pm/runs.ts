@@ -26,6 +26,7 @@ export async function startRun(input: {
   billed: boolean;
   workItemId?: string | null;
   ideaId?: string | null;
+  tag?: string | null;
 }): Promise<AgentRun> {
   const run = await runs.insert({
     id: newId(),
@@ -47,6 +48,7 @@ export async function startRun(input: {
     lastEventAt: Date.now(),
     currentAction: null,
     toolCalls: 0,
+    tag: input.tag ?? null,
   });
   await prune(input.projectId);
   return run;

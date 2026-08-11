@@ -286,6 +286,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
     billed,
     workItemId: options.workItemId,
     ideaId: options.ideaId,
+    tag,
   });
   const startedAt = Date.now();
 
