@@ -48,8 +48,25 @@ export function renderWorkItem(item: WorkItem, opts: { includeComments?: boolean
     `Status: ${item.status}${item.complexity ? ` · complexity: ${item.complexity}` : ""}${item.qaRounds ? ` · bounced by QA ${item.qaRounds}x` : ""}`,
   ];
   if (item.labels.length) lines.push(`Labels: ${item.labels.join(", ")}`);
-  if (item.branch) lines.push(`Branch: ${item.branch}`);
-  if (item.prUrl) lines.push(`Pull request: ${item.prUrl}`);
+  // Branch/PR are only genuinely "this is active work" signals while the
+  // ticket is actually in in_progress/qa/complete. A ticket QA bounced
+  // back to ready (or, rarer, all the way to backlog) keeps its old
+  // branch/prUrl on the row -- shown unconditionally, that read exactly
+  // like still-active work sitting right under a "Status: ready" line,
+  // which is misleading at best. Observed live: an engineering manager
+  // reading a bounced-back ready ticket with a Branch + Pull request line
+  // attached repeatedly failed to assign it, once claiming the board
+  // showed nothing in "ready" at all -- the stale in-progress-shaped
+  // fields are the likeliest reason a small model read it as already
+  // spoken for. Still surfaced, just reframed so "there's a branch to
+  // reuse" doesn't read as "this is taken."
+  const isActiveStatus = item.status === "in_progress" || item.status === "qa" || item.status === "complete";
+  if (isActiveStatus) {
+    if (item.branch) lines.push(`Branch: ${item.branch}`);
+    if (item.prUrl) lines.push(`Pull request: ${item.prUrl}`);
+  } else if (item.branch || item.prUrl) {
+    lines.push(`Previous attempt (bounced back to ${item.status}): branch \`${item.branch ?? "?"}\`${item.prUrl ? `, PR ${item.prUrl}` : ""} -- reuse or restart as appropriate.`);
+  }
   if (item.description.trim()) lines.push("", item.description.trim());
   if (item.acceptanceCriteria.length) {
     lines.push("", "**Acceptance criteria**", ...item.acceptanceCriteria.map((c) => `- ${c}`));
