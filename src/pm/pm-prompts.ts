@@ -1,0 +1,105 @@
+// Prompt-construction for groomBacklog/assignReady, factored out of
+// orchestrator.ts so scripts/eval-pm-models.ts can build byte-identical
+// prompts against real project data without depending on Orchestrator's
+// private per-tick plumbing (guard(), the emit() activity log, etc.) --
+// an eval harness that tests a *different* prompt than production actually
+// dispatches would be comparing the wrong thing.
+
+import { getProject, type Project } from "../remote/projects.js";
+import * as agentStore from "./agents.js";
+import { getSettings } from "./project-settings.js";
+import { listFacts, renderFacts } from "./facts.js";
+import { hasGitCredentials, listSecrets } from "./vault.js";
+import { renderAgentRoster, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
+import * as runs from "./runs.js";
+import type { AgentDef, AgentRole, ProjectSettings, WorkItem } from "./types.js";
+import type { ModelRecord } from "./model-registry.js";
+
+/** Resolves a project + its settings + the role agent that should run a
+ *  given task. Returns null when the project or the role's agent doesn't
+ *  exist (agent creation happens lazily via ensureProjectAgents). */
+export async function resolveProjectAgent(projectId: string, role: AgentRole): Promise<{ project: Project; settings: ProjectSettings; agent: AgentDef } | null> {
+  const project = await getProject(projectId);
+  if (!project) return null;
+  await agentStore.ensureProjectAgents(projectId);
+  const agent = await agentStore.findRoleAgent(projectId, role);
+  if (!agent) return null;
+  return { project, settings: await getSettings(projectId), agent };
+}
+
+/** The project-context block every role prompt opens with: name/settings,
+ *  the shared facts store, and which exposed secrets are available. */
+export async function projectHeader(project: Project, settings: ProjectSettings): Promise<string> {
+  const available = (await listSecrets(project.id)).filter((secret) => secret.exposeToAgents);
+  return [
+    renderProjectContext(project.name, settings, await runs.monthlySpendUsd(project.id)),
+    "",
+    renderFacts(await listFacts(project.id)),
+    "",
+    renderSecrets(
+      available.map((secret) => secret.name),
+      await hasGitCredentials(project.id),
+    ),
+  ].join("\n");
+}
+
+/** groomBacklog's task prompt -- see orchestrator.ts's groomBacklog for the
+ *  dispatch side (session minting, runAgent call, activity logging). */
+export function buildGroomPrompt(header: string, backlog: WorkItem[]): string {
+  return [
+    header,
+    "",
+    "## Your task",
+    "",
+    "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the backlog listed below. Do not describe or attempt to explore the repository, read files, or investigate the codebase; you cannot, and trying wastes the run without producing a decision.",
+    "",
+    "You DO have three tools, and they are how you do this task: `promote_ticket`, `revise_ticket`, and `comment_on_ticket`. Call them directly as you review each item below -- do not narrate what you're about to do first, just call the tool. There is no final report to write; the tool calls themselves are the complete output of this run. Use `record_fact` only for something durable and cross-cutting, not a note about one ticket.",
+    "",
+    "Groom the backlog. For each item below, decide whether it is shaped well enough for an engineer to pick up and finish without coming back to ask you what you meant. Promote the ones that are; revise the ones that are nearly there; comment on the ones that need a decision you can't make yourself.",
+    "",
+    "Promote conservatively — a ticket in `ready` will be picked up and worked autonomously, so a vague one costs real money. Epics are never worked directly, so only promote an epic once its stories exist and are themselves ready.",
+    "",
+    "If an item is still blocked on the same thing you already noted in a previous comment and nothing has changed, do NOT add another comment repeating it — re-stating an unchanged blocker on every grooming pass (\"Re-checked: still blocked on X\", \"Re-verified: no change\") only adds noise to the ticket's history without adding information. Only comment on an item when there's something new to say: a changed circumstance, a decision only you can make, or the first time you're flagging a blocker.",
+    "",
+    "## Backlog",
+    "",
+    backlog.map((item) => renderWorkItem(item, { includeComments: true })).join("\n\n"),
+  ].join("\n");
+}
+
+/** assignReady's task prompt -- see orchestrator.ts's assignReady for the
+ *  dispatch side. */
+export function buildAssignPrompt(
+  header: string,
+  ready: WorkItem[],
+  roster: AgentDef[],
+  models: ModelRecord[],
+  inFlight: number,
+  limit: number,
+): string {
+  return [
+    header,
+    "",
+    "## Your task",
+    "",
+    "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the ticket list, roster, and model menu below. Do not describe or attempt to explore the repository or investigate the codebase; you cannot, and trying wastes the run without producing a decision.",
+    "",
+    "You DO have three tools, and they are how you do this task: `create_engineer`, `assign_ticket`, and `tune_engineer`. Call them directly as you decide each ticket -- do not narrate what you're about to do first, just call the tool. There is no final report to write; the tool calls themselves are the complete output of this run. Use `record_fact` only for something durable and cross-cutting, not a note about one ticket.",
+    "",
+    "Size every ticket in the ready column below, then decide which of them to start now. For each one you start: set its complexity and either assign an existing engineer or create a new one and assign that.",
+    "",
+    `**You decide the fan-out.** Every ticket you assign starts immediately, in its own isolated checkout. ${inFlight} engineer(s) are already working; the ceiling for this project is ${limit} at once.${limit === 1 ? " This project is limited to one engineer at a time (it isn't a git repository, so there are no isolated checkouts to give them)." : ""} Tickets you leave in \`ready\` simply wait until you come back — leaving one there is a real choice, not a failure to decide. \`assign_ticket\` will tell you when you're out of slots.`,
+    "",
+    "## Ready tickets",
+    "",
+    ready.map((item) => renderWorkItem(item, { includeComments: true })).join("\n\n"),
+    "",
+    "## Your current engineer roster",
+    "",
+    renderAgentRoster(roster),
+    "",
+    "## Provider and model menu",
+    "",
+    renderModelMenu(models),
+  ].join("\n");
+}

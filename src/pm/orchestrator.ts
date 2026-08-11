@@ -6,13 +6,14 @@ import * as ideas from "./ideas.js";
 import * as agentStore from "./agents.js";
 import * as runs from "./runs.js";
 import { getSettings, updateSettings } from "./project-settings.js";
-import { listFacts, renderFacts, writeFact } from "./facts.js";
+import { listFacts, writeFact } from "./facts.js";
 import { runAgent } from "./agent-runner.js";
 import { mintGroomSession, mintAssignSession, releaseSession, buildPmMcpConfig } from "../mcp/pm-tools.js";
+import { resolveProjectAgent, projectHeader as buildProjectHeader, buildGroomPrompt, buildAssignPrompt } from "./pm-prompts.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest, checkPrReadyToMerge, mergePullRequest } from "./worktrees.js";
-import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
+import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderWorkItem } from "./context.js";
 import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-registry.js";
-import { hasGitCredentials, listSecrets, resolveAgentEnv } from "./vault.js";
+import { hasGitCredentials, resolveAgentEnv } from "./vault.js";
 import { ASSIGN_MODELS_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
 import type { DevopsContract, EngineerContract, FactWrite, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, DeployTarget, ProjectSettings, WorkItem } from "./types.js";
@@ -304,27 +305,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     return idea?.projectId === projectId;
   }
 
+  // Thin delegates to pm-prompts.ts, which also backs scripts/eval-pm-models.ts
+  // -- kept here so the many existing this.resolve(...)/this.projectHeader(...)
+  // call sites below don't all need touching for what's otherwise a pure
+  // extract-function refactor.
   private async resolve(projectId: string, role: AgentRole): Promise<{ project: Project; settings: ProjectSettings; agent: AgentDef } | null> {
-    const project = await getProject(projectId);
-    if (!project) return null;
-    await agentStore.ensureProjectAgents(projectId);
-    const agent = await agentStore.findRoleAgent(projectId, role);
-    if (!agent) return null;
-    return { project, settings: await getSettings(projectId), agent };
+    return resolveProjectAgent(projectId, role);
   }
 
   private async projectHeader(project: Project, settings: ProjectSettings): Promise<string> {
-    const available = (await listSecrets(project.id)).filter((secret) => secret.exposeToAgents);
-    return [
-      renderProjectContext(project.name, settings, await runs.monthlySpendUsd(project.id)),
-      "",
-      renderFacts(await listFacts(project.id)),
-      "",
-      renderSecrets(
-        available.map((secret) => secret.name),
-        await hasGitCredentials(project.id),
-      ),
-    ].join("\n");
+    return buildProjectHeader(project, settings);
   }
 
   /** Folds any facts a run reported into the shared store. Called after
@@ -436,25 +426,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const backlog = (await board.listWorkItems(projectId)).filter((item) => item.status === "backlog");
       if (!backlog.length) return;
 
-      const prompt = [
-        await this.projectHeader(ctx.project, ctx.settings),
-        "",
-        "## Your task",
-        "",
-        "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the backlog listed below. Do not describe or attempt to explore the repository, read files, or investigate the codebase; you cannot, and trying wastes the run without producing a decision.",
-        "",
-        "You DO have three tools, and they are how you do this task: `promote_ticket`, `revise_ticket`, and `comment_on_ticket`. Call them directly as you review each item below -- do not narrate what you're about to do first, just call the tool. There is no final report to write; the tool calls themselves are the complete output of this run. Use `record_fact` only for something durable and cross-cutting, not a note about one ticket.",
-        "",
-        "Groom the backlog. For each item below, decide whether it is shaped well enough for an engineer to pick up and finish without coming back to ask you what you meant. Promote the ones that are; revise the ones that are nearly there; comment on the ones that need a decision you can't make yourself.",
-        "",
-        "Promote conservatively — a ticket in `ready` will be picked up and worked autonomously, so a vague one costs real money. Epics are never worked directly, so only promote an epic once its stories exist and are themselves ready.",
-        "",
-        "If an item is still blocked on the same thing you already noted in a previous comment and nothing has changed, do NOT add another comment repeating it — re-stating an unchanged blocker on every grooming pass (\"Re-checked: still blocked on X\", \"Re-verified: no change\") only adds noise to the ticket's history without adding information. Only comment on an item when there's something new to say: a changed circumstance, a decision only you can make, or the first time you're flagging a blocker.",
-        "",
-        "## Backlog",
-        "",
-        backlog.map((item) => renderWorkItem(item, { includeComments: true })).join("\n\n"),
-      ].join("\n");
+      const prompt = buildGroomPrompt(await this.projectHeader(ctx.project, ctx.settings), backlog);
 
       const token = mintGroomSession({
         projectId,
@@ -503,31 +475,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const limit = await this.engineerLimit(ctx.project, ctx.settings);
       const inFlight = all.filter((item) => item.status === "in_progress").length;
 
-      const prompt = [
-        await this.projectHeader(ctx.project, ctx.settings),
-        "",
-        "## Your task",
-        "",
-        "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the ticket list, roster, and model menu below. Do not describe or attempt to explore the repository or investigate the codebase; you cannot, and trying wastes the run without producing a decision.",
-        "",
-        "You DO have three tools, and they are how you do this task: `create_engineer`, `assign_ticket`, and `tune_engineer`. Call them directly as you decide each ticket -- do not narrate what you're about to do first, just call the tool. There is no final report to write; the tool calls themselves are the complete output of this run. Use `record_fact` only for something durable and cross-cutting, not a note about one ticket.",
-        "",
-        "Size every ticket in the ready column below, then decide which of them to start now. For each one you start: set its complexity and either assign an existing engineer or create a new one and assign that.",
-        "",
-        `**You decide the fan-out.** Every ticket you assign starts immediately, in its own isolated checkout. ${inFlight} engineer(s) are already working; the ceiling for this project is ${limit} at once.${limit === 1 ? " This project is limited to one engineer at a time (it isn't a git repository, so there are no isolated checkouts to give them)." : ""} Tickets you leave in \`ready\` simply wait until you come back — leaving one there is a real choice, not a failure to decide. \`assign_ticket\` will tell you when you're out of slots.`,
-        "",
-        "## Ready tickets",
-        "",
-        ready.map((item) => renderWorkItem(item, { includeComments: true })).join("\n\n"),
-        "",
-        "## Your current engineer roster",
-        "",
-        renderAgentRoster(roster),
-        "",
-        "## Provider and model menu",
-        "",
-        renderModelMenu(models),
-      ].join("\n");
+      const prompt = buildAssignPrompt(await this.projectHeader(ctx.project, ctx.settings), ready, roster, models, inFlight, limit);
 
       // An assignment to an exhausted combination fails on its first
       // request and puts the ticket straight back in the queue, so

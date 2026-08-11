@@ -24,6 +24,7 @@ import { syncSpawnedSessionCredentials } from "./auth/credentials.js";
 import { StatsMonitor, DEFAULT_ALERT_RULES } from "./runtime-stats.js";
 import { registerMetricsRoute } from "./server/metrics.js";
 import { registerMcpRoutes } from "./server/mcp-routes.js";
+import { registerEvalRoutes } from "./server/eval-routes.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const QDRANT_URL = process.env.QDRANT_URL ?? "http://localhost:6333";
@@ -171,6 +172,7 @@ async function main() {
   registerProjectRoutes(app, runtime, remoteSessionManager, (projectId) => void orchestrator.surveyProject(projectId));
   registerPmRoutes(app, runtime, orchestrator);
   registerMcpRoutes(app, orchestrator);
+  registerEvalRoutes(app, runtime);
   registerPmEventRoutes(app, orchestrator);
   registerUiRoutes(app);
   registerMetricsRoute(app, runtime);

@@ -206,7 +206,7 @@ const ALL_TOOLS = ["Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "
  *  engineer's diff, not modifying it. Tags not listed here keep full
  *  tool access: they have a real, legitimate reason to touch the
  *  filesystem or run commands. */
-const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
+export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
   "custos-assign": ALL_TOOLS,
   "custos-groom": ALL_TOOLS,
   "custos-qa": ["Write", "Edit", "NotebookEdit"],
