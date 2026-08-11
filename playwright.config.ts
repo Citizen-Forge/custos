@@ -11,6 +11,13 @@ const DATA_DIR = ".e2e-data/data";
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
+  // All specs share one webServer instance and one JSON-file-backed data
+  // store (see webServer.env below) -- there's no per-test database
+  // transaction to isolate concurrent writers, so cross-file parallelism
+  // risks two tests' PATCH/PUT calls landing on the same on-disk file at
+  // once. Config-mutating admin-panel coverage is inherently this kind of
+  // integration test, not an independent-unit-test suite; run serially.
+  workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: "list",
