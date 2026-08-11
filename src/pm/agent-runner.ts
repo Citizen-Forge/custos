@@ -193,7 +193,7 @@ export function buildSystemPrompt(agent: AgentDef, extra: string | undefined, co
 // turn up, but don't treat this list as ever being complete.
 const ALL_TOOLS = [
   "Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch",
-  "Task", "TaskList", "TaskOutput", "TaskStop", "TodoWrite", "SlashCommand",
+  "Task", "TaskCreate", "TaskList", "TaskOutput", "TaskStop", "TodoWrite", "SlashCommand",
   "CronCreate", "CronDelete", "CronList", "ListAgents", "SendMessage",
   "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree", "Monitor",
   "DesignSync", "PushNotification", "RemoteTrigger", "ScheduleWakeup", "AskUserQuestion", "ReportFindings",
@@ -225,28 +225,19 @@ export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
   "custos-qa": ["Write", "Edit", "NotebookEdit"],
 };
 
-/** `--allowedTools` allowlists for the tool-driven tags above -- see
- *  RunTurnOptions.allowedTools for why this exists alongside (not instead
- *  of) DISALLOWED_TOOLS_BY_TAG: ALL_TOOLS is a fixed list of built-ins that
- *  existed when it was written, and a newer CLI shipping more built-in
- *  tools (task/cron/agent-orchestration features observed live: TaskList,
- *  CronList, ListAgents) silently isn't covered by it. These three tags
- *  each have an exhaustive, known action surface -- exactly the MCP tools
- *  pm-tools.ts registers for that session kind, prefixed
- *  `mcp__custos_pm__` (the server name buildPmMcpConfig uses) -- so an
- *  allowlist can be exact instead of best-effort. Tags not listed here
- *  (custos-qa, custos-plan, custos-survey, etc.) keep their normal tool
- *  access; this only applies where the run's whole job is a handful of
- *  named tool calls and nothing else is legitimate. */
-function pmTool(name: string): string {
-  return `mcp__custos_pm__${name}`;
-}
-
-export const ALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
-  "custos-groom": ["promote_ticket", "revise_ticket", "comment_on_ticket", "record_fact"].map(pmTool),
-  "custos-assign": ["create_engineer", "assign_ticket", "tune_engineer", "record_fact"].map(pmTool),
-  "custos-curate": ["approve_fact", "reject_fact"].map(pmTool),
-};
+/** Tags whose entire legitimate action surface is their MCP tools (see
+ *  mcp/pm-tools.ts) and nothing else -- these get `--tools []` (RunTurnOptions.tools,
+ *  the CLI's own `--tools ""`) on top of DISALLOWED_TOOLS_BY_TAG's denylist,
+ *  cutting every built-in tool from the roster instead of hoping the
+ *  denylist happens to name whatever the model tries. Confirmed necessary
+ *  live: `--disallowedTools` alone kept missing newer built-ins (TaskCreate,
+ *  TaskList, CronList, ListAgents -- a task/cron/agent-orchestration family
+ *  that didn't exist when ALL_TOOLS was first written), and the model used
+ *  each one instead of the MCP tool it was actually given, burning a full,
+ *  slow turn per miss. MCP-server tools are unaffected by `--tools` -- it
+ *  only governs the built-in roster -- so this doesn't touch the very
+ *  tools these tags exist to use. */
+export const TOOL_FREE_TAGS = new Set(["custos-groom", "custos-assign", "custos-curate"]);
 
 /**
  * Runs one autonomous agent to completion and returns its parsed contract.
@@ -461,7 +452,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
       disallowedTools: DISALLOWED_TOOLS_BY_TAG[tag],
-      allowedTools: ALLOWED_TOOLS_BY_TAG[tag],
+      tools: TOOL_FREE_TAGS.has(tag) ? [] : undefined,
       onEvent,
       signal: controller.signal,
     });
