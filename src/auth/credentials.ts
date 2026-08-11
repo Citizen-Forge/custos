@@ -245,15 +245,36 @@ export interface SyncSpawnedSessionCredentialsResult {
   /** What the mirror function actually did. `mirrored` = wrote the file
    * with valid tokens; `skipped` = nothing to mirror (no stored tokens);
    * `skipped-empty` = input was empty/malformed and we refused to
-   * clobber the existing file (logged at warn); `failed` = I/O error or
-   * the persistence-side validity predicate refused to write. Lets
+   * clobber the existing file (logged at warn); `failed` = I/O error, a
+   * failed refresh attempt (e.g. a revoked refresh token), or the
+   * persistence-side validity predicate refused to write. Lets
    * callers and tests tell the difference between "we deleted auth
    * intentionally" and "we couldn't mirror because the input was bad". */
   outcome: "mirrored" | "skipped" | "skipped-empty" | "failed";
 }
 
 export async function syncSpawnedSessionCredentials(): Promise<SyncSpawnedSessionCredentialsResult> {
-  const tokens = await getValidOwnTokenSet();
+  let tokens: TokenSet | null;
+  try {
+    tokens = await getValidOwnTokenSet();
+  } catch (err) {
+    // getValidOwnTokenSet refreshes an expiring token on demand, which
+    // means a real network call to Anthropic's token endpoint can land
+    // here -- and a revoked/invalid refresh token makes that call reject
+    // (postToken in oauth.ts throws on a non-2xx response) rather than
+    // return something isValidTokenSet can reject gracefully below. This
+    // function is called both at boot (already guarded by a try/catch one
+    // level up) and from startMirrorRefresh's unguarded setInterval tick
+    // in runtime.ts -- an uncaught rejection there crashes the whole
+    // gateway process, not just this one sync attempt, and it would do so
+    // on every tick (every 30s by default) once the stored token's local
+    // expiry passes, regardless of which project's agents are running.
+    // Treating it as "failed" here means a dead OAuth connection degrades
+    // to the existing ANTHROPIC_API_KEY=auth-ok fallback in
+    // resolveClaudeAuthEnv instead of taking the process down with it.
+    console.warn(`[credentials] failed to refresh OAuth tokens: ${(err as Error).message}. Reconnect via the admin OAuth panel.`);
+    return { outcome: "failed" };
+  }
   if (!tokens) return { outcome: "skipped" };
   if (!isValidTokenSet(tokens)) {
     // REFUSE TO WRITE IF THE TOP-LEVEL FIELDS ARE EMPTY.
