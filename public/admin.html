@@ -2556,8 +2556,15 @@ function renderMcpPanel() {
       if (mcp.configured && !confirm("Regenerating invalidates the current key -- any MCP client using it will need the new one. Continue?")) return;
       try {
         const { key } = await api("/admin/api/mcp/generate-key", { method: "POST" });
-        showKeyOnce(key);
+        // loadState() ends in render(), which wipes and rebuilds #app --
+        // including a fresh, empty #mcp-key-reveal div. Calling
+        // showKeyOnce() before that reload used to inject the key into the
+        // OLD div a moment before it got discarded, so the one and only
+        // chance to see/copy this key was a flash the operator could
+        // easily miss. Reload first so the re-render has already
+        // happened, then reveal into the div that's actually staying.
         await loadState();
+        showKeyOnce(key);
       } catch (err) {
         showToast(err.message, true);
       }
