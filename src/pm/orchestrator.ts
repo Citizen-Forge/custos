@@ -11,8 +11,8 @@ import { runAgent } from "./agent-runner.js";
 import { mintGroomSession, mintAssignSession, releaseSession, buildPmMcpConfig } from "../mcp/pm-tools.js";
 import { resolveProjectAgent, projectHeader as buildProjectHeader, buildGroomPrompt, buildAssignPrompt } from "./pm-prompts.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest, checkPrReadyToMerge, mergePullRequest } from "./worktrees.js";
-import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderWorkItem } from "./context.js";
-import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-registry.js";
+import { renderAgentRoster, renderBoardSummary, renderIdea, renderWorkItem } from "./context.js";
+import { ensureModel, isAvailable, recordOutcome } from "./model-registry.js";
 import { hasGitCredentials, resolveAgentEnv } from "./vault.js";
 import { ASSIGN_MODELS_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
 import type { DevopsContract, EngineerContract, FactWrite, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
@@ -467,32 +467,33 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       const ready = all.filter((item) => item.type !== "epic" && item.status === "ready");
       if (!ready.length) return;
       const roster = await agentStore.listEngineers(projectId);
-      const menu = agentStore.listProviderOptions(this.runtime.config);
-      const models = await syncFromConfig(
-        this.runtime.config,
-        menu.filter((option) => option.providerKey === "anthropic").map((option) => option.model),
-      );
+      const fallbackSets = this.runtime.config.fallbackSets ?? {};
       const limit = await this.engineerLimit(ctx.project, ctx.settings);
       const inFlight = all.filter((item) => item.status === "in_progress").length;
-
-      const prompt = buildAssignPrompt(await this.projectHeader(ctx.project, ctx.settings), ready, roster, models, inFlight, limit);
 
       // An assignment to an exhausted combination fails on its first
       // request and puts the ticket straight back in the queue, so
       // assign_ticket rejects it too (see AssignSession.unavailableFallbackSets),
       // keyed by fallback SET NAME since that's the only field an agent
-      // row actually carries -- resolved here from each set's first entry,
-      // matching what agentStore.primaryPick would resolve for an agent on
-      // that set.
-      const unavailable = new Set(models.filter((record) => !isAvailable(record)).map((record) => record.id));
-      const unavailableFallbackSets = new Set(
-        Object.entries(this.runtime.config.fallbackSets ?? {})
-          .filter(([, set]) => {
-            const first = set.providers[0];
-            return first && unavailable.has(modelId(first.provider, first.model));
-          })
-          .map(([name]) => name),
-      );
+      // row actually carries -- resolved from each set's FIRST entry only
+      // (matching what agentStore.primaryPick would resolve for an agent
+      // on that set), via ensureModel directly rather than syncFromConfig.
+      // syncFromConfig ensures a ModelRecord for every enabled model
+      // across every configured provider -- fine for the admin panel's
+      // own model-registry view, but on a project with a fully-scanned
+      // OpenRouter/Gemini/OpenAI catalog that's 600+ models, and every one
+      // of them used to get rendered into this prompt for a decision that
+      // only ever needs the handful of models this project's fallback
+      // sets actually reference.
+      const unavailableFallbackSets = new Set<string>();
+      for (const [key, set] of Object.entries(fallbackSets)) {
+        const first = set.providers[0];
+        if (!first) continue;
+        const record = await ensureModel(first.provider, first.model, this.runtime.config);
+        if (!isAvailable(record)) unavailableFallbackSets.add(key);
+      }
+
+      const prompt = buildAssignPrompt(await this.projectHeader(ctx.project, ctx.settings), ready, roster, fallbackSets, unavailableFallbackSets, inFlight, limit);
 
       const token = mintAssignSession({
         projectId,

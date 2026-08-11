@@ -1,5 +1,4 @@
 import type { ProviderOption } from "./agents.js";
-import { isAvailable, type ModelRecord } from "./model-registry.js";
 import type { AgentDef, Idea, ProjectSettings, WorkItem } from "./types.js";
 import type { GatewayConfig } from "../config.js";
 
@@ -137,41 +136,32 @@ export function renderAgentRoster(roster: AgentDef[], config?: GatewayConfig): s
     .join("\n\n");
 }
 
-const BILLING_BLURB: Record<string, string> = {
-  subscription: "covered by the Claude subscription — costs nothing per token, but the usage window runs out and then this is unusable for hours",
-  metered: "billed per token against the project budget",
-  free: "free tier or self-hosted — no cost, usually rate limited or slower",
-};
-
 /**
- * The menu the engineering manager actually decides from: what each
- * combination costs, how capable it has proved to be, and whether it can be
- * used at all right now. Exhausted entries are listed rather than hidden --
- * the manager needs to know a strong model exists and is temporarily gone,
- * so it can route around it deliberately instead of behaving as though the
- * model never existed.
+ * The menu the engineering manager actually decides from: which named
+ * fallback set to put a new engineer on. Replaces the old per-model menu
+ * (every enabled model across every configured provider, individually
+ * scored) -- an engineer is assigned a fallback SET, never a raw model, so
+ * that was never actually the right unit of information to show, and on a
+ * live project with a fully-scanned OpenRouter/Gemini/OpenAI catalog it
+ * meant dumping 600+ model rows into every assignReady prompt. Observed
+ * live: every model tested against that version of the prompt got
+ * derailed into discussing "model selection" instead of sizing and
+ * assigning the actual ticket -- the real task was buried under the
+ * catalog. Exhausted sets are listed rather than hidden, same reasoning
+ * as before: the manager needs to know a set exists and is temporarily
+ * unusable so it can route around it deliberately.
  */
-export function renderModelMenu(records: ModelRecord[]): string {
-  if (!records.length) return "_No providers are configured._";
+export function renderFallbackSetMenu(sets: Record<string, { name: string; description: string }>, unavailableSetNames: ReadonlySet<string>): string {
+  const entries = Object.entries(sets);
+  if (!entries.length) return "_No fallback sets are configured._";
   const lines: string[] = [];
-  for (const record of records) {
-    const available = isAvailable(record);
-    const evidence = record.completed + record.qaFailures;
-    const track = evidence
-      ? `${record.completed} passed / ${record.qaFailures} bounced`
-      : "no track record yet";
-    const status = available
-      ? "**available**"
-      : `**EXHAUSTED** until ${new Date(record.unavailableUntil ?? 0).toISOString()} (${record.unavailableReason ?? "no reason given"})`;
-    lines.push(
-      `- \`${record.providerKey}\` / \`${record.model}\` — capability **${record.capability.toFixed(2)}/5** (${track}) · ${BILLING_BLURB[record.billing]} · ${status}`,
-    );
+  for (const [key, set] of entries) {
+    const status = unavailableSetNames.has(key) ? "**EXHAUSTED right now**" : "**available**";
+    lines.push(`- \`${key}\` (${set.name}) — ${set.description} · ${status}`);
   }
   lines.push(
     "",
-    "Capability is measured, not assumed: it starts from the model's tier and then moves with QA's verdicts on work that model produced. Trust it over your own prior about which model name sounds strongest.",
-    "",
-    "**Never assign work to an exhausted combination** — the run will fail immediately and the ticket will just bounce back to you. If everything capable enough is exhausted, assign what is available and say so in your notes; a simple ticket finished slowly on a free model beats a hard ticket that cannot start at all.",
+    "**Never assign work to an exhausted set** — the run will fail immediately and the ticket will just bounce back to you. If everything capable enough is exhausted, assign what is available and say so in your notes; a simple ticket finished slowly on a free set beats a hard ticket that cannot start at all.",
   );
   return lines.join("\n");
 }

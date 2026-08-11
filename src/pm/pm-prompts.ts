@@ -1,19 +1,18 @@
 // Prompt-construction for groomBacklog/assignReady, factored out of
-// orchestrator.ts so scripts/eval-pm-models.ts can build byte-identical
+// orchestrator.ts so callers other than the orchestrator's own per-tick
+// dispatch (e.g. a one-off diagnostic script) can build byte-identical
 // prompts against real project data without depending on Orchestrator's
-// private per-tick plumbing (guard(), the emit() activity log, etc.) --
-// an eval harness that tests a *different* prompt than production actually
-// dispatches would be comparing the wrong thing.
+// private plumbing (guard(), the emit() activity log, etc.).
 
 import { getProject, type Project } from "../remote/projects.js";
 import * as agentStore from "./agents.js";
 import { getSettings } from "./project-settings.js";
 import { listFacts, renderFacts } from "./facts.js";
 import { hasGitCredentials, listSecrets } from "./vault.js";
-import { renderAgentRoster, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
+import { renderAgentRoster, renderFallbackSetMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
 import * as runs from "./runs.js";
 import type { AgentDef, AgentRole, ProjectSettings, WorkItem } from "./types.js";
-import type { ModelRecord } from "./model-registry.js";
+import type { FallbackSetDef } from "../config.js";
 
 /** Resolves a project + its settings + the role agent that should run a
  *  given task. Returns null when the project or the role's agent doesn't
@@ -73,7 +72,8 @@ export function buildAssignPrompt(
   header: string,
   ready: WorkItem[],
   roster: AgentDef[],
-  models: ModelRecord[],
+  fallbackSets: Record<string, FallbackSetDef>,
+  unavailableFallbackSets: ReadonlySet<string>,
   inFlight: number,
   limit: number,
 ): string {
@@ -82,7 +82,7 @@ export function buildAssignPrompt(
     "",
     "## Your task",
     "",
-    "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the ticket list, roster, and model menu below. Do not describe or attempt to explore the repository or investigate the codebase; you cannot, and trying wastes the run without producing a decision.",
+    "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the ticket list, roster, and fallback-set menu below. Do not describe or attempt to explore the repository or investigate the codebase; you cannot, and trying wastes the run without producing a decision.",
     "",
     "You DO have three tools, and they are how you do this task: `create_engineer`, `assign_ticket`, and `tune_engineer`. Call them directly as you decide each ticket -- do not narrate what you're about to do first, just call the tool. There is no final report to write; the tool calls themselves are the complete output of this run. Use `record_fact` only for something durable and cross-cutting, not a note about one ticket.",
     "",
@@ -98,8 +98,8 @@ export function buildAssignPrompt(
     "",
     renderAgentRoster(roster),
     "",
-    "## Provider and model menu",
+    "## Fallback sets available",
     "",
-    renderModelMenu(models),
+    renderFallbackSetMenu(fallbackSets, unavailableFallbackSets),
   ].join("\n");
 }
