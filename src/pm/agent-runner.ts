@@ -224,24 +224,56 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   const { agent, projectId, cwd, prompt, tag } = options;
   // Resolve the agent's primary pick from its fallbackSet so we record
   // cost against what actually ran, not whatever stale providerKey the
-  // agent row on disk still carries from before the schema drop. Three
-  // inputs in priority order:
+  // agent row on disk still carries from before the schema drop.
   //   1. The acquireSlot path -- runtime.resolveFallbackSet() reads the
   //      fallbackSet, asks ProviderStateMap which providers are accepting
   //      work, and returns the first one with a slot already held. This is
-  //      the actual provider the run will dispatch to.
-  //   2. primaryPick(agent, config) -- the operator-facing primary pick,
-  //      used when resolveFallbackSet has no live provider to release.
+  //      the actual provider the run will dispatch to, and the only one
+  //      ever actually probed below.
+  //   2. primaryPick(agent, config) -- the operator-facing primary pick
+  //      (just fallbackSet[0], availability-blind). Used ONLY to fill in
+  //      effectiveProviderKey/effectiveModel for the early-return failure
+  //      right below when resolveFallbackSet comes back null, so that
+  //      failure still has something informative to report. Never handed
+  //      to the probe -- see the comment on the `if (!resolved)` branch
+  //      for why that distinction matters.
   //   3. null -- only possible if the agent has no fallbackSet at all (a
   //      legacy state that migrateToFallbackSets should have resolved; an
   //      unmitigated error here surfaces as a clear 503 at dispatch time
   //      rather than a silent wrong-provider bill).
   const resolved = runtime.resolveFallbackSet(agent);
-  const effectiveProviderKey = resolved?.providerKey ?? agents.primaryPick(agent, runtime.config)?.providerKey ?? null;
-  const effectiveModel = resolved?.model ?? agents.primaryPick(agent, runtime.config)?.model ?? null;
+  const primary = agents.primaryPick(agent, runtime.config);
+  const effectiveProviderKey = resolved?.providerKey ?? primary?.providerKey ?? null;
+  const effectiveModel = resolved?.model ?? primary?.model ?? null;
   let releaseSlot = resolved?.release ?? null;
   if (!effectiveProviderKey || !effectiveModel) {
     throw new Error(`agent ${agent.id} has no fallbackSet or no live primary pick; the PM must assign one before this run can be dispatched`);
+  }
+  // primaryPick is just `fallbackSet[0]` with no regard for whether that
+  // entry is actually enabled or accepting work -- it's meant for display
+  // ("runs on X/Y" in the roster), not dispatch. resolveFallbackSet is the
+  // one that's availability-aware (walks the chain via
+  // ProviderStateMap.canAccept, skipping anything disabled/cooling/at
+  // capacity); when it returns null the ENTIRE chain is currently
+  // unavailable, not just its first entry. Probing primary's guess in that
+  // case used to burn a full dispatch attempt on a provider we already
+  // know can't work -- observed live: "complex" is [anthropic, local],
+  // anthropic is deliberately disabled, and the moment `local` was
+  // momentarily at its maxConcurrent:1 ceiling, this fell through to
+  // probing anthropic (permanently disabled, never registered) instead of
+  // just waiting for `local` to free up, failing the whole EM assignment
+  // pass on every occurrence with "no registered provider for anthropic".
+  if (!resolved) {
+    if (releaseSlot) releaseSlot();
+    return {
+      runId: `probe-failed-${Date.now().toString(36)}`,
+      ok: false,
+      parsed: null,
+      text: "",
+      error: `no provider in ${agent.fallbackSet ?? "(no fallback set)"}'s chain is currently available (disabled, cooling, or at capacity) -- will retry`,
+      costUsd: null,
+      runMs: 0,
+    };
   }
   // Pre-spawn probe: a 1-token ping to the resolved provider+model.
   // Sits between resolveFallbackSet (which acquired the concurrency
