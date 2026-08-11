@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildMcpServer } from "../mcp/server.js";
+import { buildGroomToolsServer, buildAssignToolsServer, lookupSession } from "../mcp/pm-tools.js";
 import { verifyMcpKey, getInternalMcpKey } from "../auth/mcp-key.js";
 import type { Orchestrator } from "../pm/orchestrator.js";
 
@@ -77,6 +78,55 @@ export function registerMcpRoutes(app: FastifyInstance, orchestrator: Orchestrat
     return JSON_RPC_METHOD_NOT_ALLOWED;
   });
   app.delete("/mcp", async (_req, reply) => {
+    reply.code(405);
+    return JSON_RPC_METHOD_NOT_ALLOWED;
+  });
+
+  /**
+   * Exposes groomBacklog/assignReady's narrow, per-run tool set at
+   * POST /mcp/pm-run -- see mcp/pm-tools.ts for why this exists (replaces
+   * asking a model to emit one big JSON block at the end of a run with
+   * immediate, individually-validated tool calls). Gated by a per-run
+   * token minted in orchestrator.ts right before dispatch, not the
+   * process-lifetime internal key /mcp uses -- each token is scoped to
+   * exactly one project and one run's ticket set, so a stale or
+   * cross-project id a confused model tries to act on is rejected inside
+   * the tool handler itself, not just by the token being valid at all.
+   */
+  app.post("/mcp/pm-run", async (req, reply) => {
+    const auth = req.headers.authorization;
+    const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
+    const session = bearer ? lookupSession(bearer) : null;
+    if (!session) {
+      reply.code(401);
+      return JSON_RPC_UNAUTHORIZED;
+    }
+
+    reply.hijack();
+    const server = session.kind === "groom" ? buildGroomToolsServer(session) : buildAssignToolsServer(session);
+    try {
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await server.connect(transport);
+      await transport.handleRequest(req.raw, reply.raw, req.body);
+      reply.raw.on("close", () => {
+        void transport.close();
+        void server.close();
+      });
+    } catch (err) {
+      req.log.error({ err }, "PM-run MCP request failed");
+      if (!reply.raw.headersSent) {
+        reply.raw.writeHead(500, { "content-type": "application/json" });
+        reply.raw.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null }));
+      } else {
+        reply.raw.end();
+      }
+    }
+  });
+  app.get("/mcp/pm-run", async (_req, reply) => {
+    reply.code(405);
+    return JSON_RPC_METHOD_NOT_ALLOWED;
+  });
+  app.delete("/mcp/pm-run", async (_req, reply) => {
     reply.code(405);
     return JSON_RPC_METHOD_NOT_ALLOWED;
   });

@@ -367,33 +367,6 @@ export const PLAN_SHAPE = `{
   "notes": "anything the humans should know, including why you left something out"
 }`;
 
-export const GROOM_SHAPE = `{
-  "promote": ["work item ids that are shaped well enough to move backlog -> ready"],
-  "revise": [{ "id": "work item id", "title": "optional new title", "description": "optional new description", "acceptanceCriteria": ["optional replacement list"] }],
-  "comments": [{ "id": "work item id", "body": "why you left it in the backlog, or what it still needs" }],
-  "notes": "string"
-}`;
-
-export const ASSIGN_SHAPE = `{
-  "newAgents": [
-    {
-      "tempId": "a name you make up, to reference in assignments below",
-      "name": "short human-readable name",
-      "fallbackSet": "exactly one of the fallback set names from the menu",
-      "specialty": "one line: what this agent is for",
-      "maxComplexity": "low" | "medium" | "high",
-      "systemPrompt": "extra instructions appended to the standard engineer prompt; may be empty"
-    }
-  ],
-  "assignments": [
-    { "workItemId": "id", "complexity": "low" | "medium" | "high", "agentId": "existing agent id", "tempId": "or a tempId from newAgents", "rationale": "one line: why this agent, at this cost, for this ticket" }
-  ],
-  "tuning": [
-    { "agentId": "id", "note": "instruction appended to that agent's prompt", "fallbackSet": "optional new fallback set", "maxComplexity": "optional new tier" }
-  ],
-  "notes": "string"
-}`;
-
 export const ENGINEER_SHAPE = `{
   "status": "ready_for_qa" | "blocked",
   "summary": "markdown: what you changed, why, and how to verify it",

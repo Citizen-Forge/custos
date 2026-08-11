@@ -34,7 +34,24 @@ export interface RunAgentOptions {
   /** Appended after the role prompt and before the output contract, for
    * per-run instructions that aren't part of the persona. */
   extraSystemPrompt?: string;
-  outputContract: string;
+  /** Omit for a tool-driven run (see toolDriven below) -- there's nothing
+   * to report a result *as*, the tool calls already are the result. */
+  outputContract?: string;
+  /** True when this run's task prompt tells the model to act via MCP tools
+   * (see mcpConfig) rather than emit one JSON block at the end. Changes
+   * three things: the system prompt drops the output-contract framing
+   * entirely (see buildSystemPrompt), the trailing "remember to end with
+   * a fenced block" reminder is skipped, and success is judged by whether
+   * the turn completed cleanly rather than by whether a parseable block
+   * showed up in the transcript -- state changes already landed as each
+   * tool call happened, so `parsed` is always null here; there's nothing
+   * left to extract. */
+  toolDriven?: boolean;
+  /** Inline `--mcp-config` JSON string for this run's spawned turn -- see
+   * mcp/pm-tools.ts's buildPmMcpConfig for the toolDriven case, or
+   * mcp/server.ts's buildPortfolioMcpConfig for the sibling pattern used
+   * by portfolio chat. */
+  mcpConfig?: string;
   workItemId?: string | null;
   ideaId?: string | null;
   onEvent?: (event: TurnEvent) => void;
@@ -142,13 +159,17 @@ function balancedObjects(text: string): string[] {
  * own prompt, then every tuning note the engineering manager has appended,
  * then the output contract. Order matters -- the base prompt is what the
  * orchestrator relies on, so it can't be displaced by later additions. */
-export function buildSystemPrompt(agent: AgentDef, extra: string | undefined, contract: string): string {
+export function buildSystemPrompt(agent: AgentDef, extra: string | undefined, contract?: string): string {
   const parts = [ROLE_PROMPTS[agent.role]];
   if (agent.specialty) parts.push(`## Your specialty\n\n${agent.specialty}`);
   if (agent.systemPrompt.trim()) parts.push(agent.systemPrompt.trim());
   if (agent.notes.length) parts.push(`## Standing instructions from your engineering manager\n\n${agent.notes.map((n) => `- ${n}`).join("\n")}`);
   if (extra?.trim()) parts.push(extra.trim());
-  parts.push(contract);
+  // Omitted entirely for tool-driven runs (see RunAgentOptions.toolDriven)
+  // -- there's no closing JSON block to remind the model about, and the
+  // "report your result" framing would be actively misleading alongside
+  // tools that already apply each decision as it's made.
+  if (contract) parts.push(contract);
   return parts.join("\n\n");
 }
 
@@ -349,8 +370,10 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       // prompt sits. The agent then answers in prose, the contract block
       // never appears, and a whole run is wasted. Restating the requirement
       // at the very end costs a line and survives that truncation.
-      prompt: `${prompt}\n\n---\n\nRemember: your final message must end with exactly one fenced \`${tag}\` block containing valid JSON, and nothing after it.`,
+      // Skipped for tool-driven runs -- there's no block to remind it about.
+      prompt: options.toolDriven ? prompt : `${prompt}\n\n---\n\nRemember: your final message must end with exactly one fenced \`${tag}\` block containing valid JSON, and nothing after it.`,
       appendSystemPrompt: buildSystemPrompt(agent, options.extraSystemPrompt, options.outputContract),
+      mcpConfig: options.mcpConfig,
       // Append caller context (project + agent identity) after `?` so the
       // gateway's /v1/messages handler can recover it and attribute the
       // resulting activity-log events back to the project + agent that
@@ -380,9 +403,12 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
   }
 
   const runMs = Date.now() - startedAt;
-  const parsed = extractContract<T>(text, tag);
   if (timedOut) turnError = `the run was aborted after ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes without finishing`;
-  const error = turnError ?? (parsed ? null : `the agent did not return a valid \`${tag}\` block`);
+  // Tool-driven runs already applied every decision as each tool call
+  // landed -- there's no trailing block to require, so success is just
+  // "the turn finished without erroring or timing out".
+  const parsed = options.toolDriven ? null : extractContract<T>(text, tag);
+  const error = turnError ?? (options.toolDriven || parsed ? null : `the agent did not return a valid \`${tag}\` block`);
   const ok = !error;
 
   // Everything derived from the agent's own output is persisted and shown in

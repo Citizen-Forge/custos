@@ -42,28 +42,6 @@ export interface PlanContract extends WithFacts {
   notes?: string;
 }
 
-export interface GroomContract extends WithFacts {
-  promote?: string[];
-  revise?: Array<{ id?: string; title?: string; description?: string; acceptanceCriteria?: string[] }>;
-  comments?: Array<{ id?: string; body?: string }>;
-  notes?: string;
-}
-
-export interface AssignContract extends WithFacts {
-  newAgents?: Array<{
-    tempId?: string;
-    name?: string;
-    providerKey?: string;
-    model?: string;
-    specialty?: string;
-    maxComplexity?: Complexity;
-    systemPrompt?: string;
-  }>;
-  assignments?: Array<{ workItemId?: string; complexity?: Complexity; agentId?: string; tempId?: string; rationale?: string }>;
-  tuning?: Array<{ agentId?: string; note?: string; providerKey?: string; model?: string; maxComplexity?: Complexity }>;
-  notes?: string;
-}
-
 export interface EngineerContract extends WithFacts {
   status?: "ready_for_qa" | "blocked";
   summary?: string;

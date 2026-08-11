@@ -8,12 +8,13 @@ import * as runs from "./runs.js";
 import { getSettings, updateSettings } from "./project-settings.js";
 import { listFacts, renderFacts, writeFact } from "./facts.js";
 import { runAgent } from "./agent-runner.js";
+import { mintGroomSession, mintAssignSession, releaseSession, buildPmMcpConfig } from "../mcp/pm-tools.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest, checkPrReadyToMerge, mergePullRequest } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderModelMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
 import { isAvailable, modelId, recordOutcome, syncFromConfig } from "./model-registry.js";
 import { hasGitCredentials, listSecrets, resolveAgentEnv } from "./vault.js";
-import { ASSIGN_MODELS_SHAPE, ASSIGN_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, GROOM_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
-import type { AssignContract, DevopsContract, EngineerContract, FactWrite, GroomContract, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
+import { ASSIGN_MODELS_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
+import type { DevopsContract, EngineerContract, FactWrite, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, DeployTarget, ProjectSettings, WorkItem } from "./types.js";
 import { HUMAN_ASSIGNEE_ID } from "./types.js";
 
@@ -440,9 +441,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         "",
         "## Your task",
         "",
-        "You have NO tool access for this task — no filesystem, no shell, no web search. Everything you need is the backlog listed below. Do not describe or attempt to explore the repository, read files, or investigate the codebase; you cannot, and trying costs the whole run without producing a decision. Go straight from reading the backlog to your output block.",
+        "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the backlog listed below. Do not describe or attempt to explore the repository, read files, or investigate the codebase; you cannot, and trying wastes the run without producing a decision.",
         "",
-        "OUTPUT ONLY THE FENCED `custos-groom` BLOCK DEFINED BELOW. DO NOT OUTPUT ANYTHING ELSE — no reasoning, no analysis, no summary, no narration of what you're about to do, no acknowledgment. This output is read only by other software, never by a human. Any decision worth recording belongs in the block's own `comments`/`revise` fields, not around it. A single word before the block risks running out of length before you reach it, which fails the entire run.",
+        "You DO have three tools, and they are how you do this task: `promote_ticket`, `revise_ticket`, and `comment_on_ticket`. Call them directly as you review each item below -- do not narrate what you're about to do first, just call the tool. There is no final report to write; the tool calls themselves are the complete output of this run. Use `record_fact` only for something durable and cross-cutting, not a note about one ticket.",
         "",
         "Groom the backlog. For each item below, decide whether it is shaped well enough for an engineer to pick up and finish without coming back to ask you what you meant. Promote the ones that are; revise the ones that are nearly there; comment on the ones that need a decision you can't make yourself.",
         "",
@@ -455,38 +456,29 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         backlog.map((item) => renderWorkItem(item, { includeComments: true })).join("\n\n"),
       ].join("\n");
 
-      const result = await runAgent<GroomContract>(this.runtime, {
-        signal,
-        agent: ctx.agent,
+      const token = mintGroomSession({
         projectId,
-        cwd: ctx.project.workspaceDir,
-        prompt,
-        tag: "custos-groom",
-        outputContract: outputContract("custos-groom", GROOM_SHAPE),
+        agentId: ctx.agent.id,
+        agentName: agentStore.displayName(ctx.agent),
+        validTicketIds: new Set(backlog.map((item) => item.id)),
       });
-      await this.applyFacts(projectId, ctx.agent, result.parsed);
-      if (!result.ok || !result.parsed) return;
-
-      const valid = new Set(backlog.map((item) => item.id));
-      for (const revision of result.parsed.revise ?? []) {
-        if (!revision.id || !valid.has(revision.id)) continue;
-        await board.updateWorkItem(revision.id, {
-          ...(revision.title ? { title: revision.title } : {}),
-          ...(revision.description ? { description: revision.description } : {}),
-          ...(revision.acceptanceCriteria ? { acceptanceCriteria: revision.acceptanceCriteria } : {}),
+      let result: Awaited<ReturnType<typeof runAgent>>;
+      try {
+        result = await runAgent(this.runtime, {
+          signal,
+          agent: ctx.agent,
+          projectId,
+          cwd: ctx.project.workspaceDir,
+          prompt,
+          tag: "custos-groom",
+          toolDriven: true,
+          mcpConfig: buildPmMcpConfig(token),
         });
+      } finally {
+        const actions = releaseSession(token);
+        if (actions.length) this.emit("activity", projectId, `Product owner: ${actions.join("; ")}.`);
       }
-      for (const comment of result.parsed.comments ?? []) {
-        if (!comment.id || !valid.has(comment.id) || !comment.body) continue;
-        await board.addComment(comment.id, ctx.agent.id, agentStore.displayName(ctx.agent), comment.body);
-      }
-      let promoted = 0;
-      for (const id of result.parsed.promote ?? []) {
-        if (!valid.has(id) || !board.canTransition("product-owner", "ready")) continue;
-        await board.transitionWorkItem(id, "ready", ctx.agent.id, "shaped and ready to work");
-        promoted += 1;
-      }
-      if (promoted) this.emit("activity", projectId, `Product owner promoted ${promoted} item(s) to ready.`);
+      if (!result.ok) this.emit("activity", projectId, `Product owner grooming failed: ${result.error ?? "unknown error"}`);
     });
   }
 
@@ -516,13 +508,13 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         "",
         "## Your task",
         "",
-        "You have NO tool access for this task — no filesystem, no shell, no web search. Everything you need is the ticket list, roster, and model menu below. Do not describe or attempt to explore the repository or investigate the codebase; you cannot, and trying costs the whole run without producing a decision. Go straight from reading the sections below to your output block.",
+        "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the ticket list, roster, and model menu below. Do not describe or attempt to explore the repository or investigate the codebase; you cannot, and trying wastes the run without producing a decision.",
         "",
-        "OUTPUT ONLY THE FENCED `custos-assign` BLOCK DEFINED BELOW. DO NOT OUTPUT ANYTHING ELSE — no reasoning, no analysis, no summary, no narration of what you're about to do, no acknowledgment. This output is read only by other software, never by a human. A single word before the block risks running out of length before you reach it, which fails the entire run.",
+        "You DO have three tools, and they are how you do this task: `create_engineer`, `assign_ticket`, and `tune_engineer`. Call them directly as you decide each ticket -- do not narrate what you're about to do first, just call the tool. There is no final report to write; the tool calls themselves are the complete output of this run. Use `record_fact` only for something durable and cross-cutting, not a note about one ticket.",
         "",
         "Size every ticket in the ready column below, then decide which of them to start now. For each one you start: set its complexity and either assign an existing engineer or create a new one and assign that.",
         "",
-        `**You decide the fan-out.** Every ticket you assign starts immediately, in its own isolated checkout. ${inFlight} engineer(s) are already working; the ceiling for this project is ${limit} at once.${limit === 1 ? " This project is limited to one engineer at a time (it isn't a git repository, so there are no isolated checkouts to give them)." : ""} Tickets you leave in \`ready\` simply wait until you come back — leaving one there is a real choice, not a failure to decide.`,
+        `**You decide the fan-out.** Every ticket you assign starts immediately, in its own isolated checkout. ${inFlight} engineer(s) are already working; the ceiling for this project is ${limit} at once.${limit === 1 ? " This project is limited to one engineer at a time (it isn't a git repository, so there are no isolated checkouts to give them)." : ""} Tickets you leave in \`ready\` simply wait until you come back — leaving one there is a real choice, not a failure to decide. \`assign_ticket\` will tell you when you're out of slots.`,
         "",
         "## Ready tickets",
         "",
@@ -537,120 +529,50 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         renderModelMenu(models),
       ].join("\n");
 
-      const result = await runAgent<AssignContract>(this.runtime, {
-        signal,
-        agent: ctx.agent,
-        projectId,
-        cwd: ctx.project.workspaceDir,
-        prompt,
-        tag: "custos-assign",
-        outputContract: outputContract("custos-assign", ASSIGN_SHAPE),
-      });
-      await this.applyFacts(projectId, ctx.agent, result.parsed);
-      if (!result.ok || !result.parsed) return;
-
-      // Only provider keys that actually exist may be created against --
-      // an agent pinned to a provider Custos doesn't have would fail every
-      // request it ever made, silently, at assignment time.
-      const knownProviders = new Set(menu.map((option) => option.providerKey));
-      // An assignment to an exhausted combination fails on its first request
-      // and puts the ticket straight back in the queue, so it's rejected
-      // here as well as discouraged in the prompt.
+      // An assignment to an exhausted combination fails on its first
+      // request and puts the ticket straight back in the queue, so
+      // assign_ticket rejects it too (see AssignSession.unavailableFallbackSets),
+      // keyed by fallback SET NAME since that's the only field an agent
+      // row actually carries -- resolved here from each set's first entry,
+      // matching what agentStore.primaryPick would resolve for an agent on
+      // that set.
       const unavailable = new Set(models.filter((record) => !isAvailable(record)).map((record) => record.id));
-      const tempIds = new Map<string, string>();
-      for (const spec of result.parsed.newAgents ?? []) {
-        if (!spec.name || !spec.providerKey || !spec.model || !knownProviders.has(spec.providerKey)) continue;
-        if (unavailable.has(modelId(spec.providerKey, spec.model))) {
-          this.emit("activity", projectId, `Skipped new agent "${spec.name}": ${spec.providerKey}/${spec.model} is exhausted.`);
-          continue;
-        }
-        // The engineering manager's contract still asks for `providerKey`
-        // and `model` on a new engineer (see ASSIGN_SHAPE) so it can match
-        // each new agent against the menu it's shown. After this commit
-        // the agent stores no providerKey/model at all -- the same
-        // provider/model picks up a default fallback set whose first entry
-        // is that provider/model. We look it up by scanning
-        // `config.fallbackSets` for a set whose `providers[0]` matches.
-        const matchingSet = Object.entries(this.runtime.config.fallbackSets ?? {}).find(([, set]) => {
-          const first = set.providers[0];
-          return first && first.provider === spec.providerKey && first.model === spec.model;
-        });
-        const fallbackSet = matchingSet?.[0] ?? Object.keys(this.runtime.config.fallbackSets ?? {})[0];
-        if (!fallbackSet) {
-          this.emit("activity", projectId, `Skipped new agent "${spec.name}": no fallback set exists to wrap ${spec.providerKey}/${spec.model}.`);
-          continue;
-        }
-        const created = await agentStore.createAgent({
-          projectId,
-          role: "engineer",
-          name: spec.name,
-          fallbackSet,
-          specialty: spec.specialty ?? null,
-          maxComplexity: spec.maxComplexity ?? "medium",
-          systemPrompt: spec.systemPrompt ?? "",
-          createdBy: "engineering-manager",
-        });
-        if (spec.tempId) tempIds.set(spec.tempId, created.id);
-        const createdPick = agentStore.primaryPick(created, this.runtime.config);
-        this.emit("activity", projectId, `Engineering manager created engineer "${created.name}" on ${createdPick?.providerKey ?? "?"}/${createdPick?.model ?? "?"}.`);
-      }
-
-      for (const tune of result.parsed.tuning ?? []) {
-        if (!tune.agentId) continue;
-        if (tune.note) await agentStore.appendAgentNote(tune.agentId, tune.note);
-        // The EM contract still asks for providerKey/model in its tuning
-        // entries (see ASSIGN_SHAPE), but post-drop these become "switch
-        // to the fallback set whose first entry is this provider/model".
-        // We only act on the tuning note when the providerKey/model
-        // combination corresponds to a real set -- otherwise the note
-        // would be applied against a non-existent fallback chain and the
-        // operator's intent would silently vanish.
-        const patch: Parameters<typeof agentStore.updateAgent>[1] = {};
-        if (tune.maxComplexity) patch.maxComplexity = tune.maxComplexity;
-        if (tune.providerKey && tune.model) {
-          const matchingSet = Object.entries(this.runtime.config.fallbackSets ?? {}).find(([, set]) => {
+      const unavailableFallbackSets = new Set(
+        Object.entries(this.runtime.config.fallbackSets ?? {})
+          .filter(([, set]) => {
             const first = set.providers[0];
-            return first && first.provider === tune.providerKey && first.model === tune.model;
-          });
-          if (matchingSet) patch.fallbackSet = matchingSet[0];
-        }
-        if (Object.keys(patch).length) await agentStore.updateAgent(tune.agentId, patch);
-      }
+            return first && unavailable.has(modelId(first.provider, first.model));
+          })
+          .map(([name]) => name),
+      );
 
-      const readyIds = new Set(ready.map((item) => item.id));
-      // The ceiling is enforced here as well as described in the prompt: an
-      // over-eager manager assigning twelve tickets on a project capped at
-      // three would otherwise start twelve processes, and the cap exists
-      // precisely because the human doesn't want that.
-      let slots = Math.max(0, limit - inFlight);
-      for (const assignment of result.parsed.assignments ?? []) {
-        if (slots <= 0) break;
-        if (!assignment.workItemId || !readyIds.has(assignment.workItemId)) continue;
-        const agentId = assignment.agentId ?? (assignment.tempId ? tempIds.get(assignment.tempId) : undefined);
-        if (!agentId) continue;
-        const assignee = await agentStore.getAgent(agentId);
-        if (!assignee) continue;
-        const pick = agentStore.primaryPick(assignee, this.runtime.config);
-        if (pick && unavailable.has(modelId(pick.providerKey, pick.model))) {
-          this.emit(
-            "activity",
-            projectId,
-            `Held "${assignment.workItemId}": ${assignee.name} runs on ${pick.providerKey}/${pick.model}, which is exhausted.`,
-          );
-          continue;
-        }
-        // Above check used the resolved primary pick; recordOutcome
-        // below reads what actually ran (the agent's primary pick at the
-        // time of dispatch, which the agent-runner will acquire via
-        // resolveFallbackSet).
-        slots -= 1;
-        await board.updateWorkItem(assignment.workItemId, {
-          assigneeAgentId: agentId,
-          ...(assignment.complexity ? { complexity: assignment.complexity } : {}),
+      const token = mintAssignSession({
+        projectId,
+        agentId: ctx.agent.id,
+        agentName: agentStore.displayName(ctx.agent),
+        validTicketIds: new Set(ready.map((item) => item.id)),
+        fallbackSetNames: new Set(Object.keys(this.runtime.config.fallbackSets ?? {})),
+        knownAgentIds: new Set(roster.map((a) => a.id)),
+        unavailableFallbackSets,
+        slotsRemaining: Math.max(0, limit - inFlight),
+      });
+      let result: Awaited<ReturnType<typeof runAgent>>;
+      try {
+        result = await runAgent(this.runtime, {
+          signal,
+          agent: ctx.agent,
+          projectId,
+          cwd: ctx.project.workspaceDir,
+          prompt,
+          tag: "custos-assign",
+          toolDriven: true,
+          mcpConfig: buildPmMcpConfig(token),
         });
-        await board.transitionWorkItem(assignment.workItemId, "in_progress", ctx.agent.id, assignment.rationale);
-        await agentStore.recordAssignment(agentId);
+      } finally {
+        const actions = releaseSession(token);
+        if (actions.length) this.emit("activity", projectId, `Engineering manager: ${actions.join("; ")}.`);
       }
+      if (!result.ok) this.emit("activity", projectId, `Engineering manager assignment pass failed: ${result.error ?? "unknown error"}`);
     });
   }
 
