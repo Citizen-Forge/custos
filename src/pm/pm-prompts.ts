@@ -90,6 +90,8 @@ export function buildAssignPrompt(
     "",
     `**You decide the fan-out.** Every ticket you assign starts immediately, in its own isolated checkout. ${inFlight} engineer(s) are already working; the ceiling for this project is ${limit} at once.${limit === 1 ? " This project is limited to one engineer at a time (it isn't a git repository, so there are no isolated checkouts to give them)." : ""} Tickets you leave in \`ready\` simply wait until you come back — leaving one there is a real choice, not a failure to decide. \`assign_ticket\` will tell you when you're out of slots.`,
     "",
+    "\"Assign\" does not mean \"start new feature work\" -- it means \"an engineer should act on this next.\" A ticket whose feature code is already done and QA-passed, but is blocked on something like a stale rebase or a merge conflict, is exactly the kind of ready work that should be assigned: the fix is real engineering effort, just not new implementation. Do not leave a ticket sitting in `ready` because its remaining work looks like cleanup rather than a fresh build -- if it's in the ready column, it's actionable, and \"a human/engineer needs to resolve X\" is an assignment, not a reason to wait.",
+    "",
     "## Ready tickets",
     "",
     ready.map((item) => renderWorkItem(item, { includeComments: true })).join("\n\n"),
