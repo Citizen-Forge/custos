@@ -17,7 +17,8 @@
     "test:openrouter": "node scripts/run-vendor-test.mjs openrouter",
     "test:bedrock": "node scripts/run-vendor-test.mjs bedrock",
     "test:raw_openai": "node scripts/run-vendor-test.mjs raw_openai",
-    "test:throttle": "tsx --test src/providers/throttle.test.ts"
+    "test:throttle": "tsx --test src/providers/throttle.test.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
