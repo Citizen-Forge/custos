@@ -185,7 +185,19 @@ export function buildSystemPrompt(agent: AgentDef, extra: string | undefined, co
  *  prose "don't do this" in the prompt was not enough to stop a model
  *  that has the tools sitting right there. A denied tool can't be
  *  invoked regardless of what the model decides. */
-const ALL_TOOLS = ["Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "TodoWrite", "SlashCommand"];
+// Not exhaustive by construction -- see ALLOWED_TOOLS_BY_TAG below for why
+// that matters. Extended live 2026-08-11 after an engineering-manager run
+// called TaskList/CronList/ListAgents (a task/cron/agent-orchestration
+// family of built-ins that didn't exist when this list was first written)
+// instead of assign_ticket -- add newly-observed built-ins here as they
+// turn up, but don't treat this list as ever being complete.
+const ALL_TOOLS = [
+  "Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch",
+  "Task", "TaskList", "TaskOutput", "TaskStop", "TodoWrite", "SlashCommand",
+  "CronCreate", "CronDelete", "CronList", "ListAgents", "SendMessage",
+  "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree", "Monitor",
+  "DesignSync", "PushNotification", "RemoteTrigger", "ScheduleWakeup", "AskUserQuestion", "ReportFindings",
+];
 
 /** Tool names hard-denied per TASK (keyed by the same `tag` passed to
  *  runAgent, e.g. "custos-groom"), NOT per agent role. This matters
