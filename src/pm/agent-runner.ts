@@ -213,6 +213,29 @@ export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
   "custos-qa": ["Write", "Edit", "NotebookEdit"],
 };
 
+/** `--allowedTools` allowlists for the tool-driven tags above -- see
+ *  RunTurnOptions.allowedTools for why this exists alongside (not instead
+ *  of) DISALLOWED_TOOLS_BY_TAG: ALL_TOOLS is a fixed list of built-ins that
+ *  existed when it was written, and a newer CLI shipping more built-in
+ *  tools (task/cron/agent-orchestration features observed live: TaskList,
+ *  CronList, ListAgents) silently isn't covered by it. These three tags
+ *  each have an exhaustive, known action surface -- exactly the MCP tools
+ *  pm-tools.ts registers for that session kind, prefixed
+ *  `mcp__custos_pm__` (the server name buildPmMcpConfig uses) -- so an
+ *  allowlist can be exact instead of best-effort. Tags not listed here
+ *  (custos-qa, custos-plan, custos-survey, etc.) keep their normal tool
+ *  access; this only applies where the run's whole job is a handful of
+ *  named tool calls and nothing else is legitimate. */
+function pmTool(name: string): string {
+  return `mcp__custos_pm__${name}`;
+}
+
+export const ALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
+  "custos-groom": ["promote_ticket", "revise_ticket", "comment_on_ticket", "record_fact"].map(pmTool),
+  "custos-assign": ["create_engineer", "assign_ticket", "tune_engineer", "record_fact"].map(pmTool),
+  "custos-curate": ["approve_fact", "reject_fact"].map(pmTool),
+};
+
 /**
  * Runs one autonomous agent to completion and returns its parsed contract.
  * Logs the run for the activity feed, folds cost and timing back into the
@@ -426,6 +449,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
       disallowedTools: DISALLOWED_TOOLS_BY_TAG[tag],
+      allowedTools: ALLOWED_TOOLS_BY_TAG[tag],
       onEvent,
       signal: controller.signal,
     });

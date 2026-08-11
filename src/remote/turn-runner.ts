@@ -122,6 +122,20 @@ export interface RunTurnOptions {
    *  model to ignore once a ticket description reads like an interesting
    *  problem to go dig into; a denied tool can't be invoked at all. */
   disallowedTools?: string[];
+  /** Tool names to hard-restrict TO via `--allowedTools` -- the model can
+   *  invoke nothing else, including built-in CLI tools we've never heard
+   *  of. Unlike `disallowedTools` (a denylist that has to be kept in sync
+   *  with every tool the CLI ships), this is exhaustive by construction:
+   *  a future CLI version adding a new built-in tool can't silently slip
+   *  past it the way it slipped past disallowedTools. Use for a run whose
+   *  entire legitimate action surface is a handful of named MCP tools
+   *  (groomBacklog/assignReady/curateFacts) -- observed live: the
+   *  engineering manager, denied the old fixed list of built-ins, still
+   *  had `TaskList`/`CronList`/`ListAgents` available (newer CLI
+   *  additions the denylist predates) and called those instead of
+   *  `assign_ticket`, then reported "nothing to do" without ever using
+   *  the tool that was actually its job. */
+  allowedTools?: string[];
   /** Inline `--mcp-config` JSON string (a `{"mcpServers": {...}}` document,
    * not a file path). Passed with `--strict-mcp-config` so the turn only
    * ever sees the MCP servers listed here, never anything else that might
@@ -221,6 +235,7 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   // misparsed as a following flag the way a bare `--disallowedTools` with
   // no values immediately swallows whatever token comes next.
   if (options.disallowedTools?.length) args.push("--disallowedTools", ...options.disallowedTools);
+  if (options.allowedTools?.length) args.push("--allowedTools", ...options.allowedTools);
   if (options.mcpConfig) args.push("--mcp-config", options.mcpConfig, "--strict-mcp-config");
 
   // The prior stdin attempt (see git history on this file) stalled because
