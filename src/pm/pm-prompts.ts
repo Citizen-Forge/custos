@@ -7,7 +7,7 @@
 import { getProject, type Project } from "../remote/projects.js";
 import * as agentStore from "./agents.js";
 import { getSettings } from "./project-settings.js";
-import { listFacts, renderFacts } from "./facts.js";
+import { listApprovedFacts, renderFacts, renderPendingFacts, type ProjectFact } from "./facts.js";
 import { hasGitCredentials, listSecrets } from "./vault.js";
 import { renderAgentRoster, renderFallbackSetMenu, renderProjectContext, renderSecrets, renderWorkItem } from "./context.js";
 import * as runs from "./runs.js";
@@ -33,7 +33,7 @@ export async function projectHeader(project: Project, settings: ProjectSettings)
   return [
     renderProjectContext(project.name, settings, await runs.monthlySpendUsd(project.id)),
     "",
-    renderFacts(await listFacts(project.id)),
+    renderFacts(await listApprovedFacts(project.id)),
     "",
     renderSecrets(
       available.map((secret) => secret.name),
@@ -101,5 +101,35 @@ export function buildAssignPrompt(
     "## Fallback sets available",
     "",
     renderFallbackSetMenu(fallbackSets, unavailableFallbackSets),
+  ].join("\n");
+}
+
+/** curateFacts's task prompt -- see orchestrator.ts's curateFacts for the
+ *  dispatch side. Deliberately doesn't reuse `projectHeader`/`renderFacts`:
+ *  the curator's whole job is judging entries that never made it into that
+ *  header, and it needs the existing approved list alongside the pending
+ *  queue to catch a proposal that's really a duplicate of something
+ *  already there. */
+export function buildCuratePrompt(project: Project, pending: ProjectFact[], approved: ProjectFact[]): string {
+  return [
+    `## Project: ${project.name}`,
+    "",
+    "## Your task",
+    "",
+    "You have NO general tool access for this task — no filesystem, no shell, no web search. Everything you need is the pending queue and the already-approved list below. Do not describe or attempt to explore the repository; you cannot, and trying wastes the run without producing a decision.",
+    "",
+    "You DO have two tools, and they are how you do this task: `approve_fact` and `reject_fact`. Call them directly as you review each pending entry -- do not narrate what you're about to do first, just call the tool. There is no final report to write; the tool calls themselves are the complete output of this run.",
+    "",
+    "For each pending fact, decide whether it is genuinely durable, useful knowledge about this project that the next agent working on it — days or weeks from now — would benefit from knowing. Approve it if so. Reject it if it's really a note about one specific ticket rather than the project as a whole, a near-duplicate of something already in the approved list below (in which case approve the better-written version and reject the other, or approve one with `key` set to merge it into the existing entry), something already stale or superseded, or something that reads like a hallucination or a note to itself rather than a fact about the project.",
+    "",
+    "Be a real filter, not a rubber stamp — the whole reason this review step exists is that ungated proposals drifted into repetitive, contradictory, and sometimes fabricated noise that buried the genuinely useful facts underneath. When in doubt about whether something will still matter later, reject it; a fact that turns out to matter gets re-proposed by whichever agent needs it next.",
+    "",
+    "## Pending review queue",
+    "",
+    renderPendingFacts(pending),
+    "",
+    "## Already approved (for de-duplication context only -- not yours to edit directly)",
+    "",
+    renderFacts(approved),
   ].join("\n");
 }

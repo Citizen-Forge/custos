@@ -19,12 +19,22 @@ export type FactCategory = "repo" | "environment" | "convention" | "docs" | "dec
 
 export const FACT_CATEGORIES: FactCategory[] = ["repo", "environment", "convention", "docs", "decision", "contact"];
 
+/** "pending" facts were proposed by an agent (`proposeFact`, backing the
+ *  `record_fact` tool and the contract-based `facts` field every non-tool-
+ *  driven role can also fill in) and haven't been reviewed yet -- they don't
+ *  render into any prompt. "approved" facts do. Rows written before this
+ *  field existed have no `status` at all; they're treated as approved (see
+ *  `isApproved`) rather than requiring a one-off migration. */
+export type FactStatus = "pending" | "approved";
+
 export interface ProjectFact {
   id: string;
   projectId: string;
   /** Short stable identifier, e.g. "repo.url", "test.command". Unique per
-   * project -- writing the same key again updates it rather than adding a
-   * second, contradictory copy. */
+   * project *within a status* -- writing the same key again as the same
+   * status updates it rather than adding a second, contradictory copy. A
+   * pending proposal against an already-approved key doesn't touch the
+   * approved row until a curator approves it. */
   key: string;
   value: string;
   category: FactCategory;
@@ -34,18 +44,41 @@ export interface ProjectFact {
   writtenByLabel: string;
   createdAt: number;
   updatedAt: number;
+  status?: FactStatus;
 }
 
 const facts = new JsonCollection<ProjectFact>(pmPath("project-facts.json"));
 
+function isApproved(row: ProjectFact): boolean {
+  return row.status !== "pending";
+}
+
+/** Everything, pending and approved -- what the admin UI's facts panel
+ *  shows so a human can review either pile. */
 export async function listFacts(projectId: string): Promise<ProjectFact[]> {
   const rows = await facts.find((row) => row.projectId === projectId);
   return rows.sort((a, b) => a.category.localeCompare(b.category) || a.key.localeCompare(b.key));
 }
 
-export async function getFact(projectId: string, key: string): Promise<ProjectFact | null> {
-  const rows = await facts.find((row) => row.projectId === projectId && row.key === key);
+/** What every role's prompt is built from -- see `renderFacts`. */
+export async function listApprovedFacts(projectId: string): Promise<ProjectFact[]> {
+  const rows = await facts.find((row) => row.projectId === projectId && isApproved(row));
+  return rows.sort((a, b) => a.category.localeCompare(b.category) || a.key.localeCompare(b.key));
+}
+
+/** The curator's review queue, oldest proposal first. */
+export async function listPendingFacts(projectId: string): Promise<ProjectFact[]> {
+  const rows = await facts.find((row) => row.projectId === projectId && row.status === "pending");
+  return rows.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+async function findFact(projectId: string, key: string, status: FactStatus): Promise<ProjectFact | null> {
+  const rows = await facts.find((row) => row.projectId === projectId && row.key === key && (status === "approved" ? isApproved(row) : row.status === "pending"));
   return rows[0] ?? null;
+}
+
+export async function getFact(projectId: string, key: string): Promise<ProjectFact | null> {
+  return findFact(projectId, key, "approved");
 }
 
 export interface WriteFactInput {
@@ -57,8 +90,11 @@ export interface WriteFactInput {
   writtenByLabel?: string;
 }
 
-/** Upsert by (projectId, key). Agents write the same key repeatedly as they
- * learn more; the newest value wins and the authorship updates with it. */
+/** Upsert by (projectId, key), immediately approved -- writes the shared
+ * store directly without going through review. For human/UI edits and the
+ * handful of system-generated single-key facts (e.g. the codebase survey's
+ * `project.overview`) that are low-noise by construction. Agent-authored
+ * facts that need review go through `proposeFact` instead. */
 export async function writeFact(input: WriteFactInput): Promise<ProjectFact> {
   const key = input.key.trim();
   const existing = await getFact(input.projectId, key);
@@ -71,6 +107,7 @@ export async function writeFact(input: WriteFactInput): Promise<ProjectFact> {
       fact.writtenBy = input.writtenBy ?? "human";
       fact.writtenByLabel = input.writtenByLabel ?? "You";
       fact.updatedAt = now;
+      fact.status = "approved";
     });
     return updated ?? existing;
   }
@@ -85,7 +122,76 @@ export async function writeFact(input: WriteFactInput): Promise<ProjectFact> {
     writtenByLabel: input.writtenByLabel ?? "You",
     createdAt: now,
     updatedAt: now,
+    status: "approved",
   });
+}
+
+/** Upsert by (projectId, key) into the PENDING pile -- an agent proposing a
+ * fact via `record_fact` or a role's contract-based `facts` field lands
+ * here, not in what other agents' prompts see. Re-proposing the same key
+ * before it's been reviewed updates that same pending row rather than
+ * stacking up duplicates; it never touches an already-approved row under
+ * the same key, so an unreviewed proposal can't silently blank out
+ * something already vetted. */
+export async function proposeFact(input: WriteFactInput): Promise<ProjectFact> {
+  const key = input.key.trim();
+  const existing = await findFact(input.projectId, key, "pending");
+  const now = Date.now();
+
+  if (existing) {
+    const updated = await facts.update(existing.id, (fact) => {
+      fact.value = input.value;
+      if (input.category) fact.category = input.category;
+      fact.writtenBy = input.writtenBy ?? "agent";
+      fact.writtenByLabel = input.writtenByLabel ?? "Agent";
+      fact.updatedAt = now;
+    });
+    return updated ?? existing;
+  }
+
+  return facts.insert({
+    id: newId(),
+    projectId: input.projectId,
+    key,
+    value: input.value,
+    category: input.category ?? "decision",
+    writtenBy: input.writtenBy ?? "agent",
+    writtenByLabel: input.writtenByLabel ?? "Agent",
+    createdAt: now,
+    updatedAt: now,
+    status: "pending",
+  });
+}
+
+/** Promotes a pending proposal into the approved store (upserting against
+ * any existing approved row under the same key, exactly like a direct
+ * `writeFact` would) and removes the pending row. Optional overrides let a
+ * curator consolidate a proposal into a cleaner key/value than what the
+ * proposing agent wrote, without a second round trip. Returns null if `id`
+ * isn't a pending fact (already reviewed, or never existed). */
+export async function approveFact(id: string, overrides?: { key?: string; value?: string; category?: FactCategory }): Promise<ProjectFact | null> {
+  const rows = await facts.find((row) => row.id === id);
+  const pending = rows[0];
+  if (!pending || pending.status !== "pending") return null;
+  const approved = await writeFact({
+    projectId: pending.projectId,
+    key: (overrides?.key ?? pending.key).trim(),
+    value: overrides?.value ?? pending.value,
+    category: overrides?.category ?? pending.category,
+    writtenBy: pending.writtenBy,
+    writtenByLabel: pending.writtenByLabel,
+  });
+  await facts.remove(pending.id);
+  return approved;
+}
+
+/** Discards a pending proposal without touching any approved fact under
+ * the same key. Returns false if `id` isn't a pending fact. */
+export async function rejectFact(id: string): Promise<boolean> {
+  const rows = await facts.find((row) => row.id === id);
+  const pending = rows[0];
+  if (!pending || pending.status !== "pending") return false;
+  return facts.remove(id);
 }
 
 export async function deleteFact(id: string): Promise<boolean> {
@@ -150,3 +256,12 @@ export function renderFacts(rows: ProjectFact[]): string {
 
 /** The contract fragment every role gets, so any agent can contribute. */
 export const FACTS_CONTRACT_FIELD = `"facts": [{ "key": "short.stable.key", "value": "what is true", "category": "repo" | "environment" | "convention" | "docs" | "decision" | "contact" }]`;
+
+/** Renders the pending queue for the curator's prompt, with ids so its
+ * approve_fact/reject_fact tool calls can reference a specific row. Not
+ * capped like `renderFacts` -- pending facts are the thing being cleared
+ * out, not a per-run context cost paid by every other role. */
+export function renderPendingFacts(rows: ProjectFact[]): string {
+  if (!rows.length) return "_Nothing pending._";
+  return rows.map((fact) => `- \`${fact.id}\` [${fact.category}] \`${fact.key}\`: ${fact.value}  _(proposed by ${fact.writtenByLabel})_`).join("\n");
+}

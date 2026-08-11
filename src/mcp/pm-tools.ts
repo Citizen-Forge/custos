@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as board from "../pm/board.js";
 import * as agentStore from "../pm/agents.js";
-import { writeFact, FACT_CATEGORIES } from "../pm/facts.js";
+import { proposeFact, approveFact, rejectFact, FACT_CATEGORIES } from "../pm/facts.js";
 import type { Complexity } from "../pm/types.js";
 
 const PORT = process.env.PORT ?? "8787";
@@ -46,6 +46,11 @@ export interface GroomSession extends BaseSession {
   validTicketIds: Set<string>;
 }
 
+export interface CurateSession extends BaseSession {
+  kind: "curate";
+  validPendingIds: Set<string>;
+}
+
 export interface AssignSession extends BaseSession {
   kind: "assign";
   validTicketIds: Set<string>;
@@ -65,7 +70,7 @@ export interface AssignSession extends BaseSession {
   slotsRemaining: number;
 }
 
-type PmSession = GroomSession | AssignSession;
+type PmSession = GroomSession | AssignSession | CurateSession;
 
 const sessions = new Map<string, PmSession>();
 
@@ -105,6 +110,18 @@ export function mintAssignSession(input: {
   sweepExpired();
   const token = newToken();
   sessions.set(token, { kind: "assign", token, expiresAt: Date.now() + SESSION_TTL_MS, actions: [], ...input });
+  return token;
+}
+
+export function mintCurateSession(input: {
+  projectId: string;
+  agentId: string;
+  agentName: string;
+  validPendingIds: Set<string>;
+}): string {
+  sweepExpired();
+  const token = newToken();
+  sessions.set(token, { kind: "curate", token, expiresAt: Date.now() + SESSION_TTL_MS, actions: [], ...input });
   return token;
 }
 
@@ -331,8 +348,8 @@ function registerRecordFact(server: McpServer, session: PmSession): void {
   server.registerTool(
     "record_fact",
     {
-      title: "Record a durable project fact",
-      description: "Writes an entry to this project's shared knowledge store, readable by every agent on the project. Use only for something durable and cross-cutting that will still be true and useful later -- not a note about this specific ticket.",
+      title: "Propose a durable project fact",
+      description: "Proposes an entry for this project's shared knowledge store. It is reviewed by a curator before other agents see it -- use only for something durable and cross-cutting that will still be true and useful later, not a note about this specific ticket.",
       inputSchema: {
         key: z.string().describe("Short stable key, e.g. \"repo.url\" or \"test.command\"."),
         value: z.string().describe("The fact's value. Overwrite an existing key when you find its current value is wrong."),
@@ -341,9 +358,59 @@ function registerRecordFact(server: McpServer, session: PmSession): void {
     },
     async ({ key, value, category }) => {
       if (!key.trim() || !value.trim()) return fail("Both key and value are required.");
-      await writeFact({ projectId: session.projectId, key: key.trim(), value: value.trim(), category: category as never, writtenBy: session.agentId, writtenByLabel: session.agentName });
-      return ok(`Recorded fact "${key}".`);
+      await proposeFact({ projectId: session.projectId, key: key.trim(), value: value.trim(), category: category as never, writtenBy: session.agentId, writtenByLabel: session.agentName });
+      return ok(`Proposed fact "${key}" for review.`);
     },
   );
+}
+
+/** Tools for the facts curator: approve a pending proposal into the shared
+ *  store (with optional consolidation) or reject it outright. Scoped to
+ *  one session's validPendingIds -- a stale or cross-project id is rejected
+ *  the same way promote_ticket rejects one outside its backlog. */
+export function buildCurateToolsServer(session: CurateSession): McpServer {
+  const server = new McpServer({ name: "custos-pm", version: "1.0.0" });
+
+  server.registerTool(
+    "approve_fact",
+    {
+      title: "Approve a pending fact",
+      description: "Promotes a pending proposal into the shared knowledge store every agent's prompt is built from. Optionally rewrite its key/value/category first -- e.g. to merge it into an existing stable key, or tighten wording -- without a separate edit step.",
+      inputSchema: {
+        factId: z.string().describe("The pending fact's id, from the review queue in your prompt."),
+        key: z.string().optional().describe("Replacement key, if the proposed one should be merged into a different stable key."),
+        value: z.string().optional().describe("Replacement value, if it needs tightening."),
+        category: z.enum(FACT_CATEGORIES as [string, ...string[]]).optional().describe("Replacement category, if it's mis-filed."),
+      },
+    },
+    async ({ factId, key, value, category }) => {
+      if (!session.validPendingIds.has(factId)) return fail(`"${factId}" is not one of the pending facts you were given this run.`);
+      const approved = await approveFact(factId, { key, value, category: category as never });
+      if (!approved) return fail(`Pending fact "${factId}" no longer exists or was already reviewed.`);
+      session.actions.push(`approved "${approved.key}"`);
+      return ok(`Approved "${approved.key}".`);
+    },
+  );
+
+  server.registerTool(
+    "reject_fact",
+    {
+      title: "Reject a pending fact",
+      description: "Discards a pending proposal -- use for anything not genuinely durable and useful long-term: a note about one ticket, a duplicate of something already covered, something already stale, or an outright hallucination.",
+      inputSchema: {
+        factId: z.string().describe("The pending fact's id, from the review queue in your prompt."),
+        reason: z.string().optional().describe("One line: why this isn't worth keeping. Not stored -- just for the run's activity log."),
+      },
+    },
+    async ({ factId, reason }) => {
+      if (!session.validPendingIds.has(factId)) return fail(`"${factId}" is not one of the pending facts you were given this run.`);
+      const removed = await rejectFact(factId);
+      if (!removed) return fail(`Pending fact "${factId}" no longer exists or was already reviewed.`);
+      session.actions.push(`rejected a proposal${reason ? ` (${reason})` : ""}`);
+      return ok("Rejected.");
+    },
+  );
+
+  return server;
 }
 

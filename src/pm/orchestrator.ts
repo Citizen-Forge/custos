@@ -6,10 +6,10 @@ import * as ideas from "./ideas.js";
 import * as agentStore from "./agents.js";
 import * as runs from "./runs.js";
 import { getSettings, updateSettings } from "./project-settings.js";
-import { listFacts, writeFact } from "./facts.js";
+import { listFacts, writeFact, proposeFact, listPendingFacts, listApprovedFacts } from "./facts.js";
 import { runAgent } from "./agent-runner.js";
-import { mintGroomSession, mintAssignSession, releaseSession, buildPmMcpConfig } from "../mcp/pm-tools.js";
-import { resolveProjectAgent, projectHeader as buildProjectHeader, buildGroomPrompt, buildAssignPrompt } from "./pm-prompts.js";
+import { mintGroomSession, mintAssignSession, mintCurateSession, releaseSession, buildPmMcpConfig } from "../mcp/pm-tools.js";
+import { resolveProjectAgent, projectHeader as buildProjectHeader, buildGroomPrompt, buildAssignPrompt, buildCuratePrompt } from "./pm-prompts.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest, checkPrReadyToMerge, mergePullRequest } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderWorkItem } from "./context.js";
 import { ensureModel, isAvailable, recordOutcome } from "./model-registry.js";
@@ -156,6 +156,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       for (const idea of inbox) void this.planIdea(project.id, idea.id);
       const backlog = (await board.listWorkItems(project.id)).filter((item) => item.status === "backlog");
       if (backlog.length) void this.groomBacklog(project.id);
+      const pendingFacts = await listPendingFacts(project.id);
+      if (pendingFacts.length) void this.curateFacts(project.id);
     }
 
     const readyWork = (await board.listWorkItems(project.id)).filter((item) => item.type !== "epic" && item.status === "ready");
@@ -317,13 +319,15 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     return buildProjectHeader(project, settings);
   }
 
-  /** Folds any facts a run reported into the shared store. Called after
+  /** Proposes any facts a run reported for curator review. Called after
    * every role's run, since any of them can learn something the next one
-   * needs. */
+   * needs -- but none of them are trusted to put it straight in front of
+   * every other agent unreviewed, same reasoning as the `record_fact`
+   * tool's own `proposeFact` path (see mcp/pm-tools.ts). */
   private async applyFacts(projectId: string, agent: AgentDef, contract: { facts?: FactWrite[] } | null): Promise<void> {
     for (const fact of contract?.facts ?? []) {
       if (!fact.key?.trim() || !fact.value?.trim()) continue;
-      await writeFact({
+      await proposeFact({
         projectId,
         key: fact.key.trim(),
         value: fact.value.trim(),
@@ -451,6 +455,49 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         if (actions.length) this.emit("activity", projectId, `Product owner: ${actions.join("; ")}.`);
       }
       if (!result.ok) this.emit("activity", projectId, `Product owner grooming failed: ${result.error ?? "unknown error"}`);
+    });
+  }
+
+  /** Reviews facts other agents proposed (via record_fact or a role's
+   * contract-based `facts` field) and approves or rejects each one before
+   * it can show up in any other agent's prompt. Reuses the product-owner
+   * agent/autonomy flag rather than adding a dedicated role -- this is the
+   * same kind of judgment call groomBacklog already makes about tickets,
+   * just applied to the facts store instead. */
+  async curateFacts(projectId: string): Promise<void> {
+    await this.guard(`curate:${projectId}`, projectId, async (signal) => {
+      const ctx = await this.resolve(projectId, "product-owner");
+      if (!ctx) return;
+
+      const pending = await listPendingFacts(projectId);
+      if (!pending.length) return;
+      const approved = await listApprovedFacts(projectId);
+
+      const prompt = buildCuratePrompt(ctx.project, pending, approved);
+
+      const token = mintCurateSession({
+        projectId,
+        agentId: ctx.agent.id,
+        agentName: agentStore.displayName(ctx.agent),
+        validPendingIds: new Set(pending.map((fact) => fact.id)),
+      });
+      let result: Awaited<ReturnType<typeof runAgent>>;
+      try {
+        result = await runAgent(this.runtime, {
+          signal,
+          agent: ctx.agent,
+          projectId,
+          cwd: ctx.project.workspaceDir,
+          prompt,
+          tag: "custos-curate",
+          toolDriven: true,
+          mcpConfig: buildPmMcpConfig(token),
+        });
+      } finally {
+        const actions = releaseSession(token);
+        if (actions.length) this.emit("activity", projectId, `Product owner (facts review): ${actions.join("; ")}.`);
+      }
+      if (!result.ok) this.emit("activity", projectId, `Facts curation pass failed: ${result.error ?? "unknown error"}`);
     });
   }
 

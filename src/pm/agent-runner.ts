@@ -209,6 +209,7 @@ const ALL_TOOLS = ["Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "
 export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
   "custos-assign": ALL_TOOLS,
   "custos-groom": ALL_TOOLS,
+  "custos-curate": ALL_TOOLS,
   "custos-qa": ["Write", "Edit", "NotebookEdit"],
 };
 

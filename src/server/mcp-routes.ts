@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildMcpServer } from "../mcp/server.js";
-import { buildGroomToolsServer, buildAssignToolsServer, lookupSession } from "../mcp/pm-tools.js";
+import { buildGroomToolsServer, buildAssignToolsServer, buildCurateToolsServer, lookupSession } from "../mcp/pm-tools.js";
 import { verifyMcpKey, getInternalMcpKey } from "../auth/mcp-key.js";
 import type { Orchestrator } from "../pm/orchestrator.js";
 
@@ -103,7 +103,8 @@ export function registerMcpRoutes(app: FastifyInstance, orchestrator: Orchestrat
     }
 
     reply.hijack();
-    const server = session.kind === "groom" ? buildGroomToolsServer(session) : buildAssignToolsServer(session);
+    const server =
+      session.kind === "groom" ? buildGroomToolsServer(session) : session.kind === "assign" ? buildAssignToolsServer(session) : buildCurateToolsServer(session);
     try {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await server.connect(transport);
