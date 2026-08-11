@@ -167,6 +167,23 @@ function fail(text: string): { content: [{ type: "text"; text: string }]; isErro
   return { content: [{ type: "text", text }], isError: true };
 }
 
+/** Ticket/agent/fact ids are short random tokens (see store.ts's newId),
+ *  but a model asked for one reliably pastes back the whole rendered
+ *  heading it read the id from instead -- e.g. `"STORY AXOZKgz7BcEd —
+ *  Attacker approach scenario setup"` instead of `"AXOZKgz7BcEd"`,
+ *  observed live on two different tools. A random id is effectively never
+ *  a substring of unrelated prose, so resolving against the valid set by
+ *  substring is safe and turns what would otherwise be a wasted round
+ *  trip (or, worse, a plausible-looking id the model then can't recover
+ *  from) into a successful call. */
+function resolveId(input: string, validIds: ReadonlySet<string>): string | null {
+  if (validIds.has(input)) return input;
+  for (const id of validIds) {
+    if (input.includes(id)) return id;
+  }
+  return null;
+}
+
 /** Tools for grooming the backlog: promote/revise/comment on tickets, plus
  *  the shared record_fact. Scoped to one session's validTicketIds -- a
  *  ticket id outside the backlog this run was given (stale, mistyped, or
@@ -181,8 +198,9 @@ export function buildGroomToolsServer(session: GroomSession): McpServer {
       description: "Moves a ticket from backlog to ready -- it will be picked up and worked autonomously. Only use this when the ticket is shaped well enough for an engineer to finish without coming back to ask what you meant.",
       inputSchema: { ticketId: z.string().describe("The work item id, from the backlog list in your prompt.") },
     },
-    async ({ ticketId }) => {
-      if (!session.validTicketIds.has(ticketId)) return fail(`"${ticketId}" is not one of the backlog tickets you were given this run.`);
+    async ({ ticketId: rawTicketId }) => {
+      const ticketId = resolveId(rawTicketId, session.validTicketIds);
+      if (!ticketId) return fail(`"${rawTicketId}" is not one of the backlog tickets you were given this run.`);
       if (!board.canTransition("product-owner", "ready")) return fail("Product owner cannot promote tickets to ready in this project's settings.");
       const item = await board.transitionWorkItem(ticketId, "ready", session.agentId, "shaped and ready to work");
       if (!item) return fail(`Ticket "${ticketId}" no longer exists or already moved.`);
@@ -203,8 +221,9 @@ export function buildGroomToolsServer(session: GroomSession): McpServer {
         acceptanceCriteria: z.array(z.string()).optional().describe("Replacement acceptance criteria list, if it needs one."),
       },
     },
-    async ({ ticketId, title, description, acceptanceCriteria }) => {
-      if (!session.validTicketIds.has(ticketId)) return fail(`"${ticketId}" is not one of the backlog tickets you were given this run.`);
+    async ({ ticketId: rawTicketId, title, description, acceptanceCriteria }) => {
+      const ticketId = resolveId(rawTicketId, session.validTicketIds);
+      if (!ticketId) return fail(`"${rawTicketId}" is not one of the backlog tickets you were given this run.`);
       const patch: board.WorkItemPatch = {};
       if (title) patch.title = title;
       if (description) patch.description = description;
@@ -227,8 +246,9 @@ export function buildGroomToolsServer(session: GroomSession): McpServer {
         body: z.string().describe("The comment text."),
       },
     },
-    async ({ ticketId, body }) => {
-      if (!session.validTicketIds.has(ticketId)) return fail(`"${ticketId}" is not one of the backlog tickets you were given this run.`);
+    async ({ ticketId: rawTicketId, body }) => {
+      const ticketId = resolveId(rawTicketId, session.validTicketIds);
+      if (!ticketId) return fail(`"${rawTicketId}" is not one of the backlog tickets you were given this run.`);
       const comment = await board.addComment(ticketId, session.agentId, session.agentName, body);
       if (!comment) return fail(`Ticket "${ticketId}" no longer exists.`);
       session.actions.push(`commented on a ticket`);
@@ -294,10 +314,12 @@ export function buildAssignToolsServer(session: AssignSession): McpServer {
         rationale: z.string().optional().describe("One line: why this agent, at this cost, for this ticket."),
       },
     },
-    async ({ workItemId, agentId, complexity, rationale }) => {
+    async ({ workItemId: rawWorkItemId, agentId: rawAgentId, complexity, rationale }) => {
       if (session.slotsRemaining <= 0) return fail("No engineer slots remaining this pass -- this project's concurrency ceiling is already met. Leave remaining tickets in ready for next time.");
-      if (!session.validTicketIds.has(workItemId)) return fail(`"${workItemId}" is not one of the ready tickets you were given this run.`);
-      if (!session.knownAgentIds.has(agentId)) return fail(`"${agentId}" is not an engineer on your current roster or one you created this run.`);
+      const workItemId = resolveId(rawWorkItemId, session.validTicketIds);
+      if (!workItemId) return fail(`"${rawWorkItemId}" is not one of the ready tickets you were given this run.`);
+      const agentId = resolveId(rawAgentId, session.knownAgentIds);
+      if (!agentId) return fail(`"${rawAgentId}" is not an engineer on your current roster or one you created this run.`);
       const assignee = await agentStore.getAgent(agentId);
       if (!assignee) return fail(`Agent "${agentId}" no longer exists.`);
       if (assignee.fallbackSet && session.unavailableFallbackSets.has(assignee.fallbackSet)) {
@@ -325,8 +347,9 @@ export function buildAssignToolsServer(session: AssignSession): McpServer {
         maxComplexity: z.enum(["low", "medium", "high"]).optional().describe("New complexity ceiling, if it needs one."),
       },
     },
-    async ({ agentId, note, fallbackSet, maxComplexity }) => {
-      if (!session.knownAgentIds.has(agentId)) return fail(`"${agentId}" is not an engineer on your current roster or one you created this run.`);
+    async ({ agentId: rawAgentId, note, fallbackSet, maxComplexity }) => {
+      const agentId = resolveId(rawAgentId, session.knownAgentIds);
+      if (!agentId) return fail(`"${rawAgentId}" is not an engineer on your current roster or one you created this run.`);
       if (fallbackSet && !session.fallbackSetNames.has(fallbackSet)) {
         return fail(`"${fallbackSet}" is not one of the fallback sets on the model menu.`);
       }
@@ -383,8 +406,9 @@ export function buildCurateToolsServer(session: CurateSession): McpServer {
         category: z.enum(FACT_CATEGORIES as [string, ...string[]]).optional().describe("Replacement category, if it's mis-filed."),
       },
     },
-    async ({ factId, key, value, category }) => {
-      if (!session.validPendingIds.has(factId)) return fail(`"${factId}" is not one of the pending facts you were given this run.`);
+    async ({ factId: rawFactId, key, value, category }) => {
+      const factId = resolveId(rawFactId, session.validPendingIds);
+      if (!factId) return fail(`"${rawFactId}" is not one of the pending facts you were given this run.`);
       const approved = await approveFact(factId, { key, value, category: category as never });
       if (!approved) return fail(`Pending fact "${factId}" no longer exists or was already reviewed.`);
       session.actions.push(`approved "${approved.key}"`);
@@ -402,8 +426,9 @@ export function buildCurateToolsServer(session: CurateSession): McpServer {
         reason: z.string().optional().describe("One line: why this isn't worth keeping. Not stored -- just for the run's activity log."),
       },
     },
-    async ({ factId, reason }) => {
-      if (!session.validPendingIds.has(factId)) return fail(`"${factId}" is not one of the pending facts you were given this run.`);
+    async ({ factId: rawFactId, reason }) => {
+      const factId = resolveId(rawFactId, session.validPendingIds);
+      if (!factId) return fail(`"${rawFactId}" is not one of the pending facts you were given this run.`);
       const removed = await rejectFact(factId);
       if (!removed) return fail(`Pending fact "${factId}" no longer exists or was already reviewed.`);
       session.actions.push(`rejected a proposal${reason ? ` (${reason})` : ""}`);
