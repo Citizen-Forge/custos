@@ -1,5 +1,9 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Runtime } from "../runtime.js";
 import { ensureHeadlessSettingsFile, type HookProfile } from "./headless-settings.js";
 
@@ -190,9 +194,27 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   // and should win over anything the gateway process happens to inherit.
   Object.assign(env, options.env ?? {});
 
-  const args = ["-p", prompt, "--output-format", "stream-json", "--include-partial-messages", "--verbose"];
+  // Both the prompt and the system-prompt addendum used to ride on argv
+  // (`-p <prompt>` and `--append-system-prompt <text>`), which put them in
+  // the same execve() buffer as the rest of the CLI's argument list and
+  // environment. A ticket that's accumulated enough history, or an agent
+  // whose engineering manager has appended enough standing instructions,
+  // pushes that combined buffer past the OS's ARG_MAX and the spawn itself
+  // fails with `E2BIG` before the CLI process even starts -- the render-side
+  // caps in pm/context.ts (MAX_RENDERED_COMMENTS/HISTORY) bound the ticket
+  // portion of the prompt, but appendSystemPrompt (an agent's full
+  // accumulated notes, uncapped) was never covered by that and can grow
+  // without bound on a long-lived agent. Neither has that ceiling now:
+  // appendSystemPrompt goes to a temp file read via --append-system-prompt-file,
+  // and the prompt itself goes over stdin instead of argv.
+  const systemPromptFile = appendSystemPrompt
+    ? join(tmpdir(), `custos-turn-system-prompt-${randomUUID()}.txt`)
+    : null;
+  if (systemPromptFile) await writeFile(systemPromptFile, appendSystemPrompt as string, "utf8");
+
+  const args = ["-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose"];
   if (resumeSessionId) args.push("--resume", resumeSessionId);
-  if (appendSystemPrompt) args.push("--append-system-prompt", appendSystemPrompt);
+  if (systemPromptFile) args.push("--append-system-prompt-file", systemPromptFile);
   if (settingsPath) args.push("--settings", settingsPath);
   // Pushed as its own flag occurrence with every tool name as a separate
   // argv entry (not one space-joined string) so a tool name can never be
@@ -201,12 +223,19 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
   if (options.disallowedTools?.length) args.push("--disallowedTools", ...options.disallowedTools);
   if (options.mcpConfig) args.push("--mcp-config", options.mcpConfig, "--strict-mcp-config");
 
-  // stdin = 'ignore' (i.e. /dev/null) so the CLI gets an immediate EOF
-  // instead of waiting on a pipe that never receives data -- with a plain
-  // piped stdin it warns "no stdin data received in 3s" and stalls, since
-  // it can't tell an empty pipe from slow piped input. The prompt is passed
-  // as the `-p` argument, so no stdin is needed at all.
-  const proc = spawn("claude", args, { cwd, env, signal, stdio: ["ignore", "pipe", "pipe"] });
+  // The prior stdin attempt (see git history on this file) stalled because
+  // stdio was left as a plain pipe that nothing ever wrote to -- the CLI
+  // can't distinguish an empty pipe from slow input and sits waiting. Here
+  // stdin is written and explicitly closed immediately after spawn, so the
+  // CLI sees data followed by EOF right away, same as it would from a
+  // redirected file.
+  const proc = spawn("claude", args, { cwd, env, signal, stdio: ["pipe", "pipe", "pipe"] });
+  // A write after the process has already exited (e.g. it errored out
+  // before consuming stdin) would otherwise throw an unhandled EPIPE and
+  // crash the whole gateway process -- the 'exit' handler below already
+  // reports the failure via stderrBuf, so this is just a no-op sink.
+  proc.stdin.on("error", () => {});
+  proc.stdin.end(prompt);
 
   let resumeNotFound = false;
   const rl = createInterface({ input: proc.stdout });
@@ -238,18 +267,25 @@ export async function runTurn(runtime: Runtime, options: RunTurnOptions): Promis
     stderrBuf += chunk.toString();
   });
 
-  await new Promise<void>((resolve, reject) => {
-    proc.on("error", (err) => reject(err));
-    proc.on("exit", (code) => {
-      rl.close();
-      if (resumeNotFound) {
-        reject(new ResumeSessionNotFoundError());
-        return;
-      }
-      if (code !== 0 && code !== null && stderrBuf.trim()) {
-        onEvent({ type: "error", message: stderrBuf.trim().slice(0, 2000) });
-      }
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      proc.on("error", (err) => reject(err));
+      proc.on("exit", (code) => {
+        rl.close();
+        if (resumeNotFound) {
+          reject(new ResumeSessionNotFoundError());
+          return;
+        }
+        if (code !== 0 && code !== null && stderrBuf.trim()) {
+          onEvent({ type: "error", message: stderrBuf.trim().slice(0, 2000) });
+        }
+        resolve();
+      });
     });
-  });
+  } finally {
+    // Best-effort: a leaked temp file per turn is a nuisance, not a
+    // correctness problem, so a cleanup failure shouldn't mask the turn's
+    // real outcome (success or the error/rejection above).
+    if (systemPromptFile) await rm(systemPromptFile, { force: true }).catch(() => {});
+  }
 }
