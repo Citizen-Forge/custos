@@ -324,6 +324,19 @@ export interface ProjectSettings {
    *  killswitch, which turns the whole integration off regardless of
    *  which projects have a channel configured. */
   slackChannelId: string | null;
+  /** Fingerprint (see orchestrator.ts's workItemsSignal) of the backlog /
+   *  ready-column-plus-inFlight-count / pending-facts state as of the end
+   *  of the last SUCCESSFUL groom/assign/curate pass. tickProject compares
+   *  the current fingerprint against these before dispatching again --
+   *  unchanged means the last pass already considered exactly this state
+   *  (whatever it decided, including "leave it"), so there is nothing new
+   *  to spend a run on. Null until that role's first successful pass.
+   *  Deliberately only updated on success: a failed run (error, timeout)
+   *  hasn't actually considered the state yet, so it should keep retrying
+   *  every tick rather than being suppressed by a stale fingerprint. */
+  lastGroomSignal: string | null;
+  lastAssignSignal: string | null;
+  lastCurateSignal: string | null;
   updatedAt: number;
 }
 
@@ -342,6 +355,9 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     pmConfigured: false,
     pmLastRunAt: null,
     slackChannelId: null,
+    lastGroomSignal: null,
+    lastAssignSignal: null,
+    lastCurateSignal: null,
     autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,

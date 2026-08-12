@@ -21,6 +21,20 @@ import { HUMAN_ASSIGNEE_ID } from "./types.js";
 
 const TICK_MS = Number(process.env.CUSTOS_ORCHESTRATOR_TICK_MS ?? 20_000);
 
+/** Fingerprints a set of work items so tickProject can tell "nothing has
+ *  changed since the last pass" from "something's different, worth another
+ *  look" without hand-tracking every kind of change (new item, edited
+ *  title, a fresh comment, a status flip). `updatedAt` already advances on
+ *  all of those; sorting by id makes the fingerprint order-independent, and
+ *  a membership change (an item entering or leaving the set) changes the
+ *  fingerprint on its own since the list of pairs is a different length. */
+function workItemsSignal(items: readonly { id: string; updatedAt: number }[]): string {
+  return items
+    .map((item) => `${item.id}:${item.updatedAt}`)
+    .sort()
+    .join(",");
+}
+
 /** Hard ceiling on concurrent engineers regardless of project settings --
  * every one is a live `claude` process with its own checkout, and a
  * mistyped setting shouldn't be able to fork-bomb the container. */
@@ -154,10 +168,21 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     if (settings.autonomy["product-owner"]) {
       const inbox = (await ideas.listIdeas(project.id)).filter((idea) => idea.status === "inbox");
       for (const idea of inbox) void this.planIdea(project.id, idea.id);
+
+      // Gated on more than just "is there anything to look at" -- a
+      // non-empty backlog stays non-empty for as long as its items sit
+      // there un-promoted, which used to mean a full grooming pass (one
+      // more `claude` spawn) every single tick regardless of whether
+      // anything had actually changed since the last one already looked
+      // and made its call. Comparing against the fingerprint recorded
+      // after the last SUCCESSFUL pass (see workItemsSignal) means "we
+      // already considered exactly this" skips the redundant re-ask,
+      // while a genuinely new/edited item still triggers one immediately.
       const backlog = (await board.listWorkItems(project.id)).filter((item) => item.status === "backlog");
-      if (backlog.length) void this.groomBacklog(project.id);
+      if (backlog.length && workItemsSignal(backlog) !== settings.lastGroomSignal) void this.groomBacklog(project.id);
+
       const pendingFacts = await listPendingFacts(project.id);
-      if (pendingFacts.length) void this.curateFacts(project.id);
+      if (pendingFacts.length && workItemsSignal(pendingFacts) !== settings.lastCurateSignal) void this.curateFacts(project.id);
     }
 
     const readyWork = (await board.listWorkItems(project.id)).filter((item) => item.type !== "epic" && item.status === "ready");
@@ -174,11 +199,18 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     // Only run the manager when it has somewhere to put the work. Without
     // this it re-ran on every tick while the engineers were busy, paying for
     // a full sizing pass each time to discover it had no free slots -- a few
-    // cents every twenty seconds, indefinitely.
+    // cents every twenty seconds, indefinitely. Beyond that: even with a
+    // free slot, a non-empty ready column that the last pass already looked
+    // at (and, correctly or not, decided not to act on) re-triggered every
+    // tick for no new reason -- inFlight is folded into the fingerprint
+    // alongside the ready items themselves so a slot freeing up (a
+    // different ticket completing or bouncing) still counts as something
+    // worth another look even when the ready column itself is unchanged.
     if (settings.autonomy["engineering-manager"] && readyWork.length) {
       const limit = await this.engineerLimit(project, settings);
       const inFlight = (await board.listWorkItems(project.id)).filter((item) => item.status === "in_progress").length;
-      if (inFlight < limit) void this.assignReady(project.id);
+      const assignSignal = `${workItemsSignal(readyWork)}|inFlight=${inFlight}`;
+      if (inFlight < limit && assignSignal !== settings.lastAssignSignal) void this.assignReady(project.id);
     }
 
     if (settings.autonomy.engineer) {
@@ -454,7 +486,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         const actions = releaseSession(token);
         if (actions.length) this.emit("activity", projectId, `Product owner: ${actions.join("; ")}.`);
       }
-      if (!result.ok) this.emit("activity", projectId, `Product owner grooming failed: ${result.error ?? "unknown error"}`);
+      if (!result.ok) {
+        this.emit("activity", projectId, `Product owner grooming failed: ${result.error ?? "unknown error"}`);
+      } else {
+        // Fingerprint the POST-pass state, not what was fed in -- whatever
+        // the pass itself changed (a promote, a revision) is already
+        // accounted for, so the very next tick doesn't immediately see a
+        // "different" backlog and re-trigger on the pass's own writes.
+        const freshBacklog = (await board.listWorkItems(projectId)).filter((item) => item.status === "backlog");
+        await updateSettings(projectId, { lastGroomSignal: workItemsSignal(freshBacklog) });
+      }
     });
   }
 
@@ -497,7 +538,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         const actions = releaseSession(token);
         if (actions.length) this.emit("activity", projectId, `Product owner (facts review): ${actions.join("; ")}.`);
       }
-      if (!result.ok) this.emit("activity", projectId, `Facts curation pass failed: ${result.error ?? "unknown error"}`);
+      if (!result.ok) {
+        this.emit("activity", projectId, `Facts curation pass failed: ${result.error ?? "unknown error"}`);
+      } else {
+        const freshPending = await listPendingFacts(projectId);
+        await updateSettings(projectId, { lastCurateSignal: workItemsSignal(freshPending) });
+      }
     });
   }
 
@@ -568,7 +614,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         const actions = releaseSession(token);
         if (actions.length) this.emit("activity", projectId, `Engineering manager: ${actions.join("; ")}.`);
       }
-      if (!result.ok) this.emit("activity", projectId, `Engineering manager assignment pass failed: ${result.error ?? "unknown error"}`);
+      if (!result.ok) {
+        this.emit("activity", projectId, `Engineering manager assignment pass failed: ${result.error ?? "unknown error"}`);
+      } else {
+        const freshAll = await board.listWorkItems(projectId);
+        const freshReady = freshAll.filter((item) => item.type !== "epic" && item.status === "ready");
+        const freshInFlight = freshAll.filter((item) => item.status === "in_progress").length;
+        await updateSettings(projectId, { lastAssignSignal: `${workItemsSignal(freshReady)}|inFlight=${freshInFlight}` });
+      }
     });
   }
 
