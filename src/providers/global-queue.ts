@@ -213,6 +213,17 @@ async function extractErrorMessage(response: ProviderResponse): Promise<string> 
   }
 }
 
+/** Mirrors the reason-extraction the queued-entry abort listener already
+ *  does (see enqueue()'s onAbort) so a signal that's already aborted by
+ *  the time we check it rejects with the same shape whether it's caught
+ *  early (this) or aborts while genuinely waiting in the queue (onAbort). */
+function abortErrorFromSignal(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error) return reason;
+  if (typeof reason === "string") return new Error(reason);
+  return new Error("aborted");
+}
+
 export class GlobalQueue {
   private readonly interactiveQueue: QueuedEntry[] = [];
   private readonly backgroundQueue: QueuedEntry[] = [];
@@ -338,6 +349,25 @@ export class GlobalQueue {
     context: QueueContext | undefined,
     requestId: string,
   ): Promise<ProviderResponse & { providerName: string }> {
+    // A caller whose signal is ALREADY aborted by the time we get here
+    // must never be dispatched or (worse) re-queued -- this is also the
+    // re-entry point executeWithRelease's catch recurses through on every
+    // fallback failure (see that method's `return await this.tryExecute(...)`),
+    // so without this check an abandoned request (the spawned `claude`
+    // subprocess disconnected, e.g. its own ~300s client timeout, or the
+    // orchestrator killed it at RUN_TIMEOUT_MS) just kept cycling through
+    // the whole fallback chain forever: fetch() throws AbortError
+    // instantly for an already-fired signal, that gets caught and treated
+    // as "provider unavailable, try the next one" like any other failure,
+    // and the chain re-queues and redispatches indefinitely -- observed
+    // live as a `dispatched`/`fallback`/`queued` cycle repeating every
+    // couple of minutes for HOURS after the run it belonged to had
+    // already been marked failed. enqueue() has the same gap for a
+    // signal that's already aborted before the request is even first
+    // queued (its abort *listener* only catches an abort that fires
+    // later, not one that already happened).
+    if (options?.signal?.aborted) throw abortErrorFromSignal(options.signal);
+
     const startedAt = Date.now();
     let lastError: ProviderUnavailableError | undefined;
     let anyAvailable = false;
@@ -496,6 +526,14 @@ export class GlobalQueue {
     requestId: string,
     queuedAt: number,
   ): Promise<ProviderResponse & { providerName: string }> {
+    // Same reasoning as tryExecute()'s guard -- an already-aborted signal
+    // reaching here would otherwise sit in the queue until enqueueTimeoutMs
+    // (40 minutes, and reset fresh on every fallback-triggered redispatch
+    // via tryExecute -> enqueue, so effectively unbounded): the abort
+    // *listener* registered below only fires for an abort that happens
+    // while queued, not one that already happened before we got here.
+    if (options?.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal));
+
     const priority: Priority = options?.priority ?? "interactive";
     this.recordEvent({
       requestId,
