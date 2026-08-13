@@ -1,9 +1,10 @@
 // Shared types, constants, and small helpers used by both curator passes
 // (extract-facts.ts and compact.ts).
-import { readFile, mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import type { Runtime } from "../../runtime.js";
 import type { EmbeddingConfig } from "../embeddings.js";
 import type { MemoryStore } from "../store.js";
+import { readJsonFile, writeJsonFile } from "../../util/json-file.js";
 
 export const SESSIONS_DIR = process.env.GATEWAY_SESSIONS_DIR ?? "data/sessions";
 export const CURSOR_PATH = process.env.GATEWAY_CURATOR_CURSOR_PATH ?? "data/curator-cursor.json";
@@ -19,17 +20,15 @@ export interface Cursor {
 }
 
 export async function loadCursor(): Promise<Cursor> {
-  try {
-    return JSON.parse(await readFile(CURSOR_PATH, "utf8"));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw err;
-  }
+  return readJsonFile<Cursor>(CURSOR_PATH, {});
 }
 
 export async function saveCursor(cursor: Cursor): Promise<void> {
+  // Ensures SESSIONS_DIR exists (not just CURSOR_PATH's own parent --
+  // they differ: data/sessions vs data), since callers assume it's
+  // there once a cursor save has happened.
   await mkdir(SESSIONS_DIR, { recursive: true });
-  await writeFile(CURSOR_PATH, JSON.stringify(cursor, null, 2), "utf8");
+  await writeJsonFile(CURSOR_PATH, cursor);
 }
 
 /**

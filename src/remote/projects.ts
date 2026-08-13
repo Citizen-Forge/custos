@@ -1,6 +1,8 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname, resolve, relative } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { resolve, relative } from "node:path";
 import { randomBytes } from "node:crypto";
+import { slugifyCore } from "../util/slugify.js";
+import { readJsonFile, writeJsonFile } from "../util/json-file.js";
 
 const WORKSPACE_ROOT = process.env.CUSTOS_WORKSPACE_DIR ?? "/workspace";
 const PROJECTS_PATH = process.env.GATEWAY_PROJECTS_PATH ?? "data/projects.json";
@@ -15,26 +17,15 @@ export interface Project {
 }
 
 async function readAll(): Promise<Project[]> {
-  try {
-    return JSON.parse(await readFile(PROJECTS_PATH, "utf8"));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw err;
-  }
+  return readJsonFile<Project[]>(PROJECTS_PATH, []);
 }
 
 async function writeAll(projects: Project[]): Promise<void> {
-  await mkdir(dirname(PROJECTS_PATH), { recursive: true });
-  await writeFile(PROJECTS_PATH, JSON.stringify(projects, null, 2), "utf8");
+  await writeJsonFile(PROJECTS_PATH, projects);
 }
 
 function slugify(name: string): string {
-  const slug = name
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "project";
+  return slugifyCore(name) || "project";
 }
 
 /** Dedicated cwd for portfolio chats (see remote/chats.ts's ChatKind doc) --

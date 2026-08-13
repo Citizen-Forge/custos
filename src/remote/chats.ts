@@ -1,6 +1,5 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
+import { readJsonFile, writeJsonFile } from "../util/json-file.js";
 
 const CHATS_PATH = process.env.GATEWAY_CHATS_PATH ?? "data/chats.json";
 
@@ -36,17 +35,11 @@ export interface ChatRecord {
 }
 
 async function readAll(): Promise<ChatRecord[]> {
-  try {
-    return JSON.parse(await readFile(CHATS_PATH, "utf8"));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw err;
-  }
+  return readJsonFile<ChatRecord[]>(CHATS_PATH, []);
 }
 
 async function writeAll(chats: ChatRecord[]): Promise<void> {
-  await mkdir(dirname(CHATS_PATH), { recursive: true });
-  await writeFile(CHATS_PATH, JSON.stringify(chats, null, 2), "utf8");
+  await writeJsonFile(CHATS_PATH, chats);
 }
 
 export async function listChats(projectId?: string, kind?: ChatKind): Promise<ChatRecord[]> {

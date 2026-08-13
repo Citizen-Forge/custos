@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { rm, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { slugifyCore } from "../util/slugify.js";
 
 const run = promisify(execFile);
 
@@ -179,12 +180,7 @@ export async function isGitRepo(dir: string): Promise<boolean> {
 }
 
 function branchName(item: { id: string; type: string; title: string }): string {
-  const slug = item.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40)
-    .replace(/-+$/, "");
+  const slug = slugifyCore(item.title).slice(0, 40).replace(/-+$/, "");
   return `custos/${item.type}-${slug || "work"}-${item.id.toLowerCase()}`;
 }
 

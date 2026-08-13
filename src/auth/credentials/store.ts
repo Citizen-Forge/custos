@@ -3,27 +3,18 @@
 // locally-logged-in Claude Code CLI. subprocess-auth.ts builds on top
 // of this (getValidOwnTokenSet, CLAUDE_CODE_CREDENTIALS_PATH) to mirror
 // a session into the format the spawned CLI reads.
-import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
-import { dirname } from "node:path";
+import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { refreshTokens, type TokenSet } from "../oauth.js";
+import { readJsonFile, writeJsonFile } from "../../util/json-file.js";
 
 export const CREDENTIALS_PATH = process.env.GATEWAY_CREDENTIALS_PATH ?? join(process.cwd(), "data", "credentials.json");
 export const CLAUDE_CODE_CREDENTIALS_PATH = join(homedir(), ".claude", ".credentials.json");
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
-async function readJson<T>(path: string): Promise<T | null> {
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as T;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-}
-
 export async function loadStoredTokens(): Promise<TokenSet | null> {
-  return readJson<TokenSet>(CREDENTIALS_PATH);
+  return readJsonFile<TokenSet | null>(CREDENTIALS_PATH, null);
 }
 
 /** True when the TokenSet has the three fields that the gateway and the
@@ -64,8 +55,7 @@ export async function saveTokens(tokens: TokenSet): Promise<void> {
       `refreshToken=${tokens.refreshToken ? "set" : "missing"}, expiresAt=${tokens.expiresAt ?? "missing"}`,
     );
   }
-  await mkdir(dirname(CREDENTIALS_PATH), { recursive: true });
-  await writeFile(CREDENTIALS_PATH, JSON.stringify(tokens, null, 2), "utf8");
+  await writeJsonFile(CREDENTIALS_PATH, tokens);
 }
 
 /** Removes Custos's own stored tokens AND the mirror at
@@ -96,7 +86,7 @@ export async function importFromClaudeCode(): Promise<TokenSet | null> {
       expiresAt: number;
     };
   }
-  const raw = await readJson<ClaudeCodeCredentials>(CLAUDE_CODE_CREDENTIALS_PATH);
+  const raw = await readJsonFile<ClaudeCodeCredentials | null>(CLAUDE_CODE_CREDENTIALS_PATH, null);
   const oauth = raw?.claudeAiOauth;
   if (!oauth) return null;
   return {

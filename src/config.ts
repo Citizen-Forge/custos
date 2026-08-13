@@ -2,11 +2,10 @@
 // ./config/types.ts, the out-of-the-box defaults in ./config/defaults.ts,
 // and legacy-shape migration in ./config/migrate.ts -- this file re-exports
 // all three so every existing `from "./config.js"` import keeps working.
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 import type { GatewayConfig } from "./config/types.js";
 import { DEFAULT_CONFIG } from "./config/defaults.js";
 import { migrateLegacyShape, pruneStaleFields } from "./config/migrate.js";
+import { readJsonFile, writeJsonFile } from "./util/json-file.js";
 
 export type {
   ProviderEntry,
@@ -25,12 +24,7 @@ export type {
 const CONFIG_PATH = process.env.GATEWAY_CONFIG_PATH ?? "data/config.json";
 
 async function readFileConfig(): Promise<Partial<GatewayConfig>> {
-  try {
-    return JSON.parse(await readFile(CONFIG_PATH, "utf8"));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw err;
-  }
+  return readJsonFile<Partial<GatewayConfig>>(CONFIG_PATH, {});
 }
 
 /** File-configured API key (settable via the admin UI) wins once it
@@ -93,6 +87,5 @@ export async function saveConfig(config: GatewayConfig): Promise<void> {
   // install that hasn't yet restarted post-strip.
   delete toPersist.openaiCompatibleInstances;
   delete toPersist.clientApiKey;
-  await mkdir(dirname(CONFIG_PATH), { recursive: true });
-  await writeFile(CONFIG_PATH, JSON.stringify(toPersist, null, 2), "utf8");
+  await writeJsonFile(CONFIG_PATH, toPersist);
 }

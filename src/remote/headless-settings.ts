@@ -1,6 +1,6 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
+import { readJsonFile, writeJsonFile } from "../util/json-file.js";
 
 const CLAUDE_DIR = join(homedir(), ".claude");
 const SETTINGS_PATH = join(CLAUDE_DIR, "settings.json");
@@ -20,12 +20,7 @@ const PORT = process.env.PORT ?? "8787";
 export type HookProfile = "chat" | "agent";
 
 async function readExistingSettings(): Promise<Record<string, unknown>> {
-  try {
-    return JSON.parse(await readFile(SETTINGS_PATH, "utf8")) as Record<string, unknown>;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    return {};
-  }
+  return readJsonFile<Record<string, unknown>>(SETTINGS_PATH, {});
 }
 
 function buildHooks(hookPath: string): Record<string, unknown> {
@@ -88,14 +83,12 @@ export async function ensureHeadlessSettingsFile(profile: HookProfile = "chat"):
   const { hooks: _globalHooks, ...globalWithoutHooks } = global;
 
   if (hadGlobalHooks) {
-    await mkdir(dirname(SETTINGS_PATH), { recursive: true });
-    await writeFile(SETTINGS_PATH, JSON.stringify(globalWithoutHooks, null, 2), "utf8");
+    await writeJsonFile(SETTINGS_PATH, globalWithoutHooks);
   }
 
   const sidecarPath = profile === "chat" ? CHAT_SETTINGS_PATH : AGENT_SETTINGS_PATH;
   const hookPath = profile === "chat" ? "/hooks/pretooluse-headless" : "/hooks/pretooluse-agent";
   const merged = { ...globalWithoutHooks, hooks: buildHooks(hookPath) };
-  await mkdir(dirname(sidecarPath), { recursive: true });
-  await writeFile(sidecarPath, JSON.stringify(merged, null, 2), "utf8");
+  await writeJsonFile(sidecarPath, merged);
   return sidecarPath;
 }

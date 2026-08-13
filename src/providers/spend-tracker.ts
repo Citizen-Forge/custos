@@ -1,5 +1,4 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readJsonFile, writeJsonFile } from "../util/json-file.js";
 
 export interface PricingConfig {
   inputPerMillion: number;
@@ -32,16 +31,11 @@ export class SpendTracker {
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
-    try {
-      this.ledger = JSON.parse(await readFile(SPEND_PATH, "utf8"));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    }
+    this.ledger = await readJsonFile<Record<string, SpendRecord>>(SPEND_PATH, {});
   }
 
   private async save(): Promise<void> {
-    await mkdir(dirname(SPEND_PATH), { recursive: true });
-    await writeFile(SPEND_PATH, JSON.stringify(this.ledger, null, 2), "utf8");
+    await writeJsonFile(SPEND_PATH, this.ledger);
   }
 
   private key(projectId: string, providerName: string): string {
