@@ -1,113 +1,21 @@
-import { AnthropicProvider } from "./providers/anthropic.js";
-import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
-import { SpendTracker } from "./providers/spend-tracker.js";
 import { GlobalQueue, PERIODIC_PUMP_INTERVAL_MS, type QueueContext } from "./providers/global-queue.js";
 import { ProviderStateMap } from "./providers/provider-state.js";
-import { ActivityLog, type DispatchContext } from "./providers/activity-log.js";
+import { ActivityLog } from "./providers/activity-log.js";
 import { loadConfig, type GatewayConfig } from "./config.js";
 import type { AnthropicMessagesRequest } from "./types.js";
 import { ProviderUnavailableError } from "./types.js";
 import type { Provider, CompleteOptions, ProviderResponse } from "./providers/types.js";
 import type { EmbeddingConfig } from "./memory/embeddings.js";
 import { getGlobalAgent } from "./pm/global-agents.js";
-import { resolveEmbeddingHost, looksLikeOllamaEndpoint } from "./providers/embedding-url.js";
-import * as agentStore from "./pm/agents.js";
 import { markProviderAvailable, markProviderUnavailable } from "./pm/model-registry.js";
 import { syncSpawnedSessionCredentials } from "./auth/credentials.js";
+import { SpendTracker } from "./providers/spend-tracker.js";
+import { buildBareProviders } from "./runtime/provider-registry.js";
+import { computeFallbackSetHealth, computeProviderStats } from "./runtime/stats.js";
+import { resolveEmbeddingTarget } from "./runtime/embeddings.js";
 
-/** Per-provider runtime stats, used by the admin endpoint, the periodic
- * stats logger, and the threshold-alert monitor. Reads from
- * ProviderStateMap.snapshot() directly -- the legacy overlay from
- * ProviderRouter.cooldowns() is gone because ProviderRouter itself is
- * gone (the queue's markCooling is the only source of cooling windows
- * now, and ProviderStateMap exposes them via snapshot()). Shape still
- * extends ThrottleStats for downstream consumers (`runtime-stats.ts`'s
- * alert rules, the admin panel's per-provider cards) so the surface
- * remains backward-compatible. */
-export interface ProviderRuntimeStats {
-  /** Per-provider throttle queue depth *background* — reads from
-   *  ProviderStateMap.queuedBackground. */
-  queuedBackground: number;
-  /** Per-provider throttle queue depth *interactive* — reads from
-   *  ProviderStateMap.queuedInteractive. */
-  queuedInteractive: number;
-  /** Currently in-flight requests. */
-  active: number;
-  /** Max concurrent in-flight requests. 0 = unlimited. */
-  maxConcurrent: number;
-  /** ms epoch when the provider's cooldown expires; undefined when
-   *  currently available. Mirrors ProviderStateMap.snapshot()
-   *  `coolingUntil` directly. */
-  cooldownUntil?: number;
-}
-
-/** Runtime-wide stats snapshot. Returned by `Runtime.stats()` and
- *  consumed by the admin endpoint, the periodic logger, and the
- *  threshold monitor. Always a fresh object so callers never see
- *  stale data through a shared reference. */
-export interface RuntimeStats {
-  providers: Record<string, ProviderRuntimeStats>;
-  /** Per-fallback-set health. Operators see at a glance whether each
-   *  named chain has a live pick or whether every entry is currently
-   *  unavailable, without having to triangulate cooldown / breaker /
-   *  RPM signals across the per-provider map. The set-name keys match
-   *  `config.fallbackSets` -- if a set has been removed from config
-   *  since the snapshot was taken, it simply disappears from the next
-   *  refresh. */
-  fallbackSets: Record<string, FallbackSetHealth>;
-  /** ms epoch at which the snapshot was taken -- useful when log lines
-   *  and HTTP responses are correlated after the fact. */
-  timestamp: number;
-}
-
-/** Per-fallback-set health snapshot. Keyed by set name in
- *  RuntimeStats.fallbackSets. The chain entries are reported in
- *  declared order (matching `config.fallbackSets[name].providers`)
- *  so the UI can render the priority sequence top-to-bottom without
- *  re-sorting. */
-export interface FallbackSetHealth {
-  /** Set name as it appears in `config.fallbackSets`. */
-  name: string;
-  /** Set description, lifted from the config for the panel header. */
-  description: string;
-  /** Chain length. 0 for an empty set (rare; surfaced as exhausted). */
-  chainLength: number;
-  /** Per-entry health, in declared order. */
-  entries: FallbackSetEntryHealth[];
-  /** First entry whose `status === "available"`, or null when the
-   *  whole set is exhausted. The "live pick" -- what an incoming
-   *  request would actually dispatch to. */
-  livePick: { provider: string; model: string; index: number } | null;
-  /** True when no entry in the chain can accept a request right now.
-   *  Equivalent to `livePick === null && chainLength > 0`, but cached
-   *  so the UI doesn't have to recompute. */
-  exhausted: boolean;
-}
-
-/** Per-entry health inside a fallback set's chain. */
-export interface FallbackSetEntryHealth {
-  provider: string;
-  model: string;
-  /** Coarse availability for this entry. The statuses are mutually
-   *  exclusive; the order they appear in `providerState.canAccept()`
-   *  determines which one wins when multiple gates fail (cooldown
-   *  before breaker, breaker before capacity, capacity before RPM).
-   *  The "unregistered" status means the provider name has no entry
-   *  in `ProviderStateMap` at all -- a config drift where the set
-   *  references a provider the runtime never registered (e.g. a typo
-   *  in `providers.<name>` or a missing default). */
-  status: "available" | "cooldown" | "circuit-broken" | "at-capacity" | "rpm-exhausted" | "unregistered";
-  coolingUntil: number | null;
-  breakerUntil: number | null;
-  active: number;
-  /** Sub-queue depth for this provider (interactive + background). */
-  queued: number;
-  maxConcurrent: number;
-  rpmLimit: number | null;
-  /** ms epoch of the next admissible request under the RPM spacing gate,
-   *  or null when rpmLimit is unset. May be in the past. */
-  rpmReadyAt: number | null;
-}
+export type { ProviderRuntimeStats, RuntimeStats, FallbackSetHealth, FallbackSetEntryHealth } from "./runtime/types.js";
+import type { FallbackSetHealth, RuntimeStats } from "./runtime/types.js";
 
 /**
  * Holds the currently-active config-derived objects (providers, router,
@@ -116,7 +24,8 @@ export interface FallbackSetEntryHealth {
  * startup, so an admin-UI config change takes effect on the next request
  * instead of requiring a container restart. spendTracker is NOT rebuilt on
  * reload -- it's a long-lived ledger, not config-derived.
- */export class Runtime {
+ */
+export class Runtime {
   config!: GatewayConfig;
   /** Embedding target, now derived from the global embeddings agent
    *  (systemRole: "embeddings") rather than from a deprecated top-level
@@ -139,7 +48,8 @@ export interface FallbackSetEntryHealth {
    *  admin endpoint reads from it. Survives config reloads -- a
    *  reload that swaps the GlobalQueue preserves the log so the
    *  operator can see activity that spans the reload boundary. */
-  readonly activityLog = new ActivityLog();  /** Global queue replaces per-instance ThrottledProviders for
+  readonly activityLog = new ActivityLog();
+  /** Global queue replaces per-instance ThrottledProviders for
    *  centralized concurrency/RPM management. Created on reload,
    *  read directly by callers via the `globalQueue` accessor: the
    *  `/v1/messages` handler calls `queue.complete` with a chain it
@@ -336,117 +246,21 @@ export interface FallbackSetEntryHealth {
    *  for live state (active / queued-by-priority / cooldown / rpm). Used
    *  by the admin stats endpoint, the periodic stats logger, and the
    *  sustained-threshold alert monitor. Returns a fresh object on every
-   *  call — no caching — so callers always see live data. The
-   *  ProviderRouter overlay is gone: the queue's `markCooling` is the
-   *  only source of cooling windows now, and ProviderStateMap surfaces
-   *  them via snapshot(). Falls back to an empty stats object when
-   *  called before the first `reload()` completes. */
+   *  call — no caching — so callers always see live data. Falls back to
+   *  an empty stats object when called before the first `reload()`
+   *  completes. */
   stats(): RuntimeStats {
-    const providers: Record<string, ProviderRuntimeStats> = {};
-    for (const [name, s] of Object.entries(this.providerState.snapshot())) {
-      providers[name] = {
-        active: s.active,
-        queuedBackground: s.queuedBackground,
-        queuedInteractive: s.queuedInteractive,
-        maxConcurrent: s.maxConcurrent,
-        cooldownUntil: s.coolingUntil ?? undefined,
-      };
-    }
     return {
-      providers,
+      providers: computeProviderStats(this.providerState),
       fallbackSets: this.fallbackSetHealth(),
       timestamp: Date.now(),
     };
   }
 
-  /** Per-fallback-set health: for each set in config, walk the chain
-   *  in declared order, classify each entry against ProviderStateMap,
-   *  and pick the first available entry as the "live pick". A set
-   *  with zero live picks is `exhausted: true` -- the runtime would
-   *  queue any incoming request rather than dispatch it. The shape
-   *  is intended for the admin panel; consumers that need per-provider
-   *  numbers should read `providerState.snapshot()` directly.
-   *
-   *  Pure: reads `this.config.fallbackSets` and `this.providerState`,
-   *  no I/O. Returns a fresh object on every call. */
+  /** See runtime/stats.ts's `computeFallbackSetHealth` -- pure, reads
+   *  `this.config.fallbackSets` and `this.providerState`, no I/O. */
   fallbackSetHealth(): Record<string, FallbackSetHealth> {
-    const out: Record<string, FallbackSetHealth> = {};
-    const sets = this.config.fallbackSets ?? {};
-    const stateMap = this.providerState;
-    const now = Date.now();
-    for (const [name, set] of Object.entries(sets)) {
-      const entries: FallbackSetEntryHealth[] = [];
-      let livePick: FallbackSetHealth["livePick"] = null;
-      for (let i = 0; i < set.providers.length; i++) {
-        const entry = set.providers[i];
-        const state = stateMap.get(entry.provider);
-        let status: FallbackSetEntryHealth["status"];
-        let coolingUntil: number | null = null;
-        let breakerUntil: number | null = null;
-        let active = 0;
-        let queued = 0;
-        let maxConcurrent = 0;
-        let rpmLimit: number | null = null;
-        let rpmReadyAt: number | null = null;
-        if (!state) {
-          status = "unregistered";
-        } else {
-          // Snapshot to a local copy before reading so a concurrent
-          // acquire()/canAccept() call from GlobalQueue can't be observed
-          // mid-mutation -- state.active/nextRpmSlotAt are mutable, this
-          // is a point-in-time read only.
-          const snap = { ...state };
-          coolingUntil = snap.coolingUntil;
-          breakerUntil = snap.breakerUntil;
-          active = snap.active;
-          // Sum interactive + background so the UI's per-entry queue depth
-          // stays a single number it can render; the priority split is
-          // available at the top-level provider stats layer (where the
-          // alert rules read it), which is where the split is meaningful.
-          queued = snap.queuedInteractive + snap.queuedBackground;
-          maxConcurrent = snap.maxConcurrent;
-          rpmLimit = snap.rpmLimit;
-          rpmReadyAt = snap.rpmLimit !== null ? snap.nextRpmSlotAt : null;
-          // Classify in the same gate order canAccept uses. Cooldown
-          // wins first because a 429/503 is the most transient and the
-          // caller has the Retry-After to plan around; breaker second
-          // because it's a recovery-state signal; capacity third
-          // because that's the steady-state signal; RPM last because
-          // it's the most predictive (a slot due in a second or two
-          // shouldn't read as "exhausted" to the operator the same way
-          // a genuinely stuck provider does).
-          if (coolingUntil !== null && now < coolingUntil) status = "cooldown";
-          else if (breakerUntil !== null && now < breakerUntil) status = "circuit-broken";
-          else if (maxConcurrent > 0 && active >= maxConcurrent) status = "at-capacity";
-          else if (rpmReadyAt !== null && now < rpmReadyAt) status = "rpm-exhausted";
-          else status = "available";
-        }
-        entries.push({
-          provider: entry.provider,
-          model: entry.model,
-          status,
-          coolingUntil,
-          breakerUntil,
-          active,
-          queued,
-          maxConcurrent,
-          rpmLimit,
-          rpmReadyAt,
-        });
-        if (livePick === null && status === "available") {
-          livePick = { provider: entry.provider, model: entry.model, index: i };
-        }
-      }
-      out[name] = {
-        name,
-        description: set.description,
-        chainLength: set.providers.length,
-        entries,
-        livePick,
-        exhausted: livePick === null && set.providers.length > 0,
-      };
-    }
-    return out;
+    return computeFallbackSetHealth(this.config, this.providerState);
   }
 
   async reload(): Promise<void> {
@@ -483,7 +297,6 @@ export interface FallbackSetEntryHealth {
     // via `runtime.globalQueue.complete` directly) reads from it.
     // No intermediate wrapper sits between callers and the queue; the
     // queue is the dispatch surface.
-    const bareProviders: Record<string, Provider> = {};
     const stateMap = this.providerState;
 
     // Drop availability listeners from the previous load before
@@ -495,77 +308,7 @@ export interface FallbackSetEntryHealth {
     for (const off of this.availabilityUnsubs) off();
     this.availabilityUnsubs = [];
 
-    // Anthropic -- skipped entirely when disabled, not just gated at
-    // dispatch time. Leaving it out of bareProviders/stateMap means
-    // GlobalQueue's fallback loop (`if (!provider) continue`) and
-    // ProviderStateMap.canAccept's `if (!entry) return false` both
-    // already do the right thing with zero new logic: every fallback
-    // set that includes anthropic transparently falls through to its
-    // next entry, exactly as if it were permanently cooling.
-    if (config.anthropic?.enabled !== false) {
-      const anthropicInner = new AnthropicProvider({ apiKey: config.anthropic?.apiKey });
-      bareProviders.anthropic = anthropicInner;
-      // Anthropic parses its own reset headers from upstream
-      // (`anthropic-ratelimit-unified-5h-reset` etc.) — the provider's
-      // own cooldown handling is more precise than the global fallback
-      // would be. No `cooldownFallbackMs` override on AnthropicConfig,
-      // same as the legacy router's shape: Anthropic didn't get one.
-      stateMap.register("anthropic", {
-        maxConcurrent: config.anthropic?.maxConcurrent,
-        rpmLimit: config.anthropic?.rpmLimit,
-      });
-    }
-
-    // New providers shape
-    for (const [name, providerDef] of Object.entries(config.providers ?? {})) {
-      if (providerDef.enabled === false) continue;
-      const defaultModel = providerDef.models.find((m) => m.enabled) ?? providerDef.models[0];
-      if (!defaultModel) continue;
-      // Build per-model settings map so the provider can resolve
-      // maxOutputTokens (and any future per-model tuning fields) at
-      // dispatch time when modelOverride selects a non-default model.
-      const modelSettings: Record<string, { maxOutputTokens?: number; maxContextWindow?: number }> = {};
-      for (const m of providerDef.models) {
-        const entry: { maxOutputTokens?: number; maxContextWindow?: number } = {};
-        if (m.maxOutputTokens !== undefined) entry.maxOutputTokens = m.maxOutputTokens;
-        if (m.maxContextWindow !== undefined) entry.maxContextWindow = m.maxContextWindow;
-        if (Object.keys(entry).length > 0) modelSettings[m.name] = entry;
-      }
-      const instanceConfig = {
-        baseUrl: providerDef.baseUrl,
-        model: defaultModel.name,
-        apiKey: providerDef.apiKey,
-        pricing: defaultModel.pricing,
-        maxConcurrent: providerDef.maxConcurrent,
-        rpmLimit: providerDef.rpmLimit,
-        priority: providerDef.priority,
-        emitLateMetadataDelta: providerDef.emitLateMetadataDelta,
-        maxRequestBytes: providerDef.maxRequestBytes,
-        maxRequestBytesWarnRatio: providerDef.maxRequestBytesWarnRatio,
-        models: Object.keys(modelSettings).length > 0 ? modelSettings : undefined,
-      };
-      bareProviders[name] = new OpenAICompatibleProvider(name, instanceConfig);
-      stateMap.register(name, {
-        maxConcurrent: providerDef.maxConcurrent,
-        rpmLimit: providerDef.rpmLimit,
-        cooldownFallbackMs: providerDef.cooldownFallbackMs,
-      });
-    }
-
-    // Legacy openaiCompatibleInstances (backward compat). The legacy
-    // shape doesn't carry a `cooldownFallbackMs` field — operators on
-    // this path can migrate to the new `providers.<name>` shape if
-    // they need per-vendor cooldown defaults (e.g. setting Gemini
-    // Free to 5min or Ollama to 30s). Until then, the global 60s
-    // default kicks in.
-    for (const [name, instance] of Object.entries(config.openaiCompatibleInstances ?? {})) {
-      if (bareProviders[name]) continue;
-      bareProviders[name] = new OpenAICompatibleProvider(name, instance);
-      stateMap.register(name, {
-        maxConcurrent: instance.maxConcurrent,
-        rpmLimit: instance.rpmLimit,
-      });
-    }
+    const bareProviders = buildBareProviders(config, stateMap);
 
     // Wire the model registry's `markProviderAvailable` /
     // `markProviderUnavailable` to the ProviderStateMap's lifecycle
@@ -622,65 +365,6 @@ export interface FallbackSetEntryHealth {
    * repeatedly. */
   async refreshEmbedding(): Promise<void> {
     const agent = await getGlobalAgent("embeddings");
-    if (!agent) {
-      this.embedding = null;
-      return;
-    }
-    // Resolve the embeddings provider through the global agent's
-    // fallbackSet rather than reading a stale `agent.providerKey`. The
-    // agent-row field was dropped along with `AgentDef.providerKey` /
-    // `model` in the schema-cleanup commit; primaryPick is the single
-    // source of truth for "which provider does this agent currently
-    // dispatch to" across the runtime.
-    const pick = agentStore.primaryPick(agent, this.config);
-    if (!pick) {
-      console.warn(`embeddings global agent has no live primary pick (fallbackSet="${agent.fallbackSet ?? "<unset>"}"); embedding disabled until a fallback set is assigned`);
-      this.embedding = null;
-      return;
-    }
-    const providerDef = this.config.providers?.[pick.providerKey];
-    if (!providerDef) {
-      console.warn(`embeddings global agent references missing provider "${pick.providerKey}"; embedding disabled until a provider exists`);
-      this.embedding = null;
-      return;
-    }
-    // The full URL-resolution-rule chain lives in
-    // `src/providers/embedding-url.ts` so the admin probe endpoint and
-    // this runtime derive the same host for any given config. Three
-    // inputs in priority order:
-    //   1. `agent.embeddingBaseUrl` (set on the global agent) — explicit
-    //      per-agent override; wins outright.
-    //   2. `providerDef.embeddingUrl` (set on the named provider) —
-    //      provider-level override; useful when pointing the embeddings
-    //      agent at a provider whose chat baseUrl is on a non-default
-    //      port or protocol.
-    //   3. URL-shape heuristic — baseUrl with port 11430-11440 or
-    //      hostname containing "ollama" implies Ollama's native
-    //      /api/embeddings path on the bare origin (the chat path's
-    //      /v1 prefix is stripped for the embeddings target). Anything
-    //      else is OpenAI-compat and the consumer falls through to
-    //      whatever the named provider exposes.
-    const baseUrl = resolveEmbeddingHost({
-      agentOverride: agent.embeddingBaseUrl,
-      providerEmbeddingUrl: providerDef.embeddingUrl,
-      providerBaseUrl: providerDef.baseUrl,
-    });
-
-    // Determine the embeddings path and body format from the provider's
-    // URL shape. Ollama's native endpoint lives at `/api/embeddings` (the
-    // bare origin, no `/v1` prefix) and expects `{model, prompt}`.
-    // OpenAI-compat providers expose `/embeddings` (under their existing
-    // path prefix, e.g. `/v1/embeddings`) and expect `{model, input}`.
-    // The heuristic checks the agent override first (most specific), then
-    // the provider embedding URL override, then the provider base URL.
-    const isOllama = looksLikeOllamaEndpoint(
-      agent.embeddingBaseUrl ?? providerDef.embeddingUrl ?? providerDef.baseUrl,
-    );
-
-    this.embedding = {
-      baseUrl,
-      path: isOllama ? "/api/embeddings" : "/embeddings",
-      model: pick.model,
-    };
+    this.embedding = agent ? resolveEmbeddingTarget(agent, this.config) : null;
   }
 }
