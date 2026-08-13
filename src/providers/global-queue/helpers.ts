@@ -1,6 +1,10 @@
 // Small pure helpers used by GlobalQueue's dispatch/enqueue paths.
 import type { ProviderResponse } from "../types.js";
 
+/** Re-exported for backward compat -- the actual definition lives in
+ *  ../abort-utils.ts, shared with ThrottledProvider's identical need. */
+export { abortErrorFromSignal } from "../abort-utils.js";
+
 /** Read the first 200 chars of a response body for inclusion in the
  *  activity log's error message. Tees the stream so the original body
  *  remains available for the caller. Returns the default
@@ -28,13 +32,3 @@ export async function extractErrorMessage(response: ProviderResponse): Promise<s
   }
 }
 
-/** Mirrors the reason-extraction the queued-entry abort listener already
- *  does (see enqueue()'s onAbort) so a signal that's already aborted by
- *  the time we check it rejects with the same shape whether it's caught
- *  early (this) or aborts while genuinely waiting in the queue (onAbort). */
-export function abortErrorFromSignal(signal: AbortSignal): Error {
-  const reason = signal.reason;
-  if (reason instanceof Error) return reason;
-  if (typeof reason === "string") return new Error(reason);
-  return new Error("aborted");
-}

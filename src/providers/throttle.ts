@@ -32,9 +32,23 @@
 // Provider-awareness doesn't need special code here: each
 // ThrottledProvider instance has its own slot counter and its own
 // queues, so a saturated Ollama doesn't hold up a free Anthropic.
+//
+// Split like GlobalQueue (see global-queue.ts): the pure pieces --
+// types under ./throttle/types.ts, the combineSignals helper under
+// ./throttle/helpers.ts -- live in their own files, but the
+// ThrottledProvider class itself stays whole. Its methods
+// (acquireSlot/releaseSlot/pump/pickNext/runWithSlot) all read and
+// mutate the same in-flight/queue/token-bucket state in one
+// tightly-sequenced dispatch flow; splitting that further would just
+// move the coupling across file boundaries instead of reducing it.
 
 import type { Provider, CompleteOptions, ProviderResponse, Priority } from "./types.js";
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
+import { abortErrorFromSignal } from "./abort-utils.js";
+import { combineSignals } from "./throttle/helpers.js";
+import type { ThrottleStats, ThrottleOptions, PendingEntry } from "./throttle/types.js";
+
+export type { ThrottleStats, ThrottleOptions } from "./throttle/types.js";
 
 /** Default age at which a still-queued background request is treated as
  * equivalent to interactive for one slot. Five seconds is short enough
@@ -42,96 +56,6 @@ import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../type
  * traffic, and long enough that hobbyist chat bursts don't preempt
  * well-formed background work. Pass `priorityAgedMs: 0` to disable. */
 const DEFAULT_AGED_MS = 5_000;
-
-function isError(v: unknown): v is Error {
-  return typeof v === "object" && v !== null && v instanceof Error;
-}
-
-function combineSignals(primary: AbortSignal | undefined, fallback: AbortSignal): AbortSignal {
-  if (!primary) return fallback;
-  // If primary is already aborted, the combined signal should be too.
-  // AbortSignal listeners do NOT replay retroactively, so any listener
-  // we'd attach below would silently never fire -- the caller has to
-  // observe the signal as already aborted.
-  if (primary.aborted) {
-    return primary;
-  }
-  // Same retroactive-listener trap applies symmetrically to fallback:
-  // abortAll() can synchronously abort an internalController pushed
-  // for a queued entry BEFORE runWithSlotAsync resumes and reaches
-  // this function. Without the early-return, the listener we'd attach
-  // would silently never fire, leaving the inner Promise pending.
-  if (fallback.aborted) {
-    return fallback;
-  }
-  const controller = new AbortController();
-  const onAbort = (): void => controller.abort();
-  primary.addEventListener("abort", onAbort, { once: true });
-  fallback.addEventListener("abort", onAbort, { once: true });
-  controller.signal.addEventListener("abort", () => {
-    primary.removeEventListener("abort", onAbort);
-    fallback.removeEventListener("abort", onAbort);
-  }, { once: true });
-  return controller.signal;
-}
-
-/** Per-throttle load snapshot. Returned by `ThrottledProvider.stats()` and
- * folded into RuntimeStats by the runtime; the same shape gets logged
- * periodically and surfaced through the admin stats endpoint so all
- * monitoring surfaces (UI, log scraper, alert rule) consume one
- * canonical schema. */
-export interface ThrottleStats {
-  /** Provider name (matches the key in `openaiCompatibleInstances`, or
-   * "anthropic" for the wrapped Anthropic provider). */
-  name: string;
-  /** Currently in-flight requests. */
-  active: number;
-  /** Sub-queue depth for interactive requests. */
-  queuedInteractive: number;
-  /** Sub-queue depth for background requests. */
-  queuedBackground: number;
-  /** Sum of both buckets -- equivalent to the old `queued` getter. */
-  queuedTotal: number;
-  /** Configured slot cap. 0 means "not throttled" (no ThrottledProvider
-   * wrap), in which case `slotsUtilization` is also 0. */
-  maxConcurrent: number;
-  /** `active / maxConcurrent`, in [0, 1]. 0 when not throttled. */
-  slotsUtilization: number;
-  /** Requests-per-minute limit. null when no rate limit is configured. */
-  rpmLimit: number | null;
-  /** Current token-bucket level. Starts at `rpmLimit` and decrements on
-   * each admitted request, refilling continuously (at `rpmLimit/60` per
-   * second). Null when no rate limit is set. */
-  rateTokens: number | null;
-}
-
-export interface ThrottleOptions {
-  /** Max in-flight requests this provider will handle simultaneously.
-   * 1 forces strict serial (useful for single-shot local models). */
-  maxConcurrent: number;
-  /** Requests-per-minute cap. When set, the throttle admits at most this
-   * many requests per minute using a token-bucket algorithm, proactively
-   * queuing requests that would exceed the rate instead of only reacting
-   * to 429s. Set to 10 for Gemini Free. Unset means no rate limit. */
-  rpmLimit?: number;
-  /** Wall-clock ms after which a still-queued background request is
-   * promoted to "fairly-due" and jumps ahead of fresh interactive
-   * requests in the next pump() pass. Default 5000. Set to 0 to
-   * disable aging (strict, never-aging priority). */
-  priorityAgedMs?: number;
-}
-
-interface PendingEntry {
-  resolve: () => void;
-  reject: (err: Error) => void;
-  signal: AbortSignal | undefined;
-  onAbort: (() => void) | undefined;
-  aborted: boolean;
-  priority: Priority;
-  /** Wall-clock ms from `Date.now()` at queue-push time. Used by
-   * pump() to detect aged background entries. */
-  queuedAt: number;
-}
 
 export class ThrottledProvider implements Provider {
   readonly name: string;
@@ -191,10 +115,6 @@ export class ThrottledProvider implements Provider {
     return priority === "interactive" ? this.interactivePending.length : this.backgroundPending.length;
   }
 
-  /** Snapshot of this throttle's current load, in a shape the runtime
-   * stats surface (and any external monitoring) can consume without
-   * poking at internal getters one field at a time. Safe to call on
-   * any throttled provider; returns 0/empty values when idle. */
   /** Refill the token bucket based on elapsed time since last refill. */
   private refillTokens(): void {
     if (this.rpmLimit === null) return;
@@ -218,6 +138,10 @@ export class ThrottledProvider implements Provider {
     return true;
   }
 
+  /** Snapshot of this throttle's current load, in a shape the runtime
+   * stats surface (and any external monitoring) can consume without
+   * poking at internal getters one field at a time. Safe to call on
+   * any throttled provider; returns 0/empty values when idle. */
   stats(): ThrottleStats {
     const queuedInteractive = this.interactivePending.length;
     const queuedBackground = this.backgroundPending.length;
@@ -318,10 +242,7 @@ export class ThrottledProvider implements Provider {
         entry.aborted = true;
         const i = queue.indexOf(entry);
         if (i !== -1) queue.splice(i, 1);
-        const reason: unknown = signal.reason;
-        if (isError(reason)) reject(reason);
-        else if (typeof reason === "string") reject(new Error(reason));
-        else reject(new Error("aborted"));
+        reject(abortErrorFromSignal(signal));
       };
       entry.onAbort = onAbort;
       if (signal.aborted) onAbort();
