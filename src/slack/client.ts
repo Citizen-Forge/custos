@@ -1,9 +1,9 @@
 import type { SlackPersona } from "./personas.js";
 
-/** Thin wrapper over the two Slack Web API methods this integration needs.
- *  Plain `fetch()`, matching how the rest of the codebase talks to
+/** Thin wrapper over the handful of Slack Web API methods this integration
+ *  needs. Plain `fetch()`, matching how the rest of the codebase talks to
  *  upstream HTTP APIs (provider clients, GitHub via gh CLI) rather than
- *  pulling in @slack/web-api for two endpoints. */
+ *  pulling in @slack/web-api for a handful of endpoints. */
 
 const SLACK_API = "https://slack.com/api";
 
@@ -26,7 +26,7 @@ export interface SlackMessage {
  *  chat:write.customize scope; without it Slack silently ignores
  *  username/icon_emoji and posts under the app's own name instead of
  *  failing, so there's nothing here to detect that case specifically. */
-export async function postMessage(botToken: string, channel: string, text: string, persona: SlackPersona): Promise<{ ok: true; ts: string } | { ok: false; error: string }> {
+export async function postMessage(botToken: string, channel: string, text: string, persona: SlackPersona, threadTs?: string): Promise<{ ok: true; ts: string } | { ok: false; error: string }> {
   try {
     const res = await fetch(`${SLACK_API}/chat.postMessage`, {
       method: "POST",
@@ -39,6 +39,7 @@ export async function postMessage(botToken: string, channel: string, text: strin
         text,
         username: persona.username,
         icon_emoji: persona.iconEmoji,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
       }),
     });
     const body = (await res.json()) as { ok: true; ts: string } | SlackApiError;
@@ -97,4 +98,40 @@ export async function fetchUserName(botToken: string, userId: string): Promise<s
  *  never treated as a dropped idea. */
 export function isPlainHumanMessage(message: SlackMessage): boolean {
   return message.type === "message" && !message.subtype && !message.bot_id && Boolean(message.user);
+}
+
+/** The bot's own user id (the `U...`/`B...` Slack substitutes into
+ *  `<@ID>` when someone @-mentions it), resolved once per token via
+ *  auth.test and cached -- needs no extra scope beyond what every bot
+ *  token already has. Cached by token string, not just once globally, so
+ *  rotating the token in the admin panel picks up the new identity
+ *  instead of serving a stale one from before the rotation. */
+const botUserIdCache = new Map<string, string | null>();
+
+export async function resolveBotUserId(botToken: string): Promise<string | null> {
+  const cached = botUserIdCache.get(botToken);
+  if (cached !== undefined) return cached;
+  try {
+    const res = await fetch(`${SLACK_API}/auth.test`, { method: "POST", headers: { authorization: `Bearer ${botToken}` } });
+    const body = (await res.json()) as { ok: true; user_id: string } | SlackApiError;
+    const userId = body.ok ? body.user_id : null;
+    botUserIdCache.set(botToken, userId);
+    return userId;
+  } catch {
+    // Deliberately not cached -- a transient network error shouldn't
+    // stick a project with "mentions never work" until the next restart.
+    return null;
+  }
+}
+
+/** Slack renders an @-mention in message text as the literal substring
+ *  `<@U12345>` (or `<@U12345|displayname>` in some clients) -- this is a
+ *  plain string check, not markdown to parse. Returns the message with
+ *  the mention (and any leading/trailing whitespace it leaves behind)
+ *  stripped, so "<@U0BOT> what's in progress?" becomes "what's in
+ *  progress?" for whatever reads the question back out. */
+export function stripBotMention(text: string, botUserId: string): { mentioned: boolean; text: string } {
+  const pattern = new RegExp(`<@${botUserId}(\\|[^>]*)?>`, "g");
+  if (!pattern.test(text)) return { mentioned: false, text };
+  return { mentioned: true, text: text.replace(pattern, "").trim() };
 }

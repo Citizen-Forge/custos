@@ -2615,7 +2615,7 @@ function showKeyOnce(key) {
 function renderSlackPanel() {
   const section = el("section", { class: "panel" });
   section.appendChild(el("h2", { text: "Slack" }));
-  section.appendChild(el("p", { class: "desc", text: "One Slack app/bot token for the whole gateway. Agents post updates (ticket ready, blocked, merged, deployed) to each project's channel, and any plain message posted back in that channel becomes an inbox idea for the project. Requires the chat:write, chat:write.customize, channels:history (or groups:history for a private channel), and channels:read scopes on the bot token; users:read is optional and only improves idea attribution. Set each project's Slack channel from its own settings." }));
+  section.appendChild(el("p", { class: "desc", text: "One Slack app/bot token for the whole gateway. Agents post updates (ticket ready, blocked, merged, deployed) to each project's channel, and any plain message posted back in that channel becomes an inbox idea for the project -- @-mention the bot instead (\"@custos what's in progress?\") to get an immediate status reply in-thread rather than filing an idea. Requires the chat:write, chat:write.customize, channels:history (or groups:history for a private channel), and channels:read scopes on the bot token; users:read is optional and only improves idea attribution. Set each project's Slack channel from its own settings." }));
 
   const { slack } = state;
 

@@ -14,7 +14,9 @@ import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verif
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderWorkItem } from "./context.js";
 import { ensureModel, isAvailable, recordOutcome } from "./model-registry.js";
 import { hasGitCredentials, resolveAgentEnv } from "./vault.js";
-import { fetchNewMessages, fetchUserName, isPlainHumanMessage } from "../slack/client.js";
+import { fetchNewMessages, fetchUserName, isPlainHumanMessage, postMessage, resolveBotUserId, stripBotMention } from "../slack/client.js";
+import { buildStatusReply } from "../slack/status.js";
+import { DEFAULT_PERSONA } from "../slack/personas.js";
 import { ASSIGN_MODELS_SHAPE, DEVOPS_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
 import type { DevopsContract, FactWrite, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, DeployTarget, ProjectSettings, WorkItem } from "./types.js";
@@ -384,10 +386,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   /** Turns new messages in the project's configured Slack channel into
    *  inbox ideas -- the inbound half of the Slack integration (see
    *  slack/activity.ts for the outbound half). Every plain human message
-   *  becomes one idea; the channel itself is the idea inbox, no special
-   *  syntax or slash command required. Guarded like every other dispatch
-   *  so an overlapping tick can't double-poll, though a single HTTP call
-   *  finishing well within one tick makes that vanishingly unlikely. */
+   *  becomes one idea, EXCEPT a message that @-mentions the bot: that
+   *  gets an immediate deterministic status reply in-thread instead (see
+   *  slack/status.ts) -- "@custos what's in progress?" answers from board
+   *  state directly rather than becoming something for the product owner
+   *  to plan. No special syntax otherwise; the channel itself is the idea
+   *  inbox. Guarded like every other dispatch so an overlapping tick
+   *  can't double-poll, though a single HTTP call finishing well within
+   *  one tick makes that vanishingly unlikely. */
   async pollSlackIdeas(projectId: string): Promise<void> {
     await this.guard(`slack-poll:${projectId}`, projectId, async () => {
       const slack = this.runtime.config.slack;
@@ -410,17 +416,37 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
       if (!result.messages.length) return;
 
+      const botUserId = await resolveBotUserId(slack.botToken);
+      let ideaCreated = false;
       let maxTs = settings.slackLastSeenTs;
       for (const message of result.messages) {
         if (Number(message.ts) > Number(maxTs)) maxTs = message.ts;
         if (!isPlainHumanMessage(message)) continue;
+
+        // "@bot what's in progress?" gets an immediate, deterministic
+        // status reply in-thread instead of becoming an idea to plan --
+        // see slack/status.ts's doc comment for why this stays a board
+        // query rather than a real agent dispatch. Anything that doesn't
+        // @-mention the bot is a dropped idea, same as before.
+        const mention = botUserId ? stripBotMention(message.text, botUserId) : { mentioned: false, text: message.text };
+        if (mention.mentioned) {
+          const project = await getProject(projectId);
+          if (project) {
+            const reply = await buildStatusReply(projectId, project.name);
+            const posted = await postMessage(slack.botToken, settings.slackChannelId, reply, DEFAULT_PERSONA, message.ts);
+            if (!posted.ok) console.error(`[slack] failed to post status reply for project ${projectId}: ${posted.error}`);
+          }
+          continue;
+        }
+
         const author = message.user ? await fetchUserName(slack.botToken, message.user) : null;
         const title = message.text.trim().slice(0, 80) || "Idea from Slack";
         const brief = `${message.text.trim()}\n\n_Posted in Slack${author ? ` by ${author}` : ""}._`;
         await ideas.createIdea(projectId, title, brief, null);
+        ideaCreated = true;
       }
       await updateSettings(projectId, { slackLastSeenTs: maxTs });
-      this.emit("change", projectId);
+      if (ideaCreated) this.emit("change", projectId);
     });
   }
 
