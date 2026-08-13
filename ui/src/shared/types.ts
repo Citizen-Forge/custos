@@ -353,21 +353,3 @@ export type PmEvent =
   | { type: "pm_change"; projectId: string }
   | { type: "pm_activity"; projectId: string; message: string; at: number };
 
-/** How a provider/model combination is paid for — the axis that decides
- * what "unavailable" means and what running out looks like. */
-export type Billing = "subscription" | "metered" | "free";
-
-/** What Custos has learned about a provider/model combination: how capable
- * it has proved, and whether it can be used right now. */
-export interface ModelRecord {
-  id: string;
-  providerKey: string;
-  model: string;
-  billing: Billing;
-  capability: number;
-  completed: number;
-  qaFailures: number;
-  unavailableUntil: number | null;
-  unavailableReason: string | null;
-  updatedAt: number;
-}

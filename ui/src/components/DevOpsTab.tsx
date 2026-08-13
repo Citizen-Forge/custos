@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { CustosProject, DeployTarget, ModelRecord, ProjectSettings } from '@shared/types'
-import { useCall, relativeTime } from '../api'
+import type { CustosProject, DeployTarget, ProjectSettings } from '@shared/types'
+import { useCall } from '../api'
 import SecretsPanel from './SecretsPanel'
 import KnowledgePanel from './KnowledgePanel'
 
@@ -38,22 +38,17 @@ export default function DevOpsTab({
   const [settings, setSettings] = useState<ProjectSettings | null>(null)
   const [spentUsd, setSpentUsd] = useState(0)
   const [subscriptionUsd, setSubscriptionUsd] = useState(0)
-  const [models, setModels] = useState<ModelRecord[]>([])
 
   const refresh = useCallback(async () => {
-    const [settingsRes, modelsRes] = await Promise.all([
-      call<{ settings: ProjectSettings; spentUsd: number; subscriptionUsd: number }>(
-        'GET',
-        `/admin/api/projects/${project.id}/settings`
-      ),
-      call<{ models: ModelRecord[] }>('GET', '/admin/api/models')
-    ])
+    const settingsRes = await call<{ settings: ProjectSettings; spentUsd: number; subscriptionUsd: number }>(
+      'GET',
+      `/admin/api/projects/${project.id}/settings`
+    )
     if (settingsRes) {
       setSettings(settingsRes.settings)
       setSpentUsd(settingsRes.spentUsd)
       setSubscriptionUsd(settingsRes.subscriptionUsd)
     }
-    if (modelsRes) setModels(modelsRes.models)
   }, [call, project.id])
 
   useEffect(() => {
@@ -200,41 +195,6 @@ export default function DevOpsTab({
       <KnowledgePanel project={project} settings={settings} revision={revision} onChanged={onChanged} />
 
       <SecretsPanel project={project} revision={revision} />
-
-      <section className="panel">
-        <h2>Providers &amp; models</h2>
-        <p className="hint">
-          Capability is measured, not assumed: it starts from the model&rsquo;s tier and then moves with QA&rsquo;s verdicts on the work
-          that model produced. The engineering manager reads this when deciding who gets which ticket, and routes around anything
-          exhausted rather than stalling the board.
-        </p>
-        {models.map((record) => {
-          const exhausted = record.unavailableUntil !== null && record.unavailableUntil > Date.now()
-          return (
-            <div className={`model-row${exhausted ? ' exhausted' : ''}`} key={record.id}>
-              <span className="model-name">
-                {record.providerKey} / {record.model}
-              </span>
-              <span className="badge">{record.billing}</span>
-              <div className="capability-bar" title={`capability ${record.capability.toFixed(2)} of 5`}>
-                <div className="capability-fill" style={{ width: `${(record.capability / 5) * 100}%` }} />
-              </div>
-              <span className="muted">{record.capability.toFixed(1)}</span>
-              <span className="muted">
-                {record.completed}✓ / {record.qaFailures}✗
-              </span>
-              {exhausted ? (
-                <span className="badge warn" title={record.unavailableReason ?? ''}>
-                  exhausted · back {relativeTime(record.unavailableUntil!)}
-                </span>
-              ) : (
-                <span className="badge succeeded">available</span>
-              )}
-            </div>
-          )
-        })}
-      </section>
-
     </div>
   )
 }
