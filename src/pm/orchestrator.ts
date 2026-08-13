@@ -565,7 +565,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         if (actions.length) this.emit("activity", projectId, `Product owner: ${actions.join("; ")}.`);
       }
       if (!result.ok) {
-        this.emit("activity", projectId, `Product owner grooming failed: ${result.error ?? "unknown error"}`);
+        // No provider available isn't worth an activity line (or Slack
+        // post, now that every activity line posts there) -- nothing was
+        // attempted, and the next tick retries for free. See
+        // handleDispatchFailure's doc comment for the full reasoning.
+        if (!result.unavailable) this.emit("activity", projectId, `Product owner grooming failed: ${result.error ?? "unknown error"}`);
       } else {
         // Fingerprint the POST-pass state, not what was fed in -- whatever
         // the pass itself changed (a promote, a revision) is already
@@ -617,7 +621,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         if (actions.length) this.emit("activity", projectId, `Product owner (facts review): ${actions.join("; ")}.`);
       }
       if (!result.ok) {
-        this.emit("activity", projectId, `Facts curation pass failed: ${result.error ?? "unknown error"}`);
+        if (!result.unavailable) this.emit("activity", projectId, `Facts curation pass failed: ${result.error ?? "unknown error"}`);
       } else {
         const freshPending = await listPendingFacts(projectId);
         await updateSettings(projectId, { lastCurateSignal: workItemsSignal(freshPending) });
@@ -693,7 +697,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         if (actions.length) this.emit("activity", projectId, `Engineering manager: ${actions.join("; ")}.`);
       }
       if (!result.ok) {
-        this.emit("activity", projectId, `Engineering manager assignment pass failed: ${result.error ?? "unknown error"}`);
+        if (!result.unavailable) this.emit("activity", projectId, `Engineering manager assignment pass failed: ${result.error ?? "unknown error"}`);
       } else {
         const freshAll = await board.listWorkItems(projectId);
         const freshReady = freshAll.filter((item) => item.type !== "epic" && item.status === "ready");
@@ -701,6 +705,27 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         await updateSettings(projectId, { lastAssignSignal: `${workItemsSignal(freshReady)}|inFlight=${freshInFlight}` });
       }
     });
+  }
+
+  /** The shared "a per-ticket dispatch failed" bookkeeping for
+   *  engineer/QA/devops/provisionRepo -- EXCEPT when the failure was
+   *  agent-runner.ts's AgentRunResult.unavailable (no provider in the
+   *  fallback chain was dispatchable, or the pre-spawn probe couldn't
+   *  reach one): that's not a fault of this ticket, nothing was actually
+   *  attempted, and every provider already has its own cooldown/circuit-
+   *  breaker. Piling board.recordAttemptFailure's separate, coarser
+   *  ticket-level backoff on top of that -- growing to a full hour at
+   *  RETRY_DELAYS_MS's ceiling -- meant three engineers sharing one
+   *  maxConcurrent:1 local slot could each serve up to an hour's penalty
+   *  for what amounts to "someone else had the slot for a few seconds".
+   *  Returns null when the caller should just return without touching
+   *  attempts/backoff/activity at all (the next ~20s tick retries for
+   *  free); otherwise the fresh attempt count for the caller's own
+   *  activity message. */
+  private async handleDispatchFailure(workItemId: string, unavailable: boolean | undefined): Promise<number | null> {
+    if (unavailable) return null;
+    const backedOff = await board.recordAttemptFailure(workItemId);
+    return backedOff?.attempts ?? 1;
   }
 
   // ------------------------------------------------------------------ engineer
@@ -807,11 +832,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         // possible even with the tool call replacing the old JSON block --
         // see mcp/pm-tools.ts's EngineerSession doc comment) is treated the
         // same as any other failure: no result means nothing to act on.
-        const backedOff = await board.recordAttemptFailure(workItemId);
+        const attempt = await this.handleDispatchFailure(workItemId, result.unavailable);
+        if (attempt === null) return;
         this.emit(
           "activity",
           projectId,
-          `${agent.name} failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${result.ok ? "did not report a result via report_ready_for_qa or report_blocked" : (result.error ?? "unknown error")}; will retry.`,
+          `${agent.name} failed on "${item.title}" (attempt ${attempt}): ${result.ok ? "did not report a result via report_ready_for_qa or report_blocked" : (result.error ?? "unknown error")}; will retry.`,
         );
         return;
       }
@@ -949,6 +975,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         // OS's ARG_MAX (EBIG) on every subsequent attempt -- a ticket that
         // could never recover once poisoned. The live activity feed still
         // surfaces the failure without persisting it into ticket history.
+        // No provider being available (result.unavailable) isn't worth an
+        // activity line at all -- nothing was attempted, the next ~20s
+        // tick retries for free, and with Slack now posting every
+        // activity line (see slack/activity.ts), routine concurrency
+        // contention would otherwise spam the channel on every tick.
+        if (result.unavailable) return;
         this.emit("activity", projectId, `${ctx.agent.name} QA run failed on "${item.title}": ${result.error ?? "unknown error"}`);
         return;
       }
@@ -1107,7 +1139,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       await this.applyFacts(projectId, ctx.agent, result.parsed);
 
       if (!result.ok) {
-        this.emit("activity", projectId, `Codebase survey failed: ${result.error ?? "unknown error"}`);
+        if (!result.unavailable) this.emit("activity", projectId, `Codebase survey failed: ${result.error ?? "unknown error"}`);
         return;
       }
       if (result.parsed?.summary) {
@@ -1181,7 +1213,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       await this.applyFacts(projectId, ctx.agent, result.parsed);
 
       if (!result.ok || !result.parsed?.assignments?.length) {
-        this.emit("activity", projectId, `Project Manager failed: ${result.error ?? "no assignments returned"}`);
+        if (!result.unavailable) this.emit("activity", projectId, `Project Manager failed: ${result.error ?? "no assignments returned"}`);
         // Don't set pmConfigured so it retries on the next tick.
         return;
       }
@@ -1266,6 +1298,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       await this.applyFacts(projectId, ctx.agent, result.parsed);
 
       if (!result.ok || result.parsed?.status !== "provisioned" || !result.parsed.repoUrl) {
+        // No provider available isn't worth an activity line -- nothing
+        // was attempted, and the next tick retries for free (see
+        // handleDispatchFailure's doc comment for the full reasoning).
+        if (result.unavailable) return;
         this.emit("activity", projectId, `Repository provisioning failed: ${result.parsed?.blockedReason ?? result.error ?? "no repository URL returned"}`);
         return;
       }
@@ -1396,8 +1432,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (!result.ok || !result.parsed) {
         // Not persisted as a board comment -- see the identical note on
         // the QA path above.
-        const backedOff = await board.recordAttemptFailure(workItemId);
-        this.emit("activity", projectId, `${ctx.agent.name} deployment run failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${result.error ?? "unknown error"}; will retry.`);
+        const attempt = await this.handleDispatchFailure(workItemId, result.unavailable);
+        if (attempt === null) return;
+        this.emit("activity", projectId, `${ctx.agent.name} deployment run failed on "${item.title}" (attempt ${attempt}): ${result.error ?? "unknown error"}; will retry.`);
         return;
       }
 

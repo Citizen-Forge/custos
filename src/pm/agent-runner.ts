@@ -20,6 +20,18 @@ export interface AgentRunResult<T> {
   error: string | null;
   costUsd: number | null;
   runMs: number;
+  /** True only for the two pre-spawn "nothing was even dispatched"
+   *  failures below (resolveFallbackSet found the whole chain
+   *  unavailable, or the pre-spawn probe couldn't reach the resolved
+   *  provider) -- never set for a run that actually reached a provider
+   *  and got back a bad result. The orchestrator uses this to skip
+   *  per-ticket attempt backoff for these: no dispatch was attempted, no
+   *  money spent, and every provider already has its own cooldown --
+   *  piling a separate, coarser ticket-level backoff on top of ordinary
+   *  concurrency contention (three engineers sharing one maxConcurrent:1
+   *  local slot) meant a ticket could serve up to a full hour's penalty
+   *  for what amounts to "someone else had the slot for a few seconds". */
+  unavailable?: boolean;
 }
 
 export interface RunAgentOptions {
@@ -300,19 +312,20 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       error: `no provider in ${agent.fallbackSet ?? "(no fallback set)"}'s chain is currently available (disabled, cooling, or at capacity) -- will retry`,
       costUsd: null,
       runMs: 0,
+      unavailable: true,
     };
   }
   // Pre-spawn probe: a 1-token ping to the resolved provider+model.
   // Sits between resolveFallbackSet (which acquired the concurrency
   // slot) and runs.startRun (which would create a run artefact) so a
   // failed probe leaves no run record but propagates back through
-  // AgentRunResult.error -- the orchestrator's existing failure path
-  // (board.addComment + board.recordAttemptFailure) surfaces the reason
-  // to the activity feed and bumps the workItem's attempt-failure
-  // counter for the standard back-off. Probe failures bypass the
-  // GlobalQueue entirely so the pre-acquired slot isn't double-counted
-  // toward maxConcurrent and the activity log isn't polluted by a
-  // mark-cooling cascade for what is really a "don't even try" signal.
+  // AgentRunResult.error (and .unavailable=true) -- the orchestrator's
+  // existing failure path surfaces the reason to the activity feed
+  // without applying per-ticket attempt backoff, since nothing was ever
+  // actually dispatched. Probe failures bypass the GlobalQueue entirely
+  // so the pre-acquired slot isn't double-counted toward maxConcurrent
+  // and the activity log isn't polluted by a mark-cooling cascade for
+  // what is really a "don't even try" signal.
   try {
     await runPreSpawnProbe(runtime, effectiveProviderKey, effectiveModel);
   } catch (err) {
@@ -324,6 +337,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
         parsed: null,
         text: "",
         error: err.message,
+        unavailable: true,
         costUsd: null,
         runMs: 0,
       };
