@@ -1,4 +1,3 @@
-import type { ProviderOption } from "./agents.js";
 import type { AgentDef, Idea, ProjectSettings, WorkItem } from "./types.js";
 import type { GatewayConfig } from "../config.js";
 
@@ -166,19 +165,6 @@ export function renderFallbackSetMenu(sets: Record<string, { name: string; descr
   return lines.join("\n");
 }
 
-export function renderProviderMenu(options: ProviderOption[]): string {
-  return options
-    .map((option) => {
-      const cost = option.free
-        ? "**free** — does not draw down the project budget"
-        : option.inputPerMTok !== null
-          ? `$${option.inputPerMTok}/M input, $${option.outputPerMTok}/M output`
-          : "metered, price not configured";
-      const cap = option.budgetUsd !== null ? ` · hard cap $${option.budgetUsd}` : "";
-      return `- providerKey \`${option.providerKey}\`, model \`${option.model}\` — ${cost}${cap}`;
-    })
-    .join("\n");
-}
 
 /** Tells an agent what credentials it actually has, by name only. Agents
  * otherwise either assume they can push and fail confusingly at the end of

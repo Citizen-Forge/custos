@@ -258,9 +258,3 @@ export async function listBoard(projectId: string): Promise<Record<BoardStatus, 
   return board;
 }
 
-/** First item matching a status, in priority order -- how the orchestrator
- * pulls the next piece of work for a role without scanning the whole board. */
-export async function nextInStatus(projectId: string, status: BoardStatus, type?: WorkItemType): Promise<WorkItem | null> {
-  const all = await listWorkItems(projectId);
-  return all.find((item) => item.status === status && (!type || item.type === type)) ?? null;
-}

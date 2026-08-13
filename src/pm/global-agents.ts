@@ -78,10 +78,3 @@ export async function listGlobalAgents(): Promise<AgentDef[]> {
   return agents.find((row) => row.kind === "global");
 }
 
-/** Constants for splatting into the admin UI's preset dropdown. */
-export const GLOBAL_AGENT_PRESETS = BUILTIN_GLOBAL_AGENTS.map((spec) => ({
-  systemRole: spec.systemRole,
-  name: spec.name,
-  fallbackSet: spec.fallbackSet,
-  specialty: spec.specialty,
-}));

@@ -6,9 +6,8 @@ import * as ideas from "./ideas.js";
 import * as runs from "./runs.js";
 import { getSettings, updateSettings } from "./project-settings.js";
 import { listPendingFacts } from "./facts.js";
-import type { AgentDef, ProjectSettings, WorkItem } from "./types.js";
+import type { AgentDef, ProjectSettings } from "./types.js";
 import { HUMAN_ASSIGNEE_ID } from "./types.js";
-import { renderWorkItem } from "./context.js";
 import { engineerLimit, workItemsSignal } from "./orchestrator/shared.js";
 import { groomBacklog, curateFacts, planIdea } from "./orchestrator/product-owner.js";
 import { pollSlackIdeas } from "./orchestrator/slack-inbox.js";
@@ -382,10 +381,4 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   async runDevops(projectId: string, workItemId: string): Promise<void> {
     return runDevops(this, projectId, workItemId);
   }
-}
-
-/** Convenience for routes that need to describe a ticket the same way the
- * orchestrator does, without importing the whole context module. */
-export function describeWorkItem(item: WorkItem): string {
-  return renderWorkItem(item, { includeComments: true, includeHistory: true });
 }

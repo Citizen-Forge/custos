@@ -84,33 +84,6 @@ export function isAvailable(record: ModelRecord): boolean {
 }
 
 /**
- * Marks a combination as unusable for a while. Called when a provider tells
- * us so — a 429, an exhausted subscription window — rather than guessed,
- * which is why the reset time comes from the provider's own headers where
- * it gives one.
- */
-export async function markUnavailable(providerKey: string, model: string, forMs: number, reason: string): Promise<void> {
-  const id = modelId(providerKey, model);
-  await models.update(id, (record) => {
-    record.unavailableUntil = Date.now() + forMs;
-    record.unavailableReason = reason;
-    record.updatedAt = Date.now();
-  });
-}
-
-/** Clears a cooldown early -- used when a request against it succeeds, since
- * that's proof the window reopened sooner than advertised. */
-export async function markAvailable(providerKey: string, model: string): Promise<void> {
-  const id = modelId(providerKey, model);
-  await models.update(id, (record) => {
-    if (record.unavailableUntil === null) return;
-    record.unavailableUntil = null;
-    record.unavailableReason = null;
-    record.updatedAt = Date.now();
-  });
-}
-
-/**
  * Provider-level availability. A rate limit or an exhausted subscription
  * window is a property of the account, not of one model name -- Anthropic's
  * 5-hour limit is unified across models -- so it applies to every record
