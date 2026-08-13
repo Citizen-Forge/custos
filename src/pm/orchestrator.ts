@@ -652,12 +652,24 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (workspace.isolated) {
         if (!(await hasGitCredentials(projectId))) {
           const backedOff = await board.recordAttemptFailure(workItemId);
-          this.emit("activity", projectId, `Held "${item.title}": no project secret is marked for Git use (attempt ${backedOff?.attempts ?? 1}).`);
+          const reason = "no project secret is marked for Git use";
+          // A synthetic run row -- no provider was ever contacted -- so this
+          // failure shows up in the runs list with a persisted reason
+          // instead of only a transient WebSocket activity ping. Observed
+          // live: a project's GitHub PAT silently going bad meant every
+          // attempt was held right here, before ever reaching runAgent, for
+          // over a day -- attempts climbed into the 30s with nothing to show
+          // for it in the run history, because nothing was ever recorded.
+          const failedRun = await runs.startRun({ projectId, agentId: agent.id, role: "engineer", providerKey: "none", model: "none", billed: false, workItemId, tag: "custos-engineer" });
+          await runs.finishRun(failedRun.id, { status: "failed", error: reason });
+          this.emit("activity", projectId, `Held "${item.title}": ${reason} (attempt ${backedOff?.attempts ?? 1}).`);
           return;
         }
         const access = await verifyGitHubAccess(workspace.cwd, gitEnv!);
         if (!access.ok) {
           const backedOff = await board.recordAttemptFailure(workItemId);
+          const failedRun = await runs.startRun({ projectId, agentId: agent.id, role: "engineer", providerKey: "none", model: "none", billed: false, workItemId, tag: "custos-engineer" });
+          await runs.finishRun(failedRun.id, { status: "failed", error: `project GitHub credentials are unusable: ${access.reason}` });
           this.emit("activity", projectId, `Held "${item.title}": project GitHub credentials are unusable (attempt ${backedOff?.attempts ?? 1}): ${access.reason}`);
           return;
         }
