@@ -1,255 +1,30 @@
+// Runs one autonomous agent to completion. The surrounding concerns --
+// contract extraction, system-prompt assembly, tool policy, and the
+// AgentRunResult/RunAgentOptions types -- live under ./agent-runner/, split
+// out because they're independently pure/self-contained; this file keeps
+// only the `runAgent` dispatch flow itself, which is one tightly-sequenced
+// operation (resolve fallback -> pre-spawn probe -> dispatch -> collect
+// events -> finalize the run) that doesn't split cleanly without just
+// moving its own internal coupling across file boundaries.
 import type { Runtime } from "../runtime.js";
 import { runTurn, type TurnEvent } from "../remote/turn-runner.js";
 import { getProject } from "../remote/projects.js";
-import { formatModelAlias, formatFallbackAlias } from "../providers/model-alias.js";
-import { ROLE_PROMPTS } from "./prompts.js";
+import { formatFallbackAlias } from "../providers/model-alias.js";
 import { resolveAgentEnv, redactSecrets } from "./vault.js";
 import * as runs from "./runs.js";
 import * as agents from "./agents.js";
-import { RUN_TIMEOUT_MS, type AgentDef } from "./types.js";
+import { RUN_TIMEOUT_MS } from "./types.js";
 import { ProbeUnavailableError, runPreSpawnProbe } from "./probe.js";
+import { extractContract } from "./agent-runner/contract.js";
+import { buildSystemPrompt } from "./agent-runner/system-prompt.js";
+import { DISALLOWED_TOOLS_BY_TAG, TOOL_FREE_TAGS } from "./agent-runner/tool-policy.js";
+import { describeEvent } from "./agent-runner/describe-event.js";
+import type { AgentRunResult, RunAgentOptions } from "./agent-runner/types.js";
 
-export interface AgentRunResult<T> {
-  runId: string;
-  ok: boolean;
-  /** The parsed contract block, or null when the agent never emitted a
-   * well-formed one -- which the orchestrator treats as a failed run
-   * regardless of what the agent said in prose. */
-  parsed: T | null;
-  text: string;
-  error: string | null;
-  costUsd: number | null;
-  runMs: number;
-  /** True only for the two pre-spawn "nothing was even dispatched"
-   *  failures below (resolveFallbackSet found the whole chain
-   *  unavailable, or the pre-spawn probe couldn't reach the resolved
-   *  provider) -- never set for a run that actually reached a provider
-   *  and got back a bad result. The orchestrator uses this to skip
-   *  per-ticket attempt backoff for these: no dispatch was attempted, no
-   *  money spent, and every provider already has its own cooldown --
-   *  piling a separate, coarser ticket-level backoff on top of ordinary
-   *  concurrency contention (three engineers sharing one maxConcurrent:1
-   *  local slot) meant a ticket could serve up to a full hour's penalty
-   *  for what amounts to "someone else had the slot for a few seconds". */
-  unavailable?: boolean;
-}
-
-export interface RunAgentOptions {
-  agent: AgentDef;
-  projectId: string;
-  cwd: string;
-  /** The task prompt for this specific run -- the ticket, the brief, the
-   * board state. The role persona comes from the agent, not from here. */
-  prompt: string;
-  /** Fence tag the contract block is expected under (e.g. "custos-plan"). */
-  tag: string;
-  /** Appended after the role prompt and before the output contract, for
-   * per-run instructions that aren't part of the persona. */
-  extraSystemPrompt?: string;
-  /** Omit for a tool-driven run (see toolDriven below) -- there's nothing
-   * to report a result *as*, the tool calls already are the result. */
-  outputContract?: string;
-  /** True when this run's task prompt tells the model to act via MCP tools
-   * (see mcpConfig) rather than emit one JSON block at the end. Changes
-   * three things: the system prompt drops the output-contract framing
-   * entirely (see buildSystemPrompt), the trailing "remember to end with
-   * a fenced block" reminder is skipped, and success is judged by whether
-   * the turn completed cleanly rather than by whether a parseable block
-   * showed up in the transcript -- state changes already landed as each
-   * tool call happened, so `parsed` is always null here; there's nothing
-   * left to extract. */
-  toolDriven?: boolean;
-  /** Inline `--mcp-config` JSON string for this run's spawned turn -- see
-   * mcp/pm-tools.ts's buildPmMcpConfig for the toolDriven case, or
-   * mcp/server.ts's buildPortfolioMcpConfig for the sibling pattern used
-   * by portfolio chat. */
-  mcpConfig?: string;
-  workItemId?: string | null;
-  ideaId?: string | null;
-  onEvent?: (event: TurnEvent) => void;
-  /** One-line "what it's doing now", for the live activity view. */
-  onProgress?: (action: string) => void;
-  signal?: AbortSignal;
-}
-
-/** A short human-readable line for what just happened, used both as the
- * run's `currentAction` and as the live feed's event text. Returns null for
- * events not worth showing (token deltas). */
-function describeEvent(event: TurnEvent): string | null {
-  if (event.type === "message_final") {
-    const tool = event.content.find((block) => block.type === "tool_use");
-    if (tool && tool.type === "tool_use") {
-      const input = tool.input as Record<string, unknown> | undefined;
-      const primary = input?.command ?? input?.file_path ?? input?.path ?? input?.pattern ?? input?.url;
-      return typeof primary === "string" ? `${tool.name}: ${primary}` : tool.name;
-    }
-    const text = event.content.find((block) => block.type === "text");
-    return text && text.type === "text" && text.text.trim() ? text.text.trim().split("\n")[0].slice(0, 160) : null;
-  }
-  if (event.type === "tool_result" && event.isError) return "a tool call failed";
-  if (event.type === "error") return `error: ${event.message.slice(0, 160)}`;
-  return null;
-}
-
-/**
- * Extracts the agent's contract block. Prefers the requested tag, then a
- * generic json fence, then a bare brace-balanced object -- models are
- * reliable about emitting the JSON and much less reliable about labelling
- * the fence, and a run that did all the work is too expensive to throw away
- * over a missing tag. Takes the *last* match: an agent that reasons out
- * loud often shows a draft of the block before its real one.
- */
-export function extractContract<T>(text: string, tag: string): T | null {
-  const candidates: string[] = [];
-  const fenced = new RegExp("```(?:" + tag + "|json)?[ \\t]*\\r?\\n([\\s\\S]*?)```", "g");
-  for (const match of text.matchAll(fenced)) candidates.push(match[1]);
-
-  for (const candidate of candidates.reverse()) {
-    try {
-      return JSON.parse(candidate.trim()) as T;
-    } catch {
-      // Try the next-most-recent fence.
-    }
-  }
-
-  // Fence matching fails whenever the JSON itself contains a fence -- an
-  // engineer's `summary` routinely includes a markdown code block, which
-  // terminates the non-greedy match early and leaves invalid JSON. Falling
-  // back to brace scanning recovers those, and it matters: this runs after
-  // the work is already done, so a parse failure here throws away an entire
-  // ticket's worth of time and money over punctuation.
-  for (const candidate of balancedObjects(text).reverse()) {
-    try {
-      return JSON.parse(candidate) as T;
-    } catch {
-      // Not this one.
-    }
-  }
-  return null;
-}
-
-/**
- * Every balanced `{...}` region in the text, in order of appearance, with
- * string literals and escapes respected so a brace inside a quoted value
- * doesn't throw the depth count off.
- */
-function balancedObjects(text: string): string[] {
-  const found: string[] = [];
-  let depth = 0;
-  let start = -1;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') inString = false;
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-    } else if (char === "{") {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (char === "}") {
-      depth--;
-      if (depth === 0 && start !== -1) {
-        found.push(text.slice(start, i + 1));
-        start = -1;
-      } else if (depth < 0) {
-        depth = 0;
-        start = -1;
-      }
-    }
-  }
-  return found;
-}
-
-/** The full persona for a run: the role's base contract, then the agent's
- * own prompt, then every tuning note the engineering manager has appended,
- * then the output contract. Order matters -- the base prompt is what the
- * orchestrator relies on, so it can't be displaced by later additions. */
-export function buildSystemPrompt(agent: AgentDef, extra: string | undefined, contract?: string): string {
-  const parts = [ROLE_PROMPTS[agent.role]];
-  if (agent.specialty) parts.push(`## Your specialty\n\n${agent.specialty}`);
-  if (agent.systemPrompt.trim()) parts.push(agent.systemPrompt.trim());
-  if (agent.notes.length) parts.push(`## Standing instructions from your engineering manager\n\n${agent.notes.map((n) => `- ${n}`).join("\n")}`);
-  if (extra?.trim()) parts.push(extra.trim());
-  // Omitted entirely for tool-driven runs (see RunAgentOptions.toolDriven)
-  // -- there's no closing JSON block to remind the model about, and the
-  // "report your result" framing would be actively misleading alongside
-  // tools that already apply each decision as it's made.
-  if (contract) parts.push(contract);
-  return parts.join("\n\n");
-}
-
-/** Every built-in Claude Code tool -- used to give a purely-judgment task
- *  literally none of them. A decision made entirely from content already
- *  in its prompt has no legitimate reason to touch the filesystem, run a
- *  command, or fetch a URL. Observed live: with full tool access and
- *  `cwd` pointed at the real project checkout, both the engineering
- *  manager's assignReady and the product owner's groomBacklog kept
- *  exploring the codebase (including spawning a `Task` sub-agent that
- *  can run silently for many minutes) or starting to implement code for
- *  whatever ticket's description read like an interesting problem -- a
- *  prose "don't do this" in the prompt was not enough to stop a model
- *  that has the tools sitting right there. A denied tool can't be
- *  invoked regardless of what the model decides. */
-// Not exhaustive by construction -- see ALLOWED_TOOLS_BY_TAG below for why
-// that matters. Extended live 2026-08-11 after an engineering-manager run
-// called TaskList/CronList/ListAgents (a task/cron/agent-orchestration
-// family of built-ins that didn't exist when this list was first written)
-// instead of assign_ticket -- add newly-observed built-ins here as they
-// turn up, but don't treat this list as ever being complete.
-const ALL_TOOLS = [
-  "Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch",
-  "Task", "TaskCreate", "TaskList", "TaskOutput", "TaskStop", "TodoWrite", "SlashCommand",
-  "CronCreate", "CronDelete", "CronList", "ListAgents", "SendMessage",
-  "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree", "Monitor",
-  "DesignSync", "PushNotification", "RemoteTrigger", "ScheduleWakeup", "AskUserQuestion", "ReportFindings",
-];
-
-/** Tool names hard-denied per TASK (keyed by the same `tag` passed to
- *  runAgent, e.g. "custos-groom"), NOT per agent role. This matters
- *  because product-owner drives two different tasks that need
- *  genuinely different tool access from the SAME agent/role: groomBacklog
- *  (custos-groom) is a pure sizing/promote/comment decision on tickets
- *  already fully described in its prompt, with nothing to gain from the
- *  filesystem -- but planIdea (custos-plan) explicitly instructs the
- *  agent to "Research the workspace and the web as needed before you
- *  decide on the shape," a real, legitimate need for Read/Glob/Grep/
- *  WebFetch/WebSearch. Keying by role alone would have to pick one
- *  answer for both tasks; keying by tag lets custos-groom go tool-free
- *  while custos-plan keeps full access.
- *
- *  QA (custos-qa) legitimately needs Read/Bash/Glob/Grep to check out and
- *  run the diff it's reviewing, and Task to delegate exploration -- but
- *  never Write/Edit/NotebookEdit, since its whole point is judging the
- *  engineer's diff, not modifying it. Tags not listed here keep full
- *  tool access: they have a real, legitimate reason to touch the
- *  filesystem or run commands. */
-export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
-  "custos-assign": ALL_TOOLS,
-  "custos-groom": ALL_TOOLS,
-  "custos-curate": ALL_TOOLS,
-  "custos-qa": ["Write", "Edit", "NotebookEdit"],
-};
-
-/** Tags whose entire legitimate action surface is their MCP tools (see
- *  mcp/pm-tools.ts) and nothing else -- these get `--tools []` (RunTurnOptions.tools,
- *  the CLI's own `--tools ""`) on top of DISALLOWED_TOOLS_BY_TAG's denylist,
- *  cutting every built-in tool from the roster instead of hoping the
- *  denylist happens to name whatever the model tries. Confirmed necessary
- *  live: `--disallowedTools` alone kept missing newer built-ins (TaskCreate,
- *  TaskList, CronList, ListAgents -- a task/cron/agent-orchestration family
- *  that didn't exist when ALL_TOOLS was first written), and the model used
- *  each one instead of the MCP tool it was actually given, burning a full,
- *  slow turn per miss. MCP-server tools are unaffected by `--tools` -- it
- *  only governs the built-in roster -- so this doesn't touch the very
- *  tools these tags exist to use. */
-export const TOOL_FREE_TAGS = new Set(["custos-groom", "custos-assign", "custos-curate"]);
+export type { AgentRunResult, RunAgentOptions } from "./agent-runner/types.js";
+export { extractContract } from "./agent-runner/contract.js";
+export { buildSystemPrompt } from "./agent-runner/system-prompt.js";
+export { DISALLOWED_TOOLS_BY_TAG, TOOL_FREE_TAGS } from "./agent-runner/tool-policy.js";
 
 /**
  * Runs one autonomous agent to completion and returns its parsed contract.
