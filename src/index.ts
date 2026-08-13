@@ -18,6 +18,7 @@ import { ensureAdminPassword } from "./auth/admin-session.js";
 import { RemoteSessionManager } from "./remote/session-manager.js";
 import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
+import { wireSlackActivity } from "./slack/activity.js";
 import { ensureGlobalAgents } from "./pm/global-agents.js";
 import { migrateToFallbackSets } from "./pm/agents.js";
 import { syncSpawnedSessionCredentials } from "./auth/credentials.js";
@@ -164,6 +165,7 @@ async function main() {
 
   remoteSessionManager.onIdeaHandoff = (projectId, ideaId) => void orchestrator.planIdea(projectId, ideaId);
   orchestrator.start();
+  wireSlackActivity(orchestrator, runtime);
 
   registerRoutes(app, { runtime, memoryStore, remoteSessionManager });
   registerAdminRoutes(app, runtime);

@@ -2602,14 +2602,20 @@ function showKeyOnce(key) {
 // -- Slack integration -----------------------------------------------------
 //
 // One bot token for the whole gateway -- individual roles don't get their
-// own Slack login/email; outgoing messages post under a per-role
-// username/icon via chat.postMessage's override (see src/slack/personas.ts).
-// Per-project channel routing lives on each project's own settings, not
-// here -- this panel only owns the token and the global killswitch.
+// own Slack login/email. Outgoing activity currently posts under one
+// shared "Custos" identity (src/slack/activity.ts); every activity line
+// already names the agent that produced it in its own text. Per-role
+// name/icon via chat.postMessage's override is wired in src/slack/personas.ts
+// but not yet plumbed through every emit call site -- a future pass, not
+// required for the integration to work. The same channel doubles as an
+// idea inbox: any plain message posted there becomes an inbox idea
+// (src/pm/orchestrator.ts's pollSlackIdeas). Per-project channel routing
+// lives on each project's own settings, not here -- this panel only owns
+// the token and the global killswitch.
 function renderSlackPanel() {
   const section = el("section", { class: "panel" });
   section.appendChild(el("h2", { text: "Slack" }));
-  section.appendChild(el("p", { class: "desc", text: "One Slack app/bot token for the whole gateway. Agents post updates (ticket ready, blocked, merged, deployed) to each project's channel under a per-role name/icon -- no separate Slack login per agent. Requires the chat:write, chat:write.customize, channels:history, and channels:read scopes on the bot token. Set each project's Slack channel from its own settings." }));
+  section.appendChild(el("p", { class: "desc", text: "One Slack app/bot token for the whole gateway. Agents post updates (ticket ready, blocked, merged, deployed) to each project's channel, and any plain message posted back in that channel becomes an inbox idea for the project. Requires the chat:write, chat:write.customize, channels:history (or groups:history for a private channel), and channels:read scopes on the bot token; users:read is optional and only improves idea attribution. Set each project's Slack channel from its own settings." }));
 
   const { slack } = state;
 

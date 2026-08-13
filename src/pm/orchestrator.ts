@@ -14,6 +14,7 @@ import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verif
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderWorkItem } from "./context.js";
 import { ensureModel, isAvailable, recordOutcome } from "./model-registry.js";
 import { hasGitCredentials, resolveAgentEnv } from "./vault.js";
+import { fetchNewMessages, fetchUserName, isPlainHumanMessage } from "../slack/client.js";
 import { ASSIGN_MODELS_SHAPE, DEVOPS_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
 import type { DevopsContract, FactWrite, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, DeployTarget, ProjectSettings, WorkItem } from "./types.js";
@@ -115,6 +116,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private async tickProject(project: Project): Promise<void> {
     const settings = await getSettings(project.id);
     if (settings.paused) return;
+
+    // Independent of every autonomy toggle below -- a dropped Slack
+    // message becomes an inbox idea the same way a steering-chat handoff
+    // does, whether or not this project auto-plans its inbox. Cheap to
+    // check every tick: pollSlackIdeas itself no-ops instantly when Slack
+    // isn't configured, and guard() already prevents overlap if a poll is
+    // still in flight for some reason.
+    if (settings.slackChannelId) void this.pollSlackIdeas(project.id);
 
     // Live runs move without the board changing, so nudge watchers each tick
     // while anything is running -- that's what keeps "what is it doing right
@@ -371,6 +380,49 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   }
 
   // ---------------------------------------------------------------- product owner
+
+  /** Turns new messages in the project's configured Slack channel into
+   *  inbox ideas -- the inbound half of the Slack integration (see
+   *  slack/activity.ts for the outbound half). Every plain human message
+   *  becomes one idea; the channel itself is the idea inbox, no special
+   *  syntax or slash command required. Guarded like every other dispatch
+   *  so an overlapping tick can't double-poll, though a single HTTP call
+   *  finishing well within one tick makes that vanishingly unlikely. */
+  async pollSlackIdeas(projectId: string): Promise<void> {
+    await this.guard(`slack-poll:${projectId}`, projectId, async () => {
+      const slack = this.runtime.config.slack;
+      if (!slack?.botToken || slack.enabled === false) return;
+      const settings = await getSettings(projectId);
+      if (!settings.slackChannelId) return;
+
+      // First poll after a channel is configured: seed the cursor at
+      // "now" instead of importing the channel's entire history as
+      // ideas. Every poll after that passes the real cursor.
+      if (settings.slackLastSeenTs === null) {
+        await updateSettings(projectId, { slackLastSeenTs: `${Date.now() / 1000}` });
+        return;
+      }
+
+      const result = await fetchNewMessages(slack.botToken, settings.slackChannelId, settings.slackLastSeenTs);
+      if (!result.ok) {
+        console.error(`[slack] failed to poll #${settings.slackChannelId} for project ${projectId}: ${result.error}`);
+        return;
+      }
+      if (!result.messages.length) return;
+
+      let maxTs = settings.slackLastSeenTs;
+      for (const message of result.messages) {
+        if (Number(message.ts) > Number(maxTs)) maxTs = message.ts;
+        if (!isPlainHumanMessage(message)) continue;
+        const author = message.user ? await fetchUserName(slack.botToken, message.user) : null;
+        const title = message.text.trim().slice(0, 80) || "Idea from Slack";
+        const brief = `${message.text.trim()}\n\n_Posted in Slack${author ? ` by ${author}` : ""}._`;
+        await ideas.createIdea(projectId, title, brief, null);
+      }
+      await updateSettings(projectId, { slackLastSeenTs: maxTs });
+      this.emit("change", projectId);
+    });
+  }
 
   /** Turns one inbox idea into epics and their stories. */
   async planIdea(projectId: string, ideaId: string): Promise<void> {

@@ -324,6 +324,13 @@ export interface ProjectSettings {
    *  killswitch, which turns the whole integration off regardless of
    *  which projects have a channel configured. */
   slackChannelId: string | null;
+  /** Slack message `ts` cursor for the inbound "drop an idea" poll --
+   *  `conversations.history`'s `oldest` param is exclusive, so this is
+   *  exactly "everything already turned into an idea." Null means never
+   *  polled yet; the first poll after a channel is configured seeds this
+   *  from the current moment rather than importing the channel's entire
+   *  backlog as ideas. */
+  slackLastSeenTs: string | null;
   /** Fingerprint (see orchestrator.ts's workItemsSignal) of the backlog /
    *  ready-column-plus-inFlight-count / pending-facts state as of the end
    *  of the last SUCCESSFUL groom/assign/curate pass. tickProject compares
@@ -355,6 +362,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     pmConfigured: false,
     pmLastRunAt: null,
     slackChannelId: null,
+    slackLastSeenTs: null,
     lastGroomSignal: null,
     lastAssignSignal: null,
     lastCurateSignal: null,
