@@ -1,6 +1,6 @@
-import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { randomBytes } from "node:crypto";
+import { scryptHash, scryptVerify } from "./scrypt.js";
+import { readJsonFile, writeJsonFile } from "../util/json-file.js";
 
 const AUTH_PATH = process.env.GATEWAY_AUTH_PATH ?? "data/auth.json";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -10,33 +10,15 @@ interface AuthFile {
   passwordHash: string;
 }
 
-function hashPassword(password: string): string {
-  const salt = randomBytes(16);
-  const hash = scryptSync(password, salt, 64);
-  return `${salt.toString("hex")}:${hash.toString("hex")}`;
-}
-
-function verifyPassword(password: string, stored: string): boolean {
-  const [saltHex, hashHex] = stored.split(":");
-  if (!saltHex || !hashHex) return false;
-  const salt = Buffer.from(saltHex, "hex");
-  const expected = Buffer.from(hashHex, "hex");
-  const actual = scryptSync(password, salt, 64);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
+const hashPassword = scryptHash;
+const verifyPassword = scryptVerify;
 
 async function readAuthFile(): Promise<AuthFile | null> {
-  try {
-    return JSON.parse(await readFile(AUTH_PATH, "utf8"));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
+  return readJsonFile<AuthFile | null>(AUTH_PATH, null);
 }
 
 async function writeAuthFile(auth: AuthFile): Promise<void> {
-  await mkdir(dirname(AUTH_PATH), { recursive: true });
-  await writeFile(AUTH_PATH, JSON.stringify(auth, null, 2), "utf8");
+  await writeJsonFile(AUTH_PATH, auth);
 }
 
 /**

@@ -1,6 +1,7 @@
-import { scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
-import { dirname } from "node:path";
+import { randomBytes } from "node:crypto";
+import { rm } from "node:fs/promises";
+import { scryptHash, scryptVerify } from "./scrypt.js";
+import { readJsonFile, writeJsonFile } from "../util/json-file.js";
 
 // Kept in its own file rather than inside GatewayConfig deliberately: config
 // is read/written wholesale through updateConfig()/saveConfig() and the
@@ -16,28 +17,11 @@ interface McpAuthFile {
   keyHash: string;
 }
 
-function hashKey(key: string): string {
-  const salt = randomBytes(16);
-  const hash = scryptSync(key, salt, 64);
-  return `${salt.toString("hex")}:${hash.toString("hex")}`;
-}
-
-function verifyHash(key: string, stored: string): boolean {
-  const [saltHex, hashHex] = stored.split(":");
-  if (!saltHex || !hashHex) return false;
-  const salt = Buffer.from(saltHex, "hex");
-  const expected = Buffer.from(hashHex, "hex");
-  const actual = scryptSync(key, salt, 64);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
-}
+const hashKey = scryptHash;
+const verifyHash = scryptVerify;
 
 async function readAuthFile(): Promise<McpAuthFile | null> {
-  try {
-    return JSON.parse(await readFile(MCP_AUTH_PATH, "utf8"));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
+  return readJsonFile<McpAuthFile | null>(MCP_AUTH_PATH, null);
 }
 
 /** True once a key has been generated. Used by the admin panel to render
@@ -52,8 +36,7 @@ export async function mcpKeyConfigured(): Promise<boolean> {
  *  own reset flow works. Overwrites any previously generated key. */
 export async function generateMcpKey(): Promise<string> {
   const key = `custos_mcp_${randomBytes(24).toString("base64url")}`;
-  await mkdir(dirname(MCP_AUTH_PATH), { recursive: true });
-  await writeFile(MCP_AUTH_PATH, JSON.stringify({ keyHash: hashKey(key) }, null, 2), "utf8");
+  await writeJsonFile(MCP_AUTH_PATH, { keyHash: hashKey(key) });
   return key;
 }
 
