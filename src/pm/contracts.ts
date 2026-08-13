@@ -42,16 +42,6 @@ export interface PlanContract extends WithFacts {
   notes?: string;
 }
 
-export interface EngineerContract extends WithFacts {
-  status?: "ready_for_qa" | "blocked";
-  summary?: string;
-  subtasks?: Array<{ title?: string; done?: boolean }>;
-  branch?: string | null;
-  prUrl?: string | null;
-  blockedReason?: string | null;
-  followUps?: string[];
-}
-
 export interface QaContract extends WithFacts {
   verdict?: "pass" | "fail";
   summary?: string;

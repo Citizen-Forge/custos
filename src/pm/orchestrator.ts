@@ -8,14 +8,14 @@ import * as runs from "./runs.js";
 import { getSettings, updateSettings } from "./project-settings.js";
 import { listFacts, writeFact, proposeFact, listPendingFacts, listApprovedFacts } from "./facts.js";
 import { runAgent } from "./agent-runner.js";
-import { mintGroomSession, mintAssignSession, mintCurateSession, releaseSession, buildPmMcpConfig } from "../mcp/pm-tools.js";
+import { mintGroomSession, mintAssignSession, mintCurateSession, mintEngineerSession, releaseSession, lookupSession, buildPmMcpConfig, type EngineerOutcome } from "../mcp/pm-tools.js";
 import { resolveProjectAgent, projectHeader as buildProjectHeader, buildGroomPrompt, buildAssignPrompt, buildCuratePrompt } from "./pm-prompts.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest, checkPrReadyToMerge, mergePullRequest } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderWorkItem } from "./context.js";
 import { ensureModel, isAvailable, recordOutcome } from "./model-registry.js";
 import { hasGitCredentials, resolveAgentEnv } from "./vault.js";
-import { ASSIGN_MODELS_SHAPE, DEVOPS_SHAPE, ENGINEER_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
-import type { DevopsContract, EngineerContract, FactWrite, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
+import { ASSIGN_MODELS_SHAPE, DEVOPS_SHAPE, PLAN_SHAPE, PROVISION_SHAPE, QA_SHAPE, SURVEY_PROMPT, SURVEY_SHAPE, outputContract } from "./prompts.js";
+import type { DevopsContract, FactWrite, PlanContract, ProjectManagerContract, ProvisionContract, QaContract } from "./contracts.js";
 import type { AgentDef, AgentRole, DeployTarget, ProjectSettings, WorkItem } from "./types.js";
 import { HUMAN_ASSIGNEE_ID } from "./types.js";
 
@@ -676,37 +676,60 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           ? `You are in your own git worktree at \`${workspace.cwd}\`, with branch \`${workspace.branch}\` already checked out for you off \`${settings.defaultBranch}\`. Commit to that branch — do not create another one, and do not switch branches. Other engineers are working other tickets in their own checkouts of this same repository at the same time, so stay within the files this ticket is about.`
           : `This project is not a git repository, so you are working directly in the shared project directory and are the only engineer running. Keep your changes tightly scoped.`,
         "",
-        "Work this ticket to completion. When the acceptance criteria are met, push your branch and open a pull request against the default branch. Without a PR, QA cannot review your work — the PR is the only review surface.",
+        "Work this ticket to completion using your normal tools (Bash, Read, Write, Edit, etc.) exactly as you always have. When the acceptance criteria are met, push your branch and open a pull request against the default branch — without a PR, QA cannot review your work, the PR is the only review surface.",
+        "",
+        "Reporting your result is different from what you're used to: call `report_ready_for_qa` once you're done, or `report_blocked` if you need a decision only a human or the product owner can make. That tool call IS your result — there is no separate summary block to write, and nothing happens automatically just because the acceptance criteria look met to you. Use `record_fact` only for something durable and cross-cutting the next agent on this project will need, not a note about this ticket.",
       ].join("\n");
 
-      const result = await runAgent<EngineerContract>(this.runtime, {
-        signal,
-        agent,
+      const token = mintEngineerSession({
         projectId,
-        cwd: workspace.cwd,
-        prompt,
-        tag: "custos-engineer",
-        outputContract: outputContract("custos-engineer", ENGINEER_SHAPE),
+        agentId: agent.id,
+        agentName: agentStore.displayName(agent),
         workItemId,
       });
+      let result: Awaited<ReturnType<typeof runAgent>>;
+      let outcome: EngineerOutcome | null;
+      try {
+        result = await runAgent(this.runtime, {
+          signal,
+          agent,
+          projectId,
+          cwd: workspace.cwd,
+          prompt,
+          tag: "custos-engineer",
+          toolDriven: true,
+          mcpConfig: buildPmMcpConfig(token),
+          workItemId,
+        });
+      } finally {
+        const session = lookupSession(token);
+        outcome = session?.kind === "engineer" ? session.outcome : null;
+        releaseSession(token);
+      }
 
-      await this.applyFacts(projectId, agent, result.parsed);
-      if (!result.ok || !result.parsed) {
+      if (!result.ok || !outcome) {
         // Not persisted as a board comment (see the identical note on the
         // QA path below) -- the live activity feed below already surfaces
         // this, and a ticket that keeps failing on a rate-limited/flaky
         // provider would otherwise accumulate an unbounded pile of
-        // "Run failed: ..." comments, one per retry, forever.
+        // "Run failed: ..." comments, one per retry, forever. A clean run
+        // that never called report_ready_for_qa/report_blocked (still
+        // possible even with the tool call replacing the old JSON block --
+        // see mcp/pm-tools.ts's EngineerSession doc comment) is treated the
+        // same as any other failure: no result means nothing to act on.
         const backedOff = await board.recordAttemptFailure(workItemId);
-        this.emit("activity", projectId, `${agent.name} failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${result.error ?? "unknown error"}; will retry.`);
+        this.emit(
+          "activity",
+          projectId,
+          `${agent.name} failed on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${result.ok ? "did not report a result via report_ready_for_qa or report_blocked" : (result.error ?? "unknown error")}; will retry.`,
+        );
         return;
       }
-      const contract = result.parsed;
-      if (contract.subtasks?.length) {
-        await board.setSubtasks(workItemId, contract.subtasks.map((s) => s.title ?? "").filter(Boolean));
+      if (outcome.status === "ready_for_qa" && outcome.subtasks.length) {
+        await board.setSubtasks(workItemId, outcome.subtasks.map((s) => s.title).filter(Boolean));
       }
 
-      if (contract.status === "blocked") {
+      if (outcome.status === "blocked") {
         await board.clearAttempts(workItemId);
         // Blocked work goes back to the backlog rather than sitting in
         // in_progress: it needs a product decision, and the backlog is
@@ -714,22 +737,22 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         // branch keeps whatever was done, and holding a worktree open for a
         // ticket nobody is working just blocks a slot.
         await this.release(project, workItemId);
-        await board.transitionWorkItem(workItemId, "backlog", agent.id, contract.blockedReason ?? "blocked");
-        this.emit("activity", projectId, `${agent.name} is blocked on "${item.title}": ${contract.blockedReason ?? "no reason given"}`);
+        await board.transitionWorkItem(workItemId, "backlog", agent.id, outcome.reason);
+        this.emit("activity", projectId, `${agent.name} is blocked on "${item.title}": ${outcome.reason}`);
         return;
       }
 
-      // A PR URL in the final JSON is only a claim. Verify it against GitHub
-      // before allowing QA to run, using the same project-scoped PAT that
+      // A PR URL reported via the tool is only a claim. Verify it against
+      // GitHub before allowing QA to run, using the same project-scoped PAT
       // the engineer received.
-      if (workspace.isolated && contract.prUrl && workspace.branch) {
-        const delivery = await verifyPullRequest(workspace.cwd, contract.prUrl, workspace.branch, settings.defaultBranch, gitEnv!);
+      if (workspace.isolated && outcome.prUrl && workspace.branch) {
+        const delivery = await verifyPullRequest(workspace.cwd, outcome.prUrl, workspace.branch, settings.defaultBranch, gitEnv!);
         if (!delivery.ok) {
           const backedOff = await board.recordAttemptFailure(workItemId);
           this.emit("activity", projectId, `${agent.name} could not hand off "${item.title}" to QA (attempt ${backedOff?.attempts ?? 1}): ${delivery.reason}`);
           return;
         }
-        contract.prUrl = delivery.url;
+        outcome.prUrl = delivery.url;
       }
 
       // PR enforcement gate: if the project has a git repository and the
@@ -738,7 +761,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // a missing PR means QA has nothing to review. The engineer can be
       // dispatched again (the ticket is still in_progress) and should
       // push its branch and create the PR on the next attempt.
-      if (workspace.isolated && !contract.prUrl) {
+      if (workspace.isolated && !outcome.prUrl) {
         const backedOff = await board.recordAttemptFailure(workItemId);
         if ((backedOff?.attempts ?? 1) === 1) {
           await board.addComment(
@@ -754,11 +777,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       await board.clearAttempts(workItemId);
       await board.updateWorkItem(workItemId, {
-        ...(contract.branch ? { branch: contract.branch } : {}),
-        ...(contract.prUrl ? { prUrl: contract.prUrl } : {}),
+        ...(outcome.branch ? { branch: outcome.branch } : {}),
+        ...(outcome.prUrl ? { prUrl: outcome.prUrl } : {}),
       });
-      const followUps = contract.followUps?.length ? `\n\n**Noticed but not fixed (out of scope for this ticket):**\n${contract.followUps.map((f) => `- ${f}`).join("\n")}` : "";
-      const engineerCommentBody = `${contract.summary ?? ""}${followUps}`;
+      const followUps = outcome.followUps.length ? `\n\n**Noticed but not fixed (out of scope for this ticket):**\n${outcome.followUps.map((f) => `- ${f}`).join("\n")}` : "";
+      const engineerCommentBody = `${outcome.summary}${followUps}`;
       if (engineerCommentBody.trim()) {
         await board.addComment(workItemId, agent.id, agentStore.displayName(agent), engineerCommentBody);
       }

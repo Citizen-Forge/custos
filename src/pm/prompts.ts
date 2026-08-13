@@ -367,16 +367,6 @@ export const PLAN_SHAPE = `{
   "notes": "anything the humans should know, including why you left something out"
 }`;
 
-export const ENGINEER_SHAPE = `{
-  "status": "ready_for_qa" | "blocked",
-  "summary": "markdown: what you changed, why, and how to verify it",
-  "subtasks": [{ "title": "string", "done": true }],
-  "branch": "branch name you pushed, or null",
-  "prUrl": "pull request url, or null",
-  "blockedReason": "the specific question or missing thing, when status is blocked; otherwise null",
-  "followUps": ["unrelated problems you noticed and deliberately did not fix"]
-}`;
-
 export const QA_SHAPE = `{
   "verdict": "pass" | "fail",
   "summary": "markdown: what you ran, what you checked, what you found",

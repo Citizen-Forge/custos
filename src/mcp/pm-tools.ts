@@ -70,7 +70,26 @@ export interface AssignSession extends BaseSession {
   slotsRemaining: number;
 }
 
-type PmSession = GroomSession | AssignSession | CurateSession;
+/** What report_ready_for_qa/report_blocked capture, read back by
+ *  orchestrator.ts's runEngineer once the run completes. Shaped like the
+ *  old `custos-engineer` fenced JSON block this replaces, but there's
+ *  nothing left to parse out of the transcript -- the tool call itself
+ *  is the result. */
+export type EngineerOutcome =
+  | { status: "ready_for_qa"; summary: string; branch: string | null; prUrl: string | null; subtasks: Array<{ title: string; done: boolean }>; followUps: string[] }
+  | { status: "blocked"; reason: string; followUps: string[] };
+
+export interface EngineerSession extends BaseSession {
+  kind: "engineer";
+  workItemId: string;
+  /** Null until report_ready_for_qa or report_blocked is called. Whichever
+   *  is called LAST wins if the model somehow calls both in one run --
+   *  no reason to crash over a model being confused rather than just
+   *  taking its most recent word for it. */
+  outcome: EngineerOutcome | null;
+}
+
+type PmSession = GroomSession | AssignSession | CurateSession | EngineerSession;
 
 const sessions = new Map<string, PmSession>();
 
@@ -122,6 +141,18 @@ export function mintCurateSession(input: {
   sweepExpired();
   const token = newToken();
   sessions.set(token, { kind: "curate", token, expiresAt: Date.now() + SESSION_TTL_MS, actions: [], ...input });
+  return token;
+}
+
+export function mintEngineerSession(input: {
+  projectId: string;
+  agentId: string;
+  agentName: string;
+  workItemId: string;
+}): string {
+  sweepExpired();
+  const token = newToken();
+  sessions.set(token, { kind: "engineer", token, expiresAt: Date.now() + SESSION_TTL_MS, actions: [], outcome: null, ...input });
   return token;
 }
 
@@ -436,6 +467,71 @@ export function buildCurateToolsServer(session: CurateSession): McpServer {
     },
   );
 
+  return server;
+}
+
+/** Tools for the engineer role. Unlike groom/assign/curate, an engineer's
+ *  job genuinely needs its full normal toolkit (Bash/Read/Write/Edit --
+ *  see agent-runner.ts: "custos-engineer" is deliberately never added to
+ *  TOOL_FREE_TAGS or DISALLOWED_TOOLS_BY_TAG). What moves off the old
+ *  trailing-JSON-block pattern is just how the run reports its outcome:
+ *  report_ready_for_qa/report_blocked replace the closing `custos-engineer`
+ *  fenced block runEngineer used to parse out of the transcript.
+ *  Confirmed live: a run can do the entire real job correctly (rebase,
+ *  resolve conflicts, tests, typecheck, demo, commit) and then simply never
+ *  emit that closing block -- the exact same "good work, no block" failure
+ *  mode groom/assign/curate had before their own tool-driven redesign, just
+ *  reached by a longer, tool-heavy conversation instead of a short
+ *  decision-only one. A tool call either lands or it doesn't; there's no
+ *  "ran out of length before reaching the fence" failure mode left. */
+export function buildEngineerToolsServer(session: EngineerSession): McpServer {
+  const server = new McpServer({ name: "custos-pm", version: "1.0.0" });
+
+  server.registerTool(
+    "report_ready_for_qa",
+    {
+      title: "Report this ticket ready for QA",
+      description: "Call this once you're done: acceptance criteria met, branch pushed, pull request open. This is how a run reports its result -- there is no other expected output format, and nothing happens automatically just because the acceptance criteria look met in your own read of the diff.",
+      inputSchema: {
+        summary: z.string().describe("Markdown: what you changed, why, and how to verify it."),
+        branch: z.string().optional().describe("The branch name you pushed."),
+        prUrl: z.string().optional().describe("The pull request URL."),
+        subtasks: z.array(z.object({ title: z.string(), done: z.boolean() })).optional().describe("Updated subtask checklist, if the ticket has one."),
+        followUps: z.array(z.string()).optional().describe("Unrelated problems you noticed and deliberately did not fix."),
+      },
+    },
+    async ({ summary, branch, prUrl, subtasks, followUps }) => {
+      session.outcome = {
+        status: "ready_for_qa",
+        summary,
+        branch: branch ?? null,
+        prUrl: prUrl ?? null,
+        subtasks: subtasks ?? [],
+        followUps: followUps ?? [],
+      };
+      session.actions.push("reported ready for QA");
+      return ok("Recorded. The run is complete -- no further action needed.");
+    },
+  );
+
+  server.registerTool(
+    "report_blocked",
+    {
+      title: "Report this ticket blocked",
+      description: "Call this when you cannot proceed without a decision only a human or the product owner can make. The ticket goes back to the backlog with your reason attached; whatever you've already committed to the branch is preserved.",
+      inputSchema: {
+        reason: z.string().describe("The specific question or missing thing that's blocking you."),
+        followUps: z.array(z.string()).optional().describe("Unrelated problems you noticed and deliberately did not fix."),
+      },
+    },
+    async ({ reason, followUps }) => {
+      session.outcome = { status: "blocked", reason, followUps: followUps ?? [] };
+      session.actions.push(`reported blocked: ${reason}`);
+      return ok("Recorded. The run is complete -- no further action needed.");
+    },
+  );
+
+  registerRecordFact(server, session);
   return server;
 }
 
