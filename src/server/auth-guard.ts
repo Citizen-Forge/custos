@@ -31,7 +31,12 @@ export function registerAuthGuard(app: FastifyInstance): void {
     // Asset requests from an already-loaded page must 401 rather than
     // redirect -- a 302 to an HTML login page in place of a stylesheet just
     // renders a broken app instead of sending the user somewhere useful.
-    const isAsset = path.startsWith("/app/assets/");
+    // admin.html's own module scripts (/admin/*.js, served by
+    // admin-assets-routes.ts) are the same case: a session that expired
+    // between the page loading and its <script type="module"> imports
+    // resolving should fail the fetch cleanly, not hand the browser a
+    // login-page redirect to try to parse as JavaScript.
+    const isAsset = path.startsWith("/app/assets/") || (path.startsWith("/admin/") && path.endsWith(".js"));
     const isPageLoad = req.method === "GET" && !isAsset && !path.startsWith("/admin/api") && path !== "/remote/ws";
     if (isPageLoad) {
       reply.redirect(`/login?next=${encodeURIComponent(path)}`);

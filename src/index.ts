@@ -5,6 +5,7 @@ import { Agent, setGlobalDispatcher } from "undici";
 import { Runtime } from "./runtime.js";
 import { registerRoutes } from "./server/routes.js";
 import { registerAdminRoutes } from "./server/admin-routes.js";
+import { registerAdminAssetsRoutes } from "./server/admin-assets-routes.js";
 import { registerRemoteRoutes } from "./server/remote-routes.js";
 import { registerProjectRoutes } from "./server/project-routes.js";
 import { registerPmRoutes } from "./server/pm-routes.js";
@@ -170,6 +171,7 @@ async function main() {
 
   registerRoutes(app, { runtime, memoryStore, remoteSessionManager });
   registerAdminRoutes(app, runtime);
+  registerAdminAssetsRoutes(app);
   registerRemoteRoutes(app, remoteSessionManager);
   registerProjectRoutes(app, runtime, remoteSessionManager, (projectId) => void orchestrator.surveyProject(projectId));
   registerPmRoutes(app, runtime, orchestrator);
