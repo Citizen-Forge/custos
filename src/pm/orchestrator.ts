@@ -12,7 +12,7 @@ import { mintGroomSession, mintAssignSession, mintCurateSession, mintEngineerSes
 import { resolveProjectAgent, projectHeader as buildProjectHeader, buildGroomPrompt, buildAssignPrompt, buildCuratePrompt } from "./pm-prompts.js";
 import { ensureWorkspace, isGitRepo, releaseWorkspace, verifyGitHubAccess, verifyPullRequest, checkPrReadyToMerge, mergePullRequest } from "./worktrees.js";
 import { renderAgentRoster, renderBoardSummary, renderIdea, renderWorkItem } from "./context.js";
-import { ensureModel, isAvailable, recordOutcome } from "./model-registry.js";
+import { ensureModel, isAvailable } from "./model-registry.js";
 import { hasGitCredentials, resolveAgentEnv } from "./vault.js";
 import { fetchNewMessages, fetchUserName, isPlainHumanMessage, postMessage, resolveBotUserId, stripBotMention } from "../slack/client.js";
 import { buildStatusReply } from "../slack/status.js";
@@ -1015,28 +1015,6 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         await board.updateWorkItem(workItemId, { prComments: [...existing, ...newEntries] });
       }
 
-      // QA's verdict is the only honest measure of whether the model that
-      // did the work was up to it, so it feeds straight back into that
-      // model's capability rating -- which is what the manager reads next
-      // time it decides who gets the hard tickets.
-      const author = item.assigneeAgentId ? await agentStore.getAgent(item.assigneeAgentId) : null;
-      if (author) {
-        // Record capability against the *actual* provider/model that ran
-        // this ticket, not the agent's primary pick or any stored row
-        // field. The agent's fallback chain may have skipped [0] because
-        // that provider was rate-limited; if we credited the verdict to
-        // [0] instead, the EM's feedback loop would steer away from the
-        // wrong model on the next sizing pass. The AgentRun row carries
-        // the resolved pair that the agent-runner recorded at dispatch
-        // time, which is the only source of truth that matches what
-        // actually served the request.
-        const latestRuns = await runs.listRuns(item.projectId, 50);
-        const thisRun = latestRuns.find((row) => row.agentId === author.id && row.workItemId === item.id);
-        if (thisRun) {
-          await recordOutcome(thisRun.providerKey, thisRun.model, contract.verdict === "pass" ? "passed" : "bounced");
-        }
-      }
-
       // Capture the decisive criterion + evidence onto the engineer's run
       // row so the agent card can show "Last QA bounce: <reason>" inline
       // without re-querying work-item comments on every poll. We pick the
@@ -1045,10 +1023,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // one when QA passed (what kept confidence). Skipped when the QA
       // contract omitted a verdict rather than defaulted to "fail" -- a
       // QA run that parsed cleanly without a verdict is a contract-shaped
-      // oddity, not a real bounce, and shouldn't surface one. Done
-      // independently of the model-capability feedback above so the
-      // surface data lives on its own concern rather than piggy-backing
-      // on a feedback loop. The engineer-run lookup uses
+      // oddity, not a real bounce, and shouldn't surface one. The
+      // engineer-run lookup uses
       // `listRuns(...).find(...)` rather than tracking an index in
       // memory because listRuns sorts by startedAt DESC and slices to
       // limit, so the FIRST match in iteration order is the most-recent

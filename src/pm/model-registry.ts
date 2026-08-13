@@ -3,15 +3,22 @@ import type { GatewayConfig } from "../config.js";
 
 /**
  * What Custos knows about each provider/model combination it can send work
- * to: how it's paid for, how good it has proved to be, and whether it is
- * usable right now.
+ * to: how it's paid for, and whether it is usable right now.
  *
- * This exists because "which model should do this ticket" is not a static
- * choice. A subscription model is free until its window is exhausted and
- * then unusable for hours; a free tier is unmetered but rate limited; a
- * local model never runs out but can only do simple work. Without somewhere
- * to record that, the engineering manager pins every ticket to the best
- * model it knows and the whole pipeline stops the moment that one runs out.
+ * This exists because "is this provider/model combination currently usable"
+ * is not a static fact. A subscription model is free until its window is
+ * exhausted and then unusable for hours; a free tier is unmetered but rate
+ * limited. Without somewhere to record that, a dispatch that already knows
+ * a combination is burned out would try it anyway on every tick.
+ *
+ * This module used to also carry a per-model "capability" rating (1-5,
+ * moved by a feedback loop reading QA verdicts) that the engineering
+ * manager's assignment prompt read to help pick a model for a ticket.
+ * Removed: since the fallback-set redesign, an engineer/EM/etc is assigned
+ * a named fallback SET (see config.ts's FallbackSetDef), never a raw
+ * provider+model -- nothing has read a capability score to make a
+ * dispatch decision since that migration. The rating was still being
+ * computed on every QA verdict with nothing consuming it.
  */
 
 /** How using this combination is paid for -- the axis that decides what
@@ -32,12 +39,6 @@ export interface ModelRecord {
   providerKey: string;
   model: string;
   billing: Billing;
-  /** 1–5, how much this combination can be trusted with. Seeded from the
-   * provider's own tier and then moved by results — see recordOutcome. */
-  capability: number;
-  /** Completed tickets and QA bounces, the evidence behind `capability`. */
-  completed: number;
-  qaFailures: number;
   /** Set when the provider signalled it can't serve requests -- a 429, an
    * exhausted session window, a rejected key. Null when usable. */
   unavailableUntil: number | null;
@@ -47,16 +48,6 @@ export interface ModelRecord {
 }
 
 const models = new JsonCollection<ModelRecord>(pmPath("models.json"));
-
-/** Where a combination starts before it has any track record. Deliberately
- * conservative for local models: they're the fallback of last resort and
- * should earn their way up rather than being trusted by default. */
-const SEED_CAPABILITY: Record<string, number> = {
-  "claude-opus-5": 5,
-  "claude-sonnet-5": 4,
-  "claude-haiku-4-5-20251001": 3,
-};
-const DEFAULT_SEED = 2;
 
 export function modelId(providerKey: string, model: string): string {
   return `${providerKey}/${model}`;
@@ -82,17 +73,10 @@ export async function ensureModel(providerKey: string, model: string, config: Ga
     providerKey,
     model,
     billing: classifyBilling(providerKey, config),
-    capability: SEED_CAPABILITY[model] ?? DEFAULT_SEED,
-    completed: 0,
-    qaFailures: 0,
     unavailableUntil: null,
     unavailableReason: null,
     updatedAt: Date.now(),
   });
-}
-
-export async function listModels(): Promise<ModelRecord[]> {
-  return (await models.list()).sort((a, b) => b.capability - a.capability || a.id.localeCompare(b.id));
 }
 
 export function isAvailable(record: ModelRecord): boolean {
@@ -127,32 +111,6 @@ export async function markAvailable(providerKey: string, model: string): Promise
 }
 
 /**
- * The capability feedback loop. QA's verdict is the only honest signal about
- * whether a model was up to the work it was given, so it's what moves the
- * rating: sustained bounces pull a model down, a clean run nudges it up.
- *
- * Movement is deliberately asymmetric and slow. A single bad ticket can be
- * the ticket's fault rather than the model's, but a model that keeps failing
- * should stop being chosen quickly -- so failures move it twice as far as
- * successes, and only after enough evidence to not be noise.
- */
-export async function recordOutcome(providerKey: string, model: string, outcome: "passed" | "bounced"): Promise<ModelRecord | null> {
-  const id = modelId(providerKey, model);
-  return models.update(id, (record) => {
-    if (outcome === "passed") record.completed += 1;
-    else record.qaFailures += 1;
-
-    const samples = record.completed + record.qaFailures;
-    if (samples >= 3) {
-      const failureRate = record.qaFailures / samples;
-      if (failureRate > 0.5) record.capability = Math.max(1, record.capability - 0.5);
-      else if (failureRate < 0.2 && record.completed >= 3) record.capability = Math.min(5, record.capability + 0.25);
-    }
-    record.updatedAt = Date.now();
-  });
-}
-
-/**
  * Provider-level availability. A rate limit or an exhausted subscription
  * window is a property of the account, not of one model name -- Anthropic's
  * 5-hour limit is unified across models -- so it applies to every record
@@ -180,32 +138,4 @@ export async function markProviderAvailable(providerKey: string): Promise<void> 
       row.updatedAt = Date.now();
     });
   }
-}
-
-export async function setCapability(providerKey: string, model: string, capability: number): Promise<ModelRecord | null> {
-  return models.update(modelId(providerKey, model), (record) => {
-    record.capability = Math.max(1, Math.min(5, capability));
-    record.updatedAt = Date.now();
-  });
-}
-
-/** Seeds a record for every combination the gateway can currently reach, so
- * the manager's menu reflects configuration rather than only what has
- * happened to run before. */
-export async function syncFromConfig(config: GatewayConfig, anthropicModels: string[]): Promise<ModelRecord[]> {
-  for (const model of anthropicModels) await ensureModel("anthropic", model, config);
-  // Prefer the new providers shape with its model list.
-  if (config.providers) {
-    for (const [key, def] of Object.entries(config.providers)) {
-      for (const modelDef of def.models) {
-        if (modelDef.enabled) await ensureModel(key, modelDef.name, config);
-      }
-    }
-  } else {
-    // Fall back to deprecated openaiCompatibleInstances.
-    for (const [key, instance] of Object.entries(config.openaiCompatibleInstances ?? {})) {
-      await ensureModel(key, instance.model, config);
-    }
-  }
-  return listModels();
 }

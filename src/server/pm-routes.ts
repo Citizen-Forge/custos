@@ -12,7 +12,6 @@ import { getProject } from "../remote/projects.js";
 import { releaseWorkspace } from "../pm/worktrees.js";
 import * as vault from "../pm/vault.js";
 import * as facts from "../pm/facts.js";
-import * as registry from "../pm/model-registry.js";
 import { BOARD_STATUSES, type BoardStatus, type ProjectSettings, type WorkItemType } from "../pm/types.js";
 
 const isStatus = (value: unknown): value is BoardStatus => BOARD_STATUSES.includes(value as BoardStatus);
@@ -452,31 +451,6 @@ export function registerPmRoutes(app: FastifyInstance, runtime: Runtime, orchest
     // so an explicit "reset requested" entry makes the gap visible.
     orchestrator.emit("activity", id, "Project Manager reset — will re-evaluate on next tick.");
     return { ok: true };
-  });
-
-  // ----------------------------------------------------------- model registry
-
-  app.get("/admin/api/models", async () => {
-    const anthropicModels = agentStore
-      .listProviderOptions(runtime.config)
-      .filter((option) => option.providerKey === "anthropic")
-      .map((option) => option.model);
-    return { models: await registry.syncFromConfig(runtime.config, anthropicModels) };
-  });
-
-  /** Manual override for a capability rating -- the feedback loop is the
-   * primary mechanism, but a human who knows a model is unsuited to this
-   * codebase shouldn't have to wait for QA to discover it the expensive way. */
-  app.patch("/admin/api/models/:providerKey/:model", async (req, reply) => {
-    const { providerKey, model } = req.params as { providerKey: string; model: string };
-    const { capability } = (req.body ?? {}) as { capability?: number };
-    if (typeof capability !== "number" || capability < 1 || capability > 5) {
-      reply.code(400);
-      return { error: "capability must be a number between 1 and 5" };
-    }
-    const updated = await registry.setCapability(providerKey, decodeURIComponent(model), capability);
-    if (!updated) return notFound(reply, "model");
-    return { model: updated };
   });
 
   // ------------------------------------------------------- project knowledge
