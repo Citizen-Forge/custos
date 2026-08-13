@@ -84,4 +84,37 @@ describe("renderWorkItem: comment/history caps", () => {
     assert.ok(!out.includes("**Comments**"));
     assert.ok(!out.includes("**History**"));
   });
+
+  // A small number of very long comments/history entries can blow the
+  // prompt budget while comfortably under the 30/20 count caps -- observed
+  // live on a 29-comment ticket whose comments alone rendered to ~28,000
+  // characters (see MAX_RENDERED_COMMENT_CHARS's doc comment). These pin
+  // the character-budget cap that catches that case.
+  it("caps comments by total rendered size even when under the count cap", () => {
+    const longComment = (i: number): Comment => ({ id: `c${i}`, author: "agent", authorLabel: "DevOps", body: "x".repeat(3000), createdAt: i });
+    // 10 comments x ~3000 chars each is well under the 30-item count cap,
+    // but ~30,000 chars total is well over the 12,000-char size budget.
+    const item = { ...BASE_ITEM, comments: Array.from({ length: 10 }, (_, i) => longComment(i)) };
+    const out = renderWorkItem(item, { includeComments: true });
+    assert.match(out, /earlier omitted/, "size cap should trigger an omission note despite being under the count cap");
+    const commentLines = out.split("\n").filter((l) => l.startsWith("- **DevOps**:"));
+    assert.ok(commentLines.length < 10, "fewer than all 10 long comments should be rendered");
+    assert.ok(commentLines.length >= 1, "at least the most recent comment should still render");
+  });
+
+  it("always keeps at least the single most recent comment even if it alone exceeds the size budget", () => {
+    const hugeComment: Comment = { id: "c-huge", author: "agent", authorLabel: "QA", body: "y".repeat(20_000), createdAt: 1 };
+    const item = { ...BASE_ITEM, comments: [hugeComment] };
+    const out = renderWorkItem(item, { includeComments: true });
+    assert.match(out, /y{20000}/, "the single oversized comment is still rendered in full rather than omitted entirely");
+  });
+
+  it("caps history by total rendered size even when under the count cap", () => {
+    const longHistory = (i: number): HistoryEntry => ({ at: i, actor: "agent", from: "qa", to: "in_progress", note: "z".repeat(600) });
+    // 10 entries x ~650 rendered chars each is well under the 20-item
+    // count cap, but ~6,500 chars total is over the 4,000-char size budget.
+    const item = { ...BASE_ITEM, history: Array.from({ length: 10 }, (_, i) => longHistory(i)) };
+    const out = renderWorkItem(item, { includeHistory: true });
+    assert.match(out, /earlier omitted/, "size cap should trigger an omission note despite being under the count cap");
+  });
 });

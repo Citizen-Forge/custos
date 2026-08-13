@@ -40,6 +40,43 @@ export function describeAgentPick(agent: AgentDef, config: GatewayConfig): strin
 const MAX_RENDERED_COMMENTS = 30;
 const MAX_RENDERED_HISTORY = 20;
 
+/** Companion to the count caps above, closing a gap the count cap alone
+ *  doesn't cover: a *small* number of very long entries can still blow a
+ *  local model's context window even while comfortably under 30/20 items.
+ *  Observed live -- a ticket with only 29 comments (each a multi-paragraph
+ *  DevOps merge-conflict report from before the gate became deterministic,
+ *  see orchestrator/devops.ts) rendered to ~28,000 characters of comment
+ *  text alone, on top of history/description/system prompt/tool schemas,
+ *  pushing the total request past a 32K-token local model's context
+ *  window. Ollama's own behavior when input exceeds its configured
+ *  num_ctx is to silently slide the window and drop the *oldest* tokens --
+ *  which is the system prompt and the original task description -- not to
+ *  error, so the agent received a garbled, context-free prompt and
+ *  produced confused, non-actionable output instead of a visible failure.
+ *  These character budgets are deliberately conservative: sized so normal
+ *  tickets (a handful of KB of comments) never trigger them at all, while
+ *  a run of unusually verbose entries gets trimmed before it can starve
+ *  the rest of the prompt of context-window room. */
+const MAX_RENDERED_COMMENT_CHARS = 12_000;
+const MAX_RENDERED_HISTORY_CHARS = 4_000;
+
+/** Keeps the most recent entries whose *rendered* length fits within
+ *  `maxChars`, walking backward from the newest so "most recent wins"
+ *  matches the count-cap's own bias. Always keeps at least one entry
+ *  (the single most recent), even if it alone exceeds the budget --
+ *  omitting everything would be worse than showing one long entry. */
+function capBySize<T>(items: readonly T[], maxChars: number, render: (item: T) => string): T[] {
+  const kept: T[] = [];
+  let total = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const len = render(items[i]).length;
+    if (kept.length > 0 && total + len > maxChars) break;
+    kept.unshift(items[i]);
+    total += len;
+  }
+  return kept;
+}
+
 export function renderWorkItem(item: WorkItem, opts: { includeComments?: boolean; includeHistory?: boolean } = {}): string {
   const lines = [
     `### ${item.type.toUpperCase()} ${item.id} — ${item.title}`,
@@ -73,21 +110,26 @@ export function renderWorkItem(item: WorkItem, opts: { includeComments?: boolean
     lines.push("", "**Subtasks**", ...item.subtasks.map((s) => `- [${s.done ? "x" : " "}] ${s.title}`));
   }
   if (opts.includeComments && item.comments.length) {
-    const shown = item.comments.slice(-MAX_RENDERED_COMMENTS);
+    const renderComment = (c: (typeof item.comments)[number]): string => `- **${c.authorLabel}**: ${c.body}`;
+    const countCapped = item.comments.slice(-MAX_RENDERED_COMMENTS);
+    const shown = capBySize(countCapped, MAX_RENDERED_COMMENT_CHARS, renderComment);
     const omitted = item.comments.length - shown.length;
     lines.push(
       "",
       omitted > 0 ? `**Comments** (showing the most recent ${shown.length} of ${item.comments.length} — ${omitted} earlier omitted)` : "**Comments**",
-      ...shown.map((c) => `- **${c.authorLabel}**: ${c.body}`),
+      ...shown.map(renderComment),
     );
   }
   if (opts.includeHistory && item.history.length) {
-    const shown = item.history.slice(-MAX_RENDERED_HISTORY);
+    const renderHistory = (h: (typeof item.history)[number]): string =>
+      `- ${new Date(h.at).toISOString()} ${h.actor}: ${h.from ?? "—"} → ${h.to}${h.note ? ` (${h.note})` : ""}`;
+    const countCapped = item.history.slice(-MAX_RENDERED_HISTORY);
+    const shown = capBySize(countCapped, MAX_RENDERED_HISTORY_CHARS, renderHistory);
     const omitted = item.history.length - shown.length;
     lines.push(
       "",
       omitted > 0 ? `**History** (showing the most recent ${shown.length} of ${item.history.length} — ${omitted} earlier omitted)` : "**History**",
-      ...shown.map((h) => `- ${new Date(h.at).toISOString()} ${h.actor}: ${h.from ?? "—"} → ${h.to}${h.note ? ` (${h.note})` : ""}`),
+      ...shown.map(renderHistory),
     );
   }
   return lines.join("\n");
