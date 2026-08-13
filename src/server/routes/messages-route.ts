@@ -1,6 +1,4 @@
 import type { FastifyInstance } from "fastify";
-import type { ServerResponse } from "node:http";
-import { Readable } from "node:stream";
 import type { AnthropicMessagesRequest, AnthropicMessagesResponse } from "../../types.js";
 import { ProviderUnavailableError } from "../../types.js";
 import { ingestExchange } from "../../memory/ingest.js";
@@ -8,66 +6,19 @@ import { reconstructFromAnthropicSSE } from "../../memory/stream-reconstruct.js"
 import { parseModelAlias } from "../../providers/model-alias.js";
 import type { CompleteOptions } from "../../providers/types.js";
 import type { FallbackTarget, QueueContext } from "../../providers/global-queue.js";
-import type { GatewayConfig } from "../../config.js";
 import type { RouteDeps } from "./types.js";
+import { generalChain } from "./messages-route/chain.js";
+import { writeSseError, pipeWebStreamToRaw } from "./messages-route/sse.js";
 
-/** Builds the dispatch chain for the legacy `general` task's priority list.
- *  Every branch of `/v1/messages` flows through the GlobalQueue now, so the
- *  priority list is reshaped into a `FallbackTarget[]` rather than being
- *  handed to the old ProviderRouter. Anthropic entries inherit the body's
- *  own model since AnthropicProvider reads modelOverride → request.model;
- *  OpenAI-compat entries need an explicit model from the provider's
- *  configured default (the first enabled model, falling back to the first
- *  one declared) because modelOverride drives the upstream request's model
- *  field for those providers. The chain order matches `config.tasks.general`
- *  priority order, since that's what the legacy router honored.
- *
- *  Misconfigured entries (legacy `openaiCompatibleInstances` shape, a
- *  typo, an empty `models: []`) are skipped silently — the alternative
- *  is to dispatch with `model: "unknown"` and surface the upstream's
- *  400/404 to the operator, which reads as a runtime bug. Returning an
- *  empty chain is the caller's signal that there's nothing dispatchable;
- *  `routes.ts` translates that into a ProviderUnavailableError so the
- *  request surfaces a coherent error instead of parking forever in the
- *  queue's enqueue path. */
-function generalChain(body: AnthropicMessagesRequest, config: GatewayConfig): FallbackTarget[] {
-  const out: FallbackTarget[] = [];
-  for (const entry of config.tasks.general) {
-    if (entry.provider === "anthropic") {
-      out.push({ provider: "anthropic", model: body.model });
-      continue;
-    }
-    const providerDef = config.providers?.[entry.provider];
-    const def = providerDef?.models.find((m) => m.enabled) ?? providerDef?.models[0];
-    if (!def) continue;  // provider isn't properly configured for chat — skip rather than dispatch with model "unknown"
-    out.push({ provider: entry.provider, model: def.name });
-  }
-  return out;
-}
-
-/** Writes a mid-stream SSE error event, matching the real Anthropic
- *  streaming protocol's own error event shape. Used once headers have
- *  already committed to a 200 status, so a failure can no longer be
- *  signaled via HTTP status code. */
-function writeSseError(raw: ServerResponse, message: string): void {
-  if (raw.writableEnded) return;
-  raw.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "overloaded_error", message } })}\n\n`);
-}
-
-/** Pipes a Web ReadableStream into a hijacked raw response. Resolves once
- *  the stream ends, errors out, or the client disconnects -- whichever
- *  comes first -- so the caller's await doesn't hang on an abandoned
- *  connection. */
-function pipeWebStreamToRaw(stream: ReadableStream, raw: ServerResponse): Promise<void> {
-  return new Promise((resolve) => {
-    const nodeStream = Readable.fromWeb(stream as never);
-    nodeStream.pipe(raw);
-    nodeStream.on("end", resolve);
-    nodeStream.on("error", resolve);
-    raw.on("close", resolve);
-  });
-}
-
+/** The /v1/messages dispatch handler: alias parsing, dispatch-chain
+ * construction, and streaming/non-streaming response handling. The two
+ * pure helpers this used to define inline -- generalChain (dispatch-chain
+ * construction for the legacy `general` task) and the SSE
+ * write/pipe helpers -- now live under ./messages-route/. The handler
+ * itself stays as one function: it's a single Fastify route, and its
+ * streaming vs. buffered branches share the request's abort signal,
+ * dispatch chain, and context through one linear lifecycle that splitting
+ * across files would only obscure, not simplify. */
 export function registerMessagesRoute(app: FastifyInstance, deps: RouteDeps): void {
   app.post("/v1/messages", async (req, reply) => {
     const body = req.body as AnthropicMessagesRequest;
