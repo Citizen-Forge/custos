@@ -1,4 +1,5 @@
 import type { AnthropicMessagesRequest } from "../types.js";
+import type { RequestLogContext } from "./request-log.js";
 
 export interface ProviderResponse {
   status: number;
@@ -50,6 +51,16 @@ export interface CompleteOptions {
    * exceeded, preventing interactive traffic from starving background
    * forever. */
   priority?: Priority;
+  /** Caller context (project/agent/role/ticket) for request-log.ts's
+   *  exact-wire-bytes capture -- see that file's header comment for why
+   *  it's separate from the Claude Code session transcript. Optional and
+   *  purely additive: a provider that doesn't recognize it (or a caller
+   *  that doesn't set it) behaves exactly as before. Set by
+   *  GlobalQueue.tryExecute/executeWithRelease from the same
+   *  QueueContext already used for ActivityLog events, so the two logs
+   *  share identifiers (requestId in particular) and can be cross-
+   *  referenced. */
+  logContext?: RequestLogContext;
 }
 
 export interface Provider {

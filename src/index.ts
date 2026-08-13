@@ -19,6 +19,7 @@ import { RemoteSessionManager } from "./remote/session-manager.js";
 import { MemoryStore } from "./memory/store.js";
 import { startCurator } from "./memory/curator.js";
 import { wireSlackActivity } from "./slack/activity.js";
+import { registerRequestLogRoutes } from "./server/request-log-routes.js";
 import { ensureGlobalAgents } from "./pm/global-agents.js";
 import { migrateToFallbackSets } from "./pm/agents.js";
 import { syncSpawnedSessionCredentials } from "./auth/credentials.js";
@@ -174,6 +175,7 @@ async function main() {
   registerPmRoutes(app, runtime, orchestrator);
   registerMcpRoutes(app, orchestrator);
   registerPmEventRoutes(app, orchestrator);
+  registerRequestLogRoutes(app);
   registerUiRoutes(app);
   registerMetricsRoute(app, runtime);
 

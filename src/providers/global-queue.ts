@@ -381,10 +381,15 @@ export class GlobalQueue {
       anyAvailable = true;
 
       // Merge modelOverride into options so the provider uses the
-      // fallback set's chosen model.
+      // fallback set's chosen model. logContext rides along so a
+      // provider that supports exact-wire-bytes capture (see
+      // request-log.ts) can tag its log entry with the same requestId
+      // and caller identity ActivityLog already records for this
+      // dispatch -- the two logs are cross-referenceable.
       const mergedOptions: CompleteOptions = {
         ...options,
         modelOverride: entry.model,
+        logContext: { requestId, ...context },
       };
 
       // Acquire a slot and dispatch.
@@ -715,6 +720,7 @@ export class GlobalQueue {
     this.executeWithRelease(provider, target.provider, entry.request, {
       ...entry.options,
       modelOverride: target.model,
+      logContext: { requestId: entry.requestId, ...entry.context },
     }, entry).then(entry.resolve, entry.reject);
   }
 

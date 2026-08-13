@@ -4,6 +4,7 @@ import { parseRetryAfterMs } from "./retry-header.js";
 import { looksRateLimited } from "./rate-limit-signature.js";
 import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
+import { logRequest, type RequestLogContext } from "./request-log.js";
 
 export interface OpenAICompatibleInstanceConfig {
   /** Full path prefix up to (not including) "/chat/completions" -- e.g.
@@ -98,7 +99,7 @@ export class OpenAICompatibleProvider implements Provider {
 
   async complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
     // clientBetaHeader is Anthropic-specific and intentionally ignored here.
-    const { signal, modelOverride } = options ?? {};
+    const { signal, modelOverride, logContext } = options ?? {};
     let openaiRequest = toOpenAIRequest(request, modelOverride ?? this.config.model);
 
     // Clamp max_tokens per-model when the provider's config carries a
@@ -200,6 +201,7 @@ export class OpenAICompatibleProvider implements Provider {
       console.log(`[dispatch-byte-trace] ${this.name}: actually-sending=${dispatchBytes}B to ${this.config.baseUrl}/chat/completions`);
     }
 
+    const dispatchStartedAt = Date.now();
     let res: Response;
     try {
       res = await fetch(`${this.config.baseUrl}/chat/completions`, {
@@ -209,6 +211,18 @@ export class OpenAICompatibleProvider implements Provider {
         body: JSON.stringify(openaiRequest),
       });
     } catch (err) {
+      if (logContext) {
+        logRequest({
+          provider: this.name,
+          model: effectiveModel,
+          durationMs: Date.now() - dispatchStartedAt,
+          status: null,
+          error: (err as Error).message,
+          request: openaiRequest,
+          response: "",
+          context: logContext,
+        });
+      }
       throw new ProviderUnavailableError(`${this.name}: unreachable at ${this.config.baseUrl} (${(err as Error).message})`);
     }
 
@@ -226,6 +240,19 @@ export class OpenAICompatibleProvider implements Provider {
       // `upBodyText` as "" which downstream uses as an empty blob.
       let upBodyText = "";
       try { upBodyText = await res.text(); } catch { /* keep "" */ }
+
+      if (logContext) {
+        logRequest({
+          provider: this.name,
+          model: effectiveModel,
+          durationMs: Date.now() - dispatchStartedAt,
+          status: res.status,
+          error: null,
+          request: openaiRequest,
+          response: upBodyText,
+          context: logContext,
+        });
+      }
 
       // Diagnostic: distinguish an upstream 413 (we DID send a body and
       // Groq/etc rejected it) from our own fitRequestToSize
@@ -290,6 +317,21 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     if (openaiRequest.stream) {
+      // A ReadableStream can only be consumed once and tee()'d only once
+      // -- translateStream() needs the real thing to actually serve the
+      // caller, so a second, independent copy is teed off for logging
+      // and drained in the background rather than being read here and
+      // handed to translateStream as something already-consumed.
+      if (logContext && res.body) {
+        const [forCaller, forLog] = res.body.tee();
+        void logStreamingResponse(forLog, this.name, effectiveModel, dispatchStartedAt, openaiRequest, logContext);
+        const resForCaller = new Response(forCaller, { status: res.status, statusText: res.statusText, headers: res.headers });
+        return {
+          status: 200,
+          headers: new Headers({ "content-type": "text/event-stream" }),
+          body: translateStream(resForCaller, request.model, this.config.emitLateMetadataDelta ?? false),
+        };
+      }
       return {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
@@ -298,10 +340,61 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     const openaiJson = await res.json();
+    if (logContext) {
+      logRequest({
+        provider: this.name,
+        model: effectiveModel,
+        durationMs: Date.now() - dispatchStartedAt,
+        status: res.status,
+        error: null,
+        request: openaiRequest,
+        response: JSON.stringify(openaiJson),
+        context: logContext,
+      });
+    }
     const anthropicJson = fromOpenAIResponse(openaiJson as never, request.model);
     const body = new Blob([JSON.stringify(anthropicJson)]).stream();
     return { status: 200, headers: new Headers({ "content-type": "application/json" }), body };
   }
+}
+
+/** Drains a teed copy of a streaming response's raw bytes purely for
+ *  request-log.ts's capture -- never awaited by the caller serving the
+ *  real response, so a slow or failed drain here can't add latency or
+ *  block the actual turn. Raw SSE frames (`data: {...}\n\n`), not our
+ *  already-translated Anthropic-format representation -- see
+ *  request-log.ts's `response` field doc for why. */
+async function logStreamingResponse(
+  stream: ReadableStream<Uint8Array>,
+  provider: string,
+  model: string,
+  dispatchStartedAt: number,
+  request: unknown,
+  context: RequestLogContext,
+): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } catch (err) {
+    text += `\n[request-log: capture error: ${(err as Error).message}]`;
+  }
+  logRequest({
+    provider,
+    model,
+    durationMs: Date.now() - dispatchStartedAt,
+    status: 200,
+    error: null,
+    request,
+    response: text,
+    context,
+  });
 }
 
 /**
