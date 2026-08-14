@@ -48,6 +48,13 @@ export interface FallbackContext {
   agentId?: string;
   agentName?: string;
   role?: string;
+  /** The ticket this dispatch is working, when there is one (project-level
+   *  stages like groomBacklog/assignReady have none). Round-tripped through
+   *  the alias so dispatch-byte-trace/request-log entries can be tied back
+   *  to a specific ticket even under concurrent multi-agent load -- without
+   *  it, correlating a byte-cap trim or a 413 to "which ticket" required
+   *  guessing from timing alone. */
+  workItemId?: string;
 }
 
 export type ModelAlias = PinnedRoute | FallbackRoute;
@@ -88,6 +95,7 @@ function parseContextSuffix(suffix: string | undefined): FallbackContext | undef
     if (typeof parsed.agentId === "string") ctx.agentId = parsed.agentId;
     if (typeof parsed.agentName === "string") ctx.agentName = parsed.agentName;
     if (typeof parsed.role === "string") ctx.role = parsed.role;
+    if (typeof parsed.workItemId === "string") ctx.workItemId = parsed.workItemId;
     return Object.keys(ctx).length > 0 ? ctx : undefined;
   } catch {
     return undefined;

@@ -92,6 +92,12 @@ export interface DispatchContext {
   agentId?: string;
   agentName?: string;
   role?: string;
+  /** The ticket this dispatch is working, when there is one. Round-tripped
+   *  from the model alias (see providers/model-alias.ts's FallbackContext)
+   *  through to request-log.ts's RequestLogContext, so a byte-cap trim or
+   *  a 413 in the dispatch-byte-trace logs can be tied back to a specific
+   *  ticket instead of guessed at from timing under concurrent load. */
+  workItemId?: string;
   fallbackSet?: string;
   /** Routing discriminator: how this request entered the GlobalQueue.
    *  Makes the activity panel able to group events by route shape

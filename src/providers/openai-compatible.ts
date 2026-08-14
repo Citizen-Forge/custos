@@ -104,6 +104,12 @@ export class OpenAICompatibleProvider implements Provider {
   async complete(request: AnthropicMessagesRequest, options?: CompleteOptions): Promise<ProviderResponse> {
     // clientBetaHeader is Anthropic-specific and intentionally ignored here.
     const { signal, modelOverride, logContext } = options ?? {};
+    // Tags every dispatch-byte-trace/fit log line below with the ticket
+    // it belongs to (when there is one), so a byte-cap trim or a 413 can
+    // be tied back to a specific ticket instead of guessed at from
+    // timing under concurrent multi-agent load. See model-alias.ts's
+    // FallbackContext.workItemId for how this round-trips from dispatch.
+    const logTag = logContext?.workItemId ? ` ticket=${logContext.workItemId}` : "";
     let openaiRequest = toOpenAIRequest(request, modelOverride ?? this.config.model);
 
     // Clamp max_tokens per-model when the provider's config carries a
@@ -153,17 +159,17 @@ export class OpenAICompatibleProvider implements Provider {
     if (this.config.maxRequestBytes !== undefined) {
       const preFitBytes = serializeRequestBytes(openaiRequest);
       const compactPassEstimate = estimateCompactPassBytes(openaiRequest);
-      console.log(`[dispatch-byte-trace] ${this.name}: preFit=${preFitBytes}B compactPass-est=${compactPassEstimate}B ratio=${preFitBytes > 0 ? (compactPassEstimate / preFitBytes).toFixed(3) : "n/a"} cap=${this.config.maxRequestBytes}B`);
+      console.log(`[dispatch-byte-trace] ${this.name}: preFit=${preFitBytes}B compactPass-est=${compactPassEstimate}B ratio=${preFitBytes > 0 ? (compactPassEstimate / preFitBytes).toFixed(3) : "n/a"} cap=${this.config.maxRequestBytes}B${logTag}`);
     }
 
     if (this.config.maxRequestBytes !== undefined) {
       const warnRatio = Math.min(1, Math.max(0.1, this.config.maxRequestBytesWarnRatio ?? 0.75));
       const fit = fitRequestToSize(openaiRequest, this.config.maxRequestBytes, warnRatio);
       if (fit.stripped > 0) {
-        console.log(`[${this.name}] stripped ${fit.stripped} image(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)`);
+        console.log(`[${this.name}] stripped ${fit.stripped} image(s) from request to fit ${this.config.maxRequestBytes}B cap (${fit.initialBytes}B -> ${fit.finalBytes}B)${logTag}`);
       }
       if (fit.truncatedMessages > 0) {
-        console.log(`[${this.name}] truncated ${fit.truncatedMessages} old message(s) from request (${fit.initialBytes}B -> ${fit.finalBytes}B, cap=${this.config.maxRequestBytes}B, warnRatio=${warnRatio})`);
+        console.log(`[${this.name}] truncated ${fit.truncatedMessages} old message(s) from request (${fit.initialBytes}B -> ${fit.finalBytes}B, cap=${this.config.maxRequestBytes}B, warnRatio=${warnRatio})${logTag}`);
       }
       openaiRequest = fit.request;
       // Diagnostic: log post-fit bytes + strip/truncate count. Reached
@@ -171,7 +177,7 @@ export class OpenAICompatibleProvider implements Provider {
       // immediately below. This is the size the upstream actually sees.
       if (!fit.stillOverLimit) {
         const postFitBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
-        console.log(`[dispatch-byte-trace] ${this.name}: postFit=${postFitBytes}B stripped=${fit.stripped} truncated=${fit.truncatedMessages}`);
+        console.log(`[dispatch-byte-trace] ${this.name}: postFit=${postFitBytes}B stripped=${fit.stripped} truncated=${fit.truncatedMessages}${logTag}`);
       }
       if (fit.stillOverLimit) {
         const hadImages = fit.stripped > 0;
@@ -202,7 +208,7 @@ export class OpenAICompatibleProvider implements Provider {
     // maxRequestBytes set so it scales with providers that have a cap.
     if (this.config.maxRequestBytes !== undefined) {
       const dispatchBytes = Buffer.byteLength(JSON.stringify(openaiRequest), "utf8");
-      console.log(`[dispatch-byte-trace] ${this.name}: actually-sending=${dispatchBytes}B to ${this.config.baseUrl}/chat/completions`);
+      console.log(`[dispatch-byte-trace] ${this.name}: actually-sending=${dispatchBytes}B to ${this.config.baseUrl}/chat/completions${logTag}`);
     }
 
     const dispatchStartedAt = Date.now();

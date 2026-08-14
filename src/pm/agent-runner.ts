@@ -237,6 +237,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
         agentId: agent.id,
         agentName: agent.name,
         role: agent.role,
+        ...(options.workItemId ? { workItemId: options.workItemId } : {}),
       }),
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
