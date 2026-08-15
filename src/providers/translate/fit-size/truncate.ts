@@ -145,14 +145,26 @@ function isErrorMessage(msg: OpenAIMessage): boolean {
  *  limit), or undefined when the request has < 3 messages total (nothing
  *  worth dropping).
  *
- *  Agent-style conversations (the dominant case) produce messages where
- *  the only `role: "user"` entry is the initial prompt at index 1 — every
- *  subsequent tool_result becomes `role: "tool"` in the OpenAI translation.
- *  A user-message search would find `lastUserIdx = 1` and refuse to
- *  truncate anything. The role-agnostic approach below removes the oldest
- *  messages progressively until the body fits (or only 2 messages remain),
- *  which works for both traditional chat conversations and tool-result-heavy
- *  agent turns even when the conversation is far past the size cap.
+ *  PROTECTED MESSAGE: the most recent `role: "user"` message is never a
+ *  removal candidate. Agent-style conversations (the dominant case)
+ *  produce messages where the only `role: "user"` entry is the initial
+ *  prompt at index 1 — every subsequent tool_result becomes `role: "tool"`
+ *  in the OpenAI translation. That index-1 user message is the live
+ *  instruction for this turn (on an agent's first turn, it's the entire
+ *  task -- e.g. Custos's rendered work-item prompt), not "old" history to
+ *  discard. Confirmed live: on a project whose system prompt + tool
+ *  schemas + hook-injected memory context already sat near the byte cap
+ *  before any conversation had accumulated, the age-based loop below used
+ *  to remove exactly that index-1 message on turn one, leaving the model
+ *  system instructions and generic project memory but zero indication of
+ *  what ticket it was even working -- it then explored the codebase
+ *  aimlessly for dozens of retries, "succeeding" at individual tool calls
+ *  while never seeing its actual task. Age-based removal now skips
+ *  whichever index holds the last user-role message and drains every
+ *  other non-system message first; only if that alone can't fit the
+ *  request do the content-truncation fallbacks below touch it (truncating
+ *  its *content*, head/tail preserved, is still far better than deleting
+ *  it outright).
  *
  *  ERROR-FIRST PRE-FILTER: Before the age-based loop, the function scans
  *  for messages whose content matches known error patterns (
@@ -167,10 +179,10 @@ function isErrorMessage(msg: OpenAIMessage): boolean {
  *  reduced by 50% still leaves ~65MB, which exceeds most caps. The old
  *  one-shot approach returned `stillOverLimit: true` after that single
  *  attempt, blocking the request entirely. Now the function keeps
- *  removing 25% of remaining messages per iteration until the body fits
- *  or only 2 messages survive, at which point the limit really can't be
- *  satisfied (unless the system prompt alone exceeds the cap, which is
- *  an operator config issue). */
+ *  removing 25% of remaining (unprotected) messages per iteration until
+ *  the body fits or nothing removable is left, at which point the limit
+ *  really can't be satisfied by removal alone (unless the system prompt
+ *  alone exceeds the cap, which is an operator config issue). */
 export function truncateOldestMessages(req: OpenAIRequest, currentBytes: number, maxBytes: number): FitRequestResult | undefined {
   // Need at least system (0) + 2 more messages to have anything worth
   // trimming. A single turn with only its system prompt, one user, and
@@ -180,15 +192,26 @@ export function truncateOldestMessages(req: OpenAIRequest, currentBytes: number,
   const clone: OpenAIRequest = JSON.parse(JSON.stringify(req));
   let removedCount = 0;
 
+  // Find the most recent user-role message (if any) and shield it from
+  // every removal pass below. Recomputed by object identity after each
+  // splice since indices shift as messages are removed.
+  let protectedMsg: (typeof clone.messages)[number] | undefined;
+  for (let idx = clone.messages.length - 1; idx >= 1; idx--) {
+    if (clone.messages[idx].role === "user") {
+      protectedMsg = clone.messages[idx];
+      break;
+    }
+  }
+  const protectedIdx = (): number => (protectedMsg ? clone.messages.indexOf(protectedMsg) : -1);
+
   // ERROR-FIRST PASS: Strip known error-pattern messages before the
   // age-based loop. In a conversation saturated with retry errors (e.g.
   // a PM agent that retried 50 times before succeeding), this single
   // pass removes all the dead weight at once — no need to touch healthy
-  // exchanges. Check every non-system message; system prompt at index 0
-  // is never removed.
+  // exchanges. Check every non-system, non-protected message.
   let i = clone.messages.length - 1;
   while (i >= 1) {
-    if (isErrorMessage(clone.messages[i])) {
+    if (i !== protectedIdx() && isErrorMessage(clone.messages[i])) {
       clone.messages.splice(i, 1);
       removedCount++;
     }
@@ -209,16 +232,21 @@ export function truncateOldestMessages(req: OpenAIRequest, currentBytes: number,
     // Error pass alone wasn't enough — fall through to age-based removal.
   }
 
-  // AGE-BASED LOOP: remove oldest messages in chunks of ~25% until the
-  // body fits or only the system prompt + 1 message remain. The old
-  // one-shot 50% pass was insufficient for conversations whose <newest
-  // half> alone exceeds the cap (e.g. a 131MB session file's newest
-  // 50% = ~65MB).
-  while (clone.messages.length > 2) {
-    // Remove the oldest ~25% of remaining non-system messages.
-    const chunkSize = Math.max(1, Math.floor((clone.messages.length - 1) * 0.25));
-    clone.messages.splice(1, chunkSize);
-    removedCount += chunkSize;
+  // AGE-BASED LOOP: remove the oldest ~25% of removable (non-system,
+  // non-protected) messages per iteration until the body fits or nothing
+  // removable remains.
+  for (;;) {
+    const removable: number[] = [];
+    const pIdx = protectedIdx();
+    for (let idx = 1; idx < clone.messages.length; idx++) {
+      if (idx !== pIdx) removable.push(idx);
+    }
+    if (removable.length === 0) break;
+
+    const chunkSize = Math.max(1, Math.floor(removable.length * 0.25));
+    const toRemove = new Set(removable.slice(0, chunkSize));
+    clone.messages = clone.messages.filter((_, idx) => !toRemove.has(idx));
+    removedCount += toRemove.size;
 
     const finalBytes = serializeRequestBytes(clone);
     if (finalBytes <= maxBytes) {
