@@ -59,7 +59,11 @@ export async function escalateStuckTickets(orch: Orchestrator, projectId: string
         "Custos",
         `Escalated to ${agentStore.displayName(principal)} after ${ESCALATION_THRESHOLD}+ consecutive failed attempts by ${previousAssignee ? agentStore.displayName(previousAssignee) : "the previous assignee"}. This run uses the "principal" fallback set (real Anthropic usage) -- see the ticket's comment history and prior PR for what's already been tried.`,
       );
-      orch.emit("activity", projectId, `Escalated "${item.title}" to ${agentStore.displayName(principal)} after ${ESCALATION_THRESHOLD}+ failed attempts`);
+      // No slackText/agent here -- this is the system reassigning work,
+      // not the principal reporting on its own run (that comes from the
+      // engineer stage once it actually dispatches), so first-person
+      // voice would be backwards ("I've been escalated to myself").
+      orch.emit("activity", projectId, { text: `Escalated "${item.title}" to ${agentStore.displayName(principal)} after ${ESCALATION_THRESHOLD}+ failed attempts` });
     }
   });
 }

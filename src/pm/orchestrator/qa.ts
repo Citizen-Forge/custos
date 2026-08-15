@@ -18,6 +18,7 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
     if (!item || item.status !== "qa") return;
     const ctx = await resolveProjectAgent(projectId, "qa");
     if (!ctx) return;
+    const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
 
     // Review starts with the PR diff. The worktree is available if the
     // QA agent needs to check out and run the code, but the default
@@ -84,7 +85,11 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
       // activity line (see slack/activity.ts), routine concurrency
       // contention would otherwise spam the channel on every tick.
       if (result.unavailable) return;
-      orch.emit("activity", projectId, `${ctx.agent.name} QA run failed on "${item.title}": ${result.error ?? "unknown error"}`);
+      orch.emit("activity", projectId, {
+        text: `${ctx.agent.name} QA run failed on "${item.title}": ${result.error ?? "unknown error"}`,
+        slackText: `My QA run failed on "${item.title}": ${result.error ?? "unknown error"}`,
+        agent: va,
+      });
       return;
     }
 
@@ -155,7 +160,11 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
       // its pull request survive -- that's where the work actually lives.
       await release(ctx.project, workItemId);
       await board.transitionWorkItem(workItemId, "complete", ctx.agent.id, "QA passed");
-      orch.emit("activity", projectId, `QA passed "${item.title}".`);
+      orch.emit("activity", projectId, {
+        text: `QA passed "${item.title}".`,
+        slackText: `I passed "${item.title}".`,
+        agent: va,
+      });
       return;
     }
 
@@ -164,6 +173,10 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
     // is exactly the signal the engineering manager reads back when it
     // decides whether that agent is under-modelled.
     if (item.assigneeAgentId) await agentStore.recordRunResult(item.assigneeAgentId, { qaRejected: true });
-    orch.emit("activity", projectId, `QA bounced "${item.title}" back to ready for rework.`);
+    orch.emit("activity", projectId, {
+      text: `QA bounced "${item.title}" back to ready for rework.`,
+      slackText: `I bounced "${item.title}" back to ready for rework.`,
+      agent: va,
+    });
   });
 }

@@ -22,6 +22,9 @@ export async function runEngineer(orch: Orchestrator, projectId: string, workIte
     const agent = await agentStore.getAgent(item.assigneeAgentId);
     if (!project || !agent) return;
     const settings = await getSettings(projectId);
+    // Built once and reused across every emit below -- the agent doesn't
+    // change mid-run, only which line it's attributed to does.
+    const va = { personaName: agent.personaName, name: agent.name, role: agent.role };
 
     // Its own checkout, on its own branch: this is what lets several
     // engineers work the same project at once without stepping on each
@@ -49,7 +52,11 @@ export async function runEngineer(orch: Orchestrator, projectId: string, workIte
         // for it in the run history, because nothing was ever recorded.
         const failedRun = await runs.startRun({ projectId, agentId: agent.id, role: "engineer", providerKey: "none", model: "none", billed: false, workItemId, tag: "custos-engineer" });
         await runs.finishRun(failedRun.id, { status: "failed", error: reason });
-        orch.emit("activity", projectId, `Held "${item.title}": ${reason} (attempt ${backedOff?.attempts ?? 1}).`);
+        orch.emit("activity", projectId, {
+          text: `Held "${item.title}": ${reason} (attempt ${backedOff?.attempts ?? 1}).`,
+          slackText: `I'm held on "${item.title}": ${reason} (attempt ${backedOff?.attempts ?? 1}).`,
+          agent: va,
+        });
         return;
       }
       const access = await verifyGitHubAccess(workspace.cwd, gitEnv!);
@@ -57,7 +64,11 @@ export async function runEngineer(orch: Orchestrator, projectId: string, workIte
         const backedOff = await board.recordAttemptFailure(workItemId);
         const failedRun = await runs.startRun({ projectId, agentId: agent.id, role: "engineer", providerKey: "none", model: "none", billed: false, workItemId, tag: "custos-engineer" });
         await runs.finishRun(failedRun.id, { status: "failed", error: `project GitHub credentials are unusable: ${access.reason}` });
-        orch.emit("activity", projectId, `Held "${item.title}": project GitHub credentials are unusable (attempt ${backedOff?.attempts ?? 1}): ${access.reason}`);
+        orch.emit("activity", projectId, {
+          text: `Held "${item.title}": project GitHub credentials are unusable (attempt ${backedOff?.attempts ?? 1}): ${access.reason}`,
+          slackText: `I'm held on "${item.title}": project GitHub credentials are unusable (attempt ${backedOff?.attempts ?? 1}): ${access.reason}`,
+          agent: va,
+        });
         return;
       }
     }
@@ -118,11 +129,12 @@ export async function runEngineer(orch: Orchestrator, projectId: string, workIte
       // same as any other failure: no result means nothing to act on.
       const attempt = await handleDispatchFailure(workItemId, result.unavailable);
       if (attempt === null) return;
-      orch.emit(
-        "activity",
-        projectId,
-        `${agent.name} failed on "${item.title}" (attempt ${attempt}): ${result.ok ? "did not report a result via report_ready_for_qa or report_blocked" : (result.error ?? "unknown error")}; will retry.`,
-      );
+      const reason = result.ok ? "did not report a result via report_ready_for_qa or report_blocked" : (result.error ?? "unknown error");
+      orch.emit("activity", projectId, {
+        text: `${agent.name} failed on "${item.title}" (attempt ${attempt}): ${reason}; will retry.`,
+        slackText: `I failed on "${item.title}" (attempt ${attempt}): ${reason}. I'll retry.`,
+        agent: va,
+      });
       return;
     }
     if (outcome.status === "ready_for_qa" && outcome.subtasks.length) {
@@ -138,7 +150,11 @@ export async function runEngineer(orch: Orchestrator, projectId: string, workIte
       // ticket nobody is working just blocks a slot.
       await release(project, workItemId);
       await board.transitionWorkItem(workItemId, "backlog", agent.id, outcome.reason);
-      orch.emit("activity", projectId, `${agent.name} is blocked on "${item.title}": ${outcome.reason}`);
+      orch.emit("activity", projectId, {
+        text: `${agent.name} is blocked on "${item.title}": ${outcome.reason}`,
+        slackText: `I'm blocked on "${item.title}": ${outcome.reason}`,
+        agent: va,
+      });
       return;
     }
 
@@ -149,7 +165,11 @@ export async function runEngineer(orch: Orchestrator, projectId: string, workIte
       const delivery = await verifyPullRequest(workspace.cwd, outcome.prUrl, workspace.branch, settings.defaultBranch, gitEnv!);
       if (!delivery.ok) {
         const backedOff = await board.recordAttemptFailure(workItemId);
-        orch.emit("activity", projectId, `${agent.name} could not hand off "${item.title}" to QA (attempt ${backedOff?.attempts ?? 1}): ${delivery.reason}`);
+        orch.emit("activity", projectId, {
+          text: `${agent.name} could not hand off "${item.title}" to QA (attempt ${backedOff?.attempts ?? 1}): ${delivery.reason}`,
+          slackText: `I couldn't hand off "${item.title}" to QA (attempt ${backedOff?.attempts ?? 1}): ${delivery.reason}`,
+          agent: va,
+        });
         return;
       }
       outcome.prUrl = delivery.url;
@@ -171,7 +191,11 @@ export async function runEngineer(orch: Orchestrator, projectId: string, workIte
         "**No pull request found.** The ticket was marked as complete but no PR was created. QA reviews the PR diff, not the whole checkout — push your branch and open a pull request against the default branch before requesting QA review.",
         );
       }
-      orch.emit("activity", projectId, `${agent.name} reported "${item.title}" done without a PR (attempt ${backedOff?.attempts ?? 1}); retrying after backoff.`);
+      orch.emit("activity", projectId, {
+        text: `${agent.name} reported "${item.title}" done without a PR (attempt ${backedOff?.attempts ?? 1}); retrying after backoff.`,
+        slackText: `I reported "${item.title}" done, but I didn't open a PR (attempt ${backedOff?.attempts ?? 1}). I'll retry after backoff.`,
+        agent: va,
+      });
       return;
     }
 
@@ -187,6 +211,10 @@ export async function runEngineer(orch: Orchestrator, projectId: string, workIte
     }
     await board.transitionWorkItem(workItemId, "qa", agent.id, "ready for QA");
     await agentStore.recordRunResult(agent.id, { completed: true, runMs: result.runMs });
-    orch.emit("activity", projectId, `${agent.name} finished "${item.title}" and sent it to QA.`);
+    orch.emit("activity", projectId, {
+      text: `${agent.name} finished "${item.title}" and sent it to QA.`,
+      slackText: `I finished "${item.title}" and sent it to QA.`,
+      agent: va,
+    });
   });
 }

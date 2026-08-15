@@ -30,9 +30,14 @@ export async function provisionRepo(orch: Orchestrator, projectId: string): Prom
     const ctx = await resolveProjectAgent(projectId, "devops");
     if (!ctx) return;
     if (ctx.settings.repoUrl) return; // already stood up
+    const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
 
     if (!(await hasGitCredentials(projectId))) {
-      orch.emit("activity", projectId, "Can't create a repository: no git credentials in the vault. Add a GitHub token in DevOps and mark it 'use for git'.");
+      orch.emit("activity", projectId, {
+        text: "Can't create a repository: no git credentials in the vault. Add a GitHub token in DevOps and mark it 'use for git'.",
+        slackText: "I can't create a repository: no git credentials in the vault. Add a GitHub token in DevOps and mark it 'use for git'.",
+        agent: va,
+      });
       return;
     }
 
@@ -63,7 +68,12 @@ export async function provisionRepo(orch: Orchestrator, projectId: string): Prom
       // was attempted, and the next tick retries for free (see
       // handleDispatchFailure's doc comment for the full reasoning).
       if (result.unavailable) return;
-      orch.emit("activity", projectId, `Repository provisioning failed: ${result.parsed?.blockedReason ?? result.error ?? "no repository URL returned"}`);
+      const reason = result.parsed?.blockedReason ?? result.error ?? "no repository URL returned";
+      orch.emit("activity", projectId, {
+        text: `Repository provisioning failed: ${reason}`,
+        slackText: `Repository provisioning failed: ${reason}`,
+        agent: va,
+      });
       return;
     }
 
@@ -71,7 +81,11 @@ export async function provisionRepo(orch: Orchestrator, projectId: string): Prom
       repoUrl: result.parsed.repoUrl,
       ...(result.parsed.defaultBranch ? { defaultBranch: result.parsed.defaultBranch } : {}),
     });
-    orch.emit("activity", projectId, `DevOps created the repository: ${result.parsed.repoUrl}`);
+    orch.emit("activity", projectId, {
+      text: `DevOps created the repository: ${result.parsed.repoUrl}`,
+      slackText: `I created the repository: ${result.parsed.repoUrl}`,
+      agent: va,
+    });
   });
 }
 
@@ -81,6 +95,7 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
     if (!item || item.labels.includes(DEPLOYED_LABEL)) return;
     const ctx = await resolveProjectAgent(projectId, "devops");
     if (!ctx) return;
+    const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
 
     // -------------------------------------------------------------
     // Deterministic merge gate. No LLM involved: "does the PR have a
@@ -93,7 +108,11 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
     // checkPrReadyToMerge for the detailed reasoning.
     if (!item.prUrl) {
       const backedOff = await board.recordAttemptFailure(workItemId);
-      orch.emit("activity", projectId, `DevOps can't merge "${item.title}" (attempt ${backedOff?.attempts ?? 1}): the ticket has no prUrl recorded.`);
+      orch.emit("activity", projectId, {
+        text: `DevOps can't merge "${item.title}" (attempt ${backedOff?.attempts ?? 1}): the ticket has no prUrl recorded.`,
+        slackText: `I can't merge "${item.title}" (attempt ${backedOff?.attempts ?? 1}): the ticket has no prUrl recorded.`,
+        agent: va,
+      });
       return;
     }
     const gitEnv = await resolveAgentEnv(projectId);
@@ -115,7 +134,11 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
       if (gate.kind === "unmergeable") {
         await board.transitionWorkItem(workItemId, "in_progress", ctx.agent.id, gate.reason);
         await board.addComment(workItemId, "system", "DevOps gate", `Sent back to engineering: ${gate.reason}`);
-        orch.emit("activity", projectId, `DevOps sent "${item.title}" back to in_progress: ${gate.reason}`);
+        orch.emit("activity", projectId, {
+          text: `DevOps sent "${item.title}" back to in_progress: ${gate.reason}`,
+          slackText: `I sent "${item.title}" back to in_progress: ${gate.reason}`,
+          agent: va,
+        });
         return;
       }
       const backedOff = await board.recordAttemptFailure(workItemId);
@@ -128,7 +151,11 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
       if ((backedOff?.attempts ?? 1) === 1) {
         await board.addComment(workItemId, "system", "DevOps gate", `Not merged yet: ${gate.reason}`);
       }
-      orch.emit("activity", projectId, `DevOps gate held "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${gate.reason}`);
+      orch.emit("activity", projectId, {
+        text: `DevOps gate held "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${gate.reason}`,
+        slackText: `I'm holding "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${gate.reason}`,
+        agent: va,
+      });
       return;
     }
     const merged = await mergePullRequest(ctx.project.workspaceDir, item.prUrl, gitEnv);
@@ -139,7 +166,11 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
       // worth a comment every time it recurs, not just once.
       const backedOff = await board.recordAttemptFailure(workItemId);
       await board.addComment(workItemId, "system", "DevOps gate", `Merge attempt failed: ${merged.reason}`);
-      orch.emit("activity", projectId, `DevOps failed to merge "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${merged.reason}`);
+      orch.emit("activity", projectId, {
+        text: `DevOps failed to merge "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${merged.reason}`,
+        slackText: `I failed to merge "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${merged.reason}`,
+        agent: va,
+      });
       return;
     }
     await board.addComment(workItemId, "system", "DevOps gate", `Merged pull request ${item.prUrl}.`);
@@ -149,7 +180,11 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
       // deploy -- no agent dispatch needed at all.
       await board.clearAttempts(workItemId);
       await board.updateWorkItem(workItemId, { labels: [...item.labels, DEPLOYED_LABEL] });
-      orch.emit("activity", projectId, `DevOps merged the pull request for "${item.title}".`);
+      orch.emit("activity", projectId, {
+        text: `DevOps merged the pull request for "${item.title}".`,
+        slackText: `I merged the pull request for "${item.title}".`,
+        agent: va,
+      });
       return;
     }
 
@@ -193,7 +228,12 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
       // the QA path above.
       const attempt = await handleDispatchFailure(workItemId, result.unavailable);
       if (attempt === null) return;
-      orch.emit("activity", projectId, `${ctx.agent.name} deployment run failed on "${item.title}" (attempt ${attempt}): ${result.error ?? "unknown error"}; will retry.`);
+      const reason = result.error ?? "unknown error";
+      orch.emit("activity", projectId, {
+        text: `${ctx.agent.name} deployment run failed on "${item.title}" (attempt ${attempt}): ${reason}; will retry.`,
+        slackText: `My deployment run failed on "${item.title}" (attempt ${attempt}): ${reason}. I'll retry.`,
+        agent: va,
+      });
       return;
     }
 
@@ -207,7 +247,11 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
       if ((backedOff?.attempts ?? 1) === 1) {
         await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), `DevOps deployment missing awsRegion: required when deployTarget is aws.`);
       }
-      orch.emit("activity", projectId, `DevOps deployment missing awsRegion on "${item.title}" (attempt ${backedOff?.attempts ?? 1}). Use the project's deployConfig.awsRegion or report it in the contract.`);
+      orch.emit("activity", projectId, {
+        text: `DevOps deployment missing awsRegion on "${item.title}" (attempt ${backedOff?.attempts ?? 1}). Use the project's deployConfig.awsRegion or report it in the contract.`,
+        slackText: `My deployment is missing awsRegion on "${item.title}" (attempt ${backedOff?.attempts ?? 1}). I need the project's deployConfig.awsRegion set, or I need to report it in the contract.`,
+        agent: va,
+      });
       return;
     }
     if (contract.status !== "deployed") {
@@ -215,7 +259,11 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
       if ((backedOff?.attempts ?? 1) === 1 && (contract.summary ?? "").trim()) {
         await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
       }
-      orch.emit("activity", projectId, `DevOps is blocked on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${contract.blockedReason ?? "no reason given"}`);
+      orch.emit("activity", projectId, {
+        text: `DevOps is blocked on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${contract.blockedReason ?? "no reason given"}`,
+        slackText: `I'm blocked on "${item.title}" (attempt ${backedOff?.attempts ?? 1}): ${contract.blockedReason ?? "no reason given"}`,
+        agent: va,
+      });
       return;
     }
     await board.clearAttempts(workItemId);
@@ -223,11 +271,13 @@ export async function runDevops(orch: Orchestrator, projectId: string, workItemI
       await board.addComment(workItemId, ctx.agent.id, agentStore.displayName(ctx.agent), contract.summary ?? "");
     }
     await board.updateWorkItem(workItemId, { labels: [...item.labels, DEPLOYED_LABEL] });
-    orch.emit(
-      "activity",
-      projectId,
-      `DevOps deployed "${item.title}"${contract.estimatedMonthlyUsd ? ` (~$${contract.estimatedMonthlyUsd}/mo)` : ""}${contract.awsRegion ? ` in ${contract.awsRegion}` : ""}.`,
-    );
+    const costNote = contract.estimatedMonthlyUsd ? ` (~$${contract.estimatedMonthlyUsd}/mo)` : "";
+    const regionNote = contract.awsRegion ? ` in ${contract.awsRegion}` : "";
+    orch.emit("activity", projectId, {
+      text: `DevOps deployed "${item.title}"${costNote}${regionNote}.`,
+      slackText: `I deployed "${item.title}"${costNote}${regionNote}.`,
+      agent: va,
+    });
   });
 }
 

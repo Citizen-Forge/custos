@@ -21,9 +21,36 @@ import { provisionRepo, runDevops, DEPLOYED_LABEL } from "./orchestrator/devops.
 
 const TICK_MS = Number(process.env.CUSTOS_ORCHESTRATOR_TICK_MS ?? 20_000);
 
+/** The fields of an acting agent an activity line needs to speak in its
+ *  voice -- a narrow slice of AgentDef rather than the whole record, so a
+ *  stage module doesn't need a full agent fetch just to attribute a line
+ *  it already has the agent object for. */
+export interface ActivityAgent {
+  personaName: string | null;
+  name: string;
+  role: AgentDef["role"];
+}
+
+/** One activity event, rendered differently by its two listeners (see
+ *  server/pm-events.ts and slack/activity.ts). `text` is the operator-
+ *  facing line the admin UI's toast shows -- third person, unchanged
+ *  from before this type existed. `slackText`, when set, is the SAME
+ *  event spoken in the acting agent's own first-person voice for Slack,
+ *  posted under that agent's persona (see slack/personas.ts) instead of
+ *  the generic Custos identity. System-level events with no natural
+ *  first-person voice (budget exceeded, a run stalled, the project
+ *  paused) omit both `slackText` and `agent` and just post `text` under
+ *  the default persona -- there's no "I" for a message about the
+ *  project itself. */
+export interface ActivityMessage {
+  text: string;
+  slackText?: string;
+  agent?: ActivityAgent;
+}
+
 export interface OrchestratorEvents {
   change: [projectId: string];
-  activity: [projectId: string, message: string];
+  activity: [projectId: string, message: ActivityMessage];
 }
 
 /**
@@ -141,11 +168,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     // agent-runner is what eventually stops a genuinely hung run.
     for (const stalled of await runs.listStalledRuns(project.id)) {
       const minutes = Math.round((Date.now() - stalled.lastEventAt) / 60_000);
-      this.emit(
-        "activity",
-        project.id,
-        `${stalled.role} has done nothing for ${minutes}m — last action: ${stalled.currentAction ?? "none recorded"}`,
-      );
+      this.emit("activity", project.id, {
+        text: `${stalled.role} has done nothing for ${minutes}m — last action: ${stalled.currentAction ?? "none recorded"}`,
+      });
     }
 
     if (await this.overBudget(project.id, settings)) return;
@@ -257,7 +282,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     if (settings.budget.monthlyUsd === null) return false;
     const spent = await this.runtime.spendTracker.getProjectSpend(projectId);
     if (spent < settings.budget.monthlyUsd) return false;
-    this.emit("activity", projectId, `Paused: this month's agent budget ($${settings.budget.monthlyUsd}) is spent.`);
+    this.emit("activity", projectId, { text: `Paused: this month's agent budget ($${settings.budget.monthlyUsd}) is spent.` });
     return true;
   }
 
@@ -286,7 +311,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // instead of only surviving in a per-ticket comment (or nowhere), and
       // swallow it so one tick's bug can't take down the process.
       const message = err instanceof Error ? err.message : String(err);
-      this.emit("activity", projectId, `${key} failed unexpectedly: ${message}`);
+      this.emit("activity", projectId, { text: `${key} failed unexpectedly: ${message}` });
       return null;
     } finally {
       this.busy.delete(key);
@@ -309,14 +334,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       controller.abort();
       aborted++;
     }
-    this.emit("activity", projectId, `Paused. ${aborted} running agent(s) stopped.`);
+    this.emit("activity", projectId, { text: `Paused. ${aborted} running agent(s) stopped.` });
     this.emit("change", projectId);
     return aborted;
   }
 
   async resumeProject(projectId: string): Promise<void> {
     await updateSettings(projectId, { paused: false });
-    this.emit("activity", projectId, "Resumed.");
+    this.emit("activity", projectId, { text: "Resumed." });
     this.emit("change", projectId);
   }
 

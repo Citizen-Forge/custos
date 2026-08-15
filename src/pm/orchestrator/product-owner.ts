@@ -46,14 +46,28 @@ export async function groomBacklog(orch: Orchestrator, projectId: string): Promi
       });
     } finally {
       const actions = releaseSession(token);
-      if (actions.length) orch.emit("activity", projectId, `Product owner: ${actions.join("; ")}.`);
+      if (actions.length) {
+        const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
+        orch.emit("activity", projectId, {
+          text: `Product owner: ${actions.join("; ")}.`,
+          slackText: `I ${actions.join("; ")}.`,
+          agent: va,
+        });
+      }
     }
     if (!result.ok) {
       // No provider available isn't worth an activity line (or Slack
       // post, now that every activity line posts there) -- nothing was
       // attempted, and the next tick retries for free. See
       // handleDispatchFailure's doc comment for the full reasoning.
-      if (!result.unavailable) orch.emit("activity", projectId, `Product owner grooming failed: ${result.error ?? "unknown error"}`);
+      if (!result.unavailable) {
+        const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
+        orch.emit("activity", projectId, {
+          text: `Product owner grooming failed: ${result.error ?? "unknown error"}`,
+          slackText: `My grooming pass failed: ${result.error ?? "unknown error"}`,
+          agent: va,
+        });
+      }
     } else {
       // Fingerprint the POST-pass state, not what was fed in -- whatever
       // the pass itself changed (a promote, a revision) is already
@@ -102,10 +116,24 @@ export async function curateFacts(orch: Orchestrator, projectId: string): Promis
       });
     } finally {
       const actions = releaseSession(token);
-      if (actions.length) orch.emit("activity", projectId, `Product owner (facts review): ${actions.join("; ")}.`);
+      if (actions.length) {
+        const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
+        orch.emit("activity", projectId, {
+          text: `Product owner (facts review): ${actions.join("; ")}.`,
+          slackText: `I reviewed facts: ${actions.join("; ")}.`,
+          agent: va,
+        });
+      }
     }
     if (!result.ok) {
-      if (!result.unavailable) orch.emit("activity", projectId, `Facts curation pass failed: ${result.error ?? "unknown error"}`);
+      if (!result.unavailable) {
+        const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
+        orch.emit("activity", projectId, {
+          text: `Facts curation pass failed: ${result.error ?? "unknown error"}`,
+          slackText: `My facts curation pass failed: ${result.error ?? "unknown error"}`,
+          agent: va,
+        });
+      }
     } else {
       const freshPending = await listPendingFacts(projectId);
       await updateSettings(projectId, { lastCurateSignal: workItemsSignal(freshPending) });
@@ -190,6 +218,10 @@ export async function planIdea(orch: Orchestrator, projectId: string, ideaId: st
     }
 
     await ideas.markIdeaPlanned(ideaId, epicIds);
-    orch.emit("activity", projectId, `Product owner planned "${claimed.title}" into ${epicIds.length} epic(s).`);
+    orch.emit("activity", projectId, {
+      text: `Product owner planned "${claimed.title}" into ${epicIds.length} epic(s).`,
+      slackText: `I planned "${claimed.title}" into ${epicIds.length} epic(s).`,
+      agent: { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role },
+    });
   });
 }

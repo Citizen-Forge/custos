@@ -51,7 +51,7 @@ export function registerLifecycleRoutes(app: FastifyInstance, orchestrator: Orch
     // Operator-visible feedback in the activity feed: the reset is
     // immediate but the actual reassignment happens on the next tick,
     // so an explicit "reset requested" entry makes the gap visible.
-    orchestrator.emit("activity", id, "Project Manager reset — will re-evaluate on next tick.");
+    orchestrator.emit("activity", id, { text: "Project Manager reset — will re-evaluate on next tick." });
     return { ok: true };
   });
 }

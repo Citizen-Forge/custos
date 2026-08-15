@@ -44,9 +44,16 @@ export async function surveyProject(orch: Orchestrator, projectId: string): Prom
     });
 
     await applyFacts(projectId, ctx.agent, result.parsed);
+    const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
 
     if (!result.ok) {
-      if (!result.unavailable) orch.emit("activity", projectId, `Codebase survey failed: ${result.error ?? "unknown error"}`);
+      if (!result.unavailable) {
+        orch.emit("activity", projectId, {
+          text: `Codebase survey failed: ${result.error ?? "unknown error"}`,
+          slackText: `My codebase survey failed: ${result.error ?? "unknown error"}`,
+          agent: va,
+        });
+      }
       return;
     }
     if (result.parsed?.summary) {
@@ -60,6 +67,10 @@ export async function surveyProject(orch: Orchestrator, projectId: string): Prom
       });
     }
     const recorded = (await listFacts(projectId)).length;
-    orch.emit("activity", projectId, `Codebase survey complete — ${recorded} fact(s) now recorded for this project.`);
+    orch.emit("activity", projectId, {
+      text: `Codebase survey complete — ${recorded} fact(s) now recorded for this project.`,
+      slackText: `I finished surveying the codebase — ${recorded} fact(s) now recorded for this project.`,
+      agent: va,
+    });
   });
 }

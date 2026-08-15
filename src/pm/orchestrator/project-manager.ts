@@ -72,8 +72,16 @@ export async function assignModels(orch: Orchestrator, projectId: string): Promi
 
     await applyFacts(projectId, ctx.agent, result.parsed);
 
+    const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
+
     if (!result.ok || !result.parsed?.assignments?.length) {
-      if (!result.unavailable) orch.emit("activity", projectId, `Project Manager failed: ${result.error ?? "no assignments returned"}`);
+      if (!result.unavailable) {
+        orch.emit("activity", projectId, {
+          text: `Project Manager failed: ${result.error ?? "no assignments returned"}`,
+          slackText: `I failed: ${result.error ?? "no assignments returned"}`,
+          agent: va,
+        });
+      }
       // Don't set pmConfigured so it retries on the next tick.
       return;
     }
@@ -86,12 +94,20 @@ export async function assignModels(orch: Orchestrator, projectId: string): Promi
     for (const assignment of result.parsed.assignments) {
       if (!assignment.role || !assignment.fallbackSet) continue;
       if (!knownSets.has(assignment.fallbackSet)) {
-        orch.emit("activity", projectId, `PM: skipped "${assignment.role}" — unknown fallback set "${assignment.fallbackSet}"`);
+        orch.emit("activity", projectId, {
+          text: `PM: skipped "${assignment.role}" — unknown fallback set "${assignment.fallbackSet}"`,
+          slackText: `I skipped "${assignment.role}" — unknown fallback set "${assignment.fallbackSet}"`,
+          agent: va,
+        });
         continue;
       }
       const agent = agentByRole.get(assignment.role);
       if (!agent) {
-        orch.emit("activity", projectId, `PM: skipped "${assignment.role}" — no agent found for this role`);
+        orch.emit("activity", projectId, {
+          text: `PM: skipped "${assignment.role}" — no agent found for this role`,
+          slackText: `I skipped "${assignment.role}" — no agent found for this role`,
+          agent: va,
+        });
         continue;
       }
       // Only update if the assignment actually changes something.
@@ -108,10 +124,11 @@ export async function assignModels(orch: Orchestrator, projectId: string): Promi
     }
 
     await updateSettings(projectId, { pmConfigured: true, pmLastRunAt: Date.now() });
-    orch.emit(
-      "activity",
-      projectId,
-      `Project Manager assigned fallback sets to ${changed} role(s): ${result.parsed.assignments.map((a) => `${a.role} → ${a.fallbackSet}`).join(", ")}`,
-    );
+    const summary = result.parsed.assignments.map((a) => `${a.role} → ${a.fallbackSet}`).join(", ");
+    orch.emit("activity", projectId, {
+      text: `Project Manager assigned fallback sets to ${changed} role(s): ${summary}`,
+      slackText: `I assigned fallback sets to ${changed} role(s): ${summary}`,
+      agent: va,
+    });
   });
 }

@@ -1,8 +1,8 @@
 import type { Runtime } from "../runtime.js";
-import type { Orchestrator } from "../pm/orchestrator.js";
+import type { Orchestrator, ActivityMessage } from "../pm/orchestrator.js";
 import { getSettings } from "../pm/project-settings.js";
 import { postMessage } from "./client.js";
-import { DEFAULT_PERSONA } from "./personas.js";
+import { DEFAULT_PERSONA, ROLE_PERSONAS, type SlackPersona } from "./personas.js";
 
 /** Wires the orchestrator's "activity" events to Slack, posting into
  *  whichever channel that project has configured. This is the piece that
@@ -10,12 +10,15 @@ import { DEFAULT_PERSONA } from "./personas.js";
  *  each project's `slackChannelId` field already existed, but nothing
  *  ever called Slack's API with them.
  *
- *  Every activity line already carries its own attribution in the text
- *  (`"${agent.name} finished ..."`, etc. -- see orchestrator.ts's many
- *  `emit("activity", ...)` call sites), so this posts everything under
- *  the one DEFAULT_PERSONA rather than plumbing a role through every
- *  emit call. personas.ts's ROLE_PERSONAS stays available for a future
- *  pass that wants a distinct name/icon per role.
+ *  When an event names its acting agent (ActivityMessage.agent), this
+ *  posts under THAT agent's own persona -- "Mei-Ling Chen (Principal
+ *  Engineer)" with the role's icon, not the generic Custos identity --
+ *  using .slackText, the first-person variant of the same event ("I
+ *  finished work on X and sent it to QA" rather than the admin UI
+ *  toast's third-person "Principal Engineer finished X..."). System-level
+ *  events with no acting agent (budget exceeded, a stalled run, the
+ *  project paused) have neither and post .text under DEFAULT_PERSONA, same
+ *  as before this file could tell the two apart.
  *
  *  Fire-and-forget: a Slack outage or a bad token must never affect
  *  orchestration itself, so failures are swallowed here (nothing
@@ -27,12 +30,24 @@ export function wireSlackActivity(orchestrator: Orchestrator, runtime: Runtime):
   });
 }
 
-async function postActivity(runtime: Runtime, projectId: string, message: string): Promise<void> {
+/** Exported for testing -- the pure part of postActivity's persona choice,
+ *  no network I/O. */
+export function personaFor(message: ActivityMessage): SlackPersona {
+  if (!message.agent) return DEFAULT_PERSONA;
+  const { personaName, name, role } = message.agent;
+  return {
+    username: personaName ? `${personaName} (${name})` : name,
+    iconEmoji: ROLE_PERSONAS[role]?.iconEmoji ?? DEFAULT_PERSONA.iconEmoji,
+  };
+}
+
+async function postActivity(runtime: Runtime, projectId: string, message: ActivityMessage): Promise<void> {
   const slack = runtime.config.slack;
   if (!slack?.botToken || slack.enabled === false) return;
   const settings = await getSettings(projectId);
   if (!settings.slackChannelId) return;
-  const result = await postMessage(slack.botToken, settings.slackChannelId, message, DEFAULT_PERSONA);
+  const text = message.agent ? (message.slackText ?? message.text) : message.text;
+  const result = await postMessage(slack.botToken, settings.slackChannelId, text, personaFor(message));
   if (!result.ok) {
     // Not re-emitted as another "activity" event -- that would risk a
     // failing Slack post generating an infinite loop of activity events

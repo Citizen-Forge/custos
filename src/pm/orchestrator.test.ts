@@ -27,6 +27,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Workspace, PrGateBlockKind } from "./worktrees.js";
+import type { ActivityMessage } from "./orchestrator.js";
 import type { SlackMessage } from "../slack/client.js";
 import type { SlackPersona } from "../slack/personas.js";
 
@@ -227,11 +228,23 @@ async function waitUntilIdle(orch: OrchestratorT, timeoutMs = 2000): Promise<voi
 }
 
 function collectEvents(orch: OrchestratorT) {
+  // .text is the third-person line every existing assertion here already
+  // matches against -- unchanged by ActivityMessage's introduction. A
+  // separate helper (collectSlackEvents) exists below for tests that
+  // specifically need .slackText/.agent.
   const activity: string[] = [];
   const changed: string[] = [];
-  orch.on("activity", (_pid, msg) => activity.push(msg));
+  orch.on("activity", (_pid, msg) => activity.push(msg.text));
   orch.on("change", (pid) => changed.push(pid));
   return { activity, changed };
+}
+
+/** Full ActivityMessage capture, for tests asserting on Slack-specific
+ *  attribution (slackText/agent) rather than just the UI-facing text. */
+function collectActivityMessages(orch: OrchestratorT) {
+  const messages: ActivityMessage[] = [];
+  orch.on("activity", (_pid, msg) => messages.push(msg));
+  return messages;
 }
 
 beforeEach(() => {
@@ -570,6 +583,27 @@ describe("runEngineer", () => {
     assert.ok(activity.some((m) => m.includes("finished") && m.includes("sent it to QA")));
     const freshAgent = await agentStore.getAgent(agent.id);
     assert.equal(freshAgent!.stats.completed, 1);
+  });
+
+  it("the 'finished, sent to QA' event carries a first-person slackText and the acting agent for Slack", async () => {
+    const { project, agent, ticket } = await setup();
+    runAgentImpl = async (_runtime: unknown, options: { mcpConfig: string }) => {
+      const token = tokenFromMcpConfig(options.mcpConfig);
+      const session = pmTools.lookupSession(token) as { outcome: unknown };
+      session.outcome = { status: "ready_for_qa", summary: "Implemented the thing.", branch: null, prUrl: null, subtasks: [], followUps: [] };
+      return { ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 42, runId: "r1" };
+    };
+    const orch = makeOrchestrator();
+    const messages = collectActivityMessages(orch);
+    await orch.runEngineer(project.id, ticket.id);
+    const finished = messages.find((m) => m.text.includes("finished") && m.text.includes("sent it to QA"));
+    assert.ok(finished, "expected the finished-and-sent-to-QA event");
+    // Third-person UI text is unaffected -- same string as before ActivityMessage existed.
+    assert.equal(finished!.text, `${agent.name} finished "${ticket.title}" and sent it to QA.`);
+    // First-person Slack text speaks as the agent, not about it.
+    assert.equal(finished!.slackText, `I finished "${ticket.title}" and sent it to QA.`);
+    assert.equal(finished!.agent?.role, "engineer");
+    assert.equal(finished!.agent?.name, agent.name);
   });
 
   it("no result reported (ok but no outcome) is treated as a failure and backs off", async () => {

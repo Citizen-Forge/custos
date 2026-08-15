@@ -24,7 +24,11 @@ export function registerPmEventRoutes(app: FastifyInstance, orchestrator: Orches
   };
 
   orchestrator.on("change", (projectId) => send(projectId, { type: "pm_change", projectId }));
-  orchestrator.on("activity", (projectId, message) => send(projectId, { type: "pm_activity", projectId, message, at: Date.now() }));
+  // .text is the third-person operator-facing line -- the UI toast's wire
+  // format is unchanged from before ActivityMessage existed. See
+  // orchestrator.ts's ActivityMessage doc comment: .slackText/.agent are
+  // for slack/activity.ts's first-person rendering only.
+  orchestrator.on("activity", (projectId, message) => send(projectId, { type: "pm_activity", projectId, message: message.text, at: Date.now() }));
 
   app.get("/admin/api/pm/ws", { websocket: true }, (socket, req) => {
     const { projectId } = req.query as { projectId?: string };

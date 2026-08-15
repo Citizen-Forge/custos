@@ -78,10 +78,24 @@ export async function assignReady(orch: Orchestrator, projectId: string): Promis
       });
     } finally {
       const actions = releaseSession(token);
-      if (actions.length) orch.emit("activity", projectId, `Engineering manager: ${actions.join("; ")}.`);
+      if (actions.length) {
+        const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
+        orch.emit("activity", projectId, {
+          text: `Engineering manager: ${actions.join("; ")}.`,
+          slackText: `I ${actions.join("; ")}.`,
+          agent: va,
+        });
+      }
     }
     if (!result.ok) {
-      if (!result.unavailable) orch.emit("activity", projectId, `Engineering manager assignment pass failed: ${result.error ?? "unknown error"}`);
+      if (!result.unavailable) {
+        const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
+        orch.emit("activity", projectId, {
+          text: `Engineering manager assignment pass failed: ${result.error ?? "unknown error"}`,
+          slackText: `My assignment pass failed: ${result.error ?? "unknown error"}`,
+          agent: va,
+        });
+      }
     } else {
       const freshAll = await board.listWorkItems(projectId);
       const freshReady = freshAll.filter((item) => item.type !== "epic" && item.status === "ready");
