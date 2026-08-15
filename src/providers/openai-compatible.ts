@@ -1,6 +1,6 @@
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
 import { toOpenAIRequest, fromOpenAIResponse, fitRequestToSize, estimateTokens, serializeRequestBytes, estimateCompactPassBytes } from "./openai-translate.js";
-import { parseRetryAfterMs } from "./retry-header.js";
+import { parseRetryAfterMs, parseUpstreamRetryDelayMs } from "./retry-header.js";
 import { looksRateLimited } from "./rate-limit-signature.js";
 import type { CompleteOptions, Priority, Provider, ProviderResponse } from "./types.js";
 import type { PricingConfig, BudgetConfig } from "./spend-tracker.js";
@@ -307,21 +307,23 @@ export class OpenAICompatibleProvider implements Provider {
         throw new ProviderUnavailableError(`${this.name}: tool-call history incompatible with this provider (missing thought_signature)`, undefined, true);
       }
       if (res.status === 429 || res.status >= 500) {
-        // Surface the upstream's Retry-After to the router so the
-        // cooldown deadline matches reality. Without this, Gemini
-        // Free-tier quota-exhausted responses (which carry a real
-        // Retry-After value, often 30-300s, sometimes longer for
+        // Surface the upstream's retry guidance to the router so the
+        // cooldown deadline matches reality. Without this, quota-
+        // exhausted responses (often 30-300s, sometimes longer for
         // daily caps) would be silently downgraded to the router's
-        // 60-second default — restarting the cooldown clock on the
+        // default cooldown — restarting the cooldown clock on the
         // next request and perpetuating 429s indefinitely because
-        // the gateway keeps retrying before the upstream's quota
-        // has regenerated. Falling back to undefined (rather than
-        // fabricating a value) leaves the router's default-cooldown
-        // path intact for responses without a Retry-After header.
-        // The parser (src/providers/retry-header.ts) is shared with
-        // Anthropic so seconds-vs-HTTP-date handling stays canonical
-        // across providers.
-        throw new ProviderUnavailableError(`${this.name}: HTTP ${res.status}`, parseRetryAfterMs(res.headers));
+        // the gateway keeps retrying before the upstream's quota has
+        // regenerated. Checks BOTH channels an upstream might use:
+        // the standard `Retry-After` header, and Google Cloud APIs'
+        // (Gemini's) body-embedded `google.rpc.RetryInfo.retryDelay` --
+        // confirmed live that Gemini's free-tier quota-exhaustion 429s
+        // carry the real delay (~20s) ONLY in the body, no header at
+        // all, which meant this path always fell through to undefined
+        // for Gemini specifically. Falling back to undefined only when
+        // NEITHER is present (rather than fabricating a value) leaves
+        // the router's default-cooldown path intact.
+        throw new ProviderUnavailableError(`${this.name}: HTTP ${res.status}`, parseUpstreamRetryDelayMs(res.headers, upBodyText));
       }
       return { status: res.status, headers: res.headers, body: new Blob([upBodyText]).stream() };
     }

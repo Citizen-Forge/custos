@@ -33,3 +33,63 @@ export function parseRetryAfterMs(headers: Headers): number | undefined {
   if (Number.isFinite(dateMs)) return Math.max(0, dateMs);
   return undefined;
 }
+
+/**
+ * Google Cloud APIs (Gemini included) don't put retry guidance in a
+ * `Retry-After` header at all -- quota-exhaustion errors carry it in the
+ * response BODY instead, as a `google.rpc.RetryInfo` entry under
+ * `error.details[]`:
+ *
+ *   { "error": { "code": 429, "details": [
+ *       { "@type": "type.googleapis.com/google.rpc.RetryInfo",
+ *         "retryDelay": "19s" } ] } }
+ *
+ * Confirmed live: a real Gemini free-tier quota-exhaustion 429 with this
+ * exact shape and no Retry-After header at all. Without this parser,
+ * parseRetryAfterMs(res.headers) always returns undefined for these,
+ * silently downgrading to whatever default/fallback cooldown applies --
+ * on a provider with a short rpmLimit-driven spacing gate and no
+ * explicit cooldownFallbackMs, that default was short enough that the
+ * gateway kept re-hitting the still-exhausted quota every few seconds
+ * instead of waiting out the ~20s Google actually asked for, forever.
+ *
+ * `retryDelay` is itself a protobuf Duration string: a decimal number of
+ * seconds with a trailing "s" (e.g. "19s", "19.940059881s") -- never an
+ * HTTP-date, unlike Retry-After.
+ */
+export function parseGoogleRetryDelayMs(bodyText: string): number | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return undefined;
+  }
+  // Gemini's OpenAI-compat error responses are sometimes wrapped in a
+  // top-level array (`[{ "error": {...} }]`); the Google-native shape is
+  // a bare object. Check the first array element too rather than assume
+  // one shape.
+  const candidates = Array.isArray(parsed) ? parsed : [parsed];
+  for (const candidate of candidates) {
+    const details = (candidate as { error?: { details?: unknown } } | undefined)?.error?.details;
+    if (!Array.isArray(details)) continue;
+    for (const entry of details) {
+      const retryDelay = (entry as { retryDelay?: unknown } | undefined)?.retryDelay;
+      if (typeof retryDelay !== "string") continue;
+      const match = /^(\d+(?:\.\d+)?)s$/.exec(retryDelay);
+      if (!match) continue;
+      return Math.max(0, Math.round(parseFloat(match[1]) * 1000));
+    }
+  }
+  return undefined;
+}
+
+/** Combines both retry-guidance channels a 429/5xx response might carry:
+ *  the standard `Retry-After` header first (the more universally-
+ *  supported mechanism when present), falling back to Google's body-
+ *  embedded RetryInfo for upstreams (Gemini) that use that convention
+ *  instead. Returns undefined only when NEITHER is present/parseable,
+ *  which still leaves the caller's own default-cooldown path intact --
+ *  this never fabricates a value. */
+export function parseUpstreamRetryDelayMs(headers: Headers, bodyText: string): number | undefined {
+  return parseRetryAfterMs(headers) ?? parseGoogleRetryDelayMs(bodyText);
+}
