@@ -3,6 +3,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { embed } from "../embeddings.js";
+import { isNearDuplicateFact } from "../search.js";
 import { getGlobalAgent } from "../../pm/global-agents.js";
 import { primaryPick } from "../../pm/agents.js";
 import { SESSIONS_DIR, chunk, extractJsonArray, loadCursor, saveCursor, truncate, type CuratorDeps } from "./shared.js";
@@ -92,6 +93,18 @@ async function curateBatch(deps: CuratorDeps, file: string, batchText: string): 
     if (!deps.embedding) continue;
     try {
       const vector = await embed(deps.embedding, text);
+      // The extraction model only ever sees one batch of raw exchanges at
+      // a time -- it has no visibility into what's already in the store,
+      // so it re-"discovers" durable-looking context (a repo URL, an
+      // architecture rule) as new every time that context appears in a
+      // fresh batch. Confirmed live: one project's memory accumulated
+      // 1,100+ near-duplicate restatements of the same handful of project
+      // facts, which then got dumped wholesale into every UserPromptSubmit
+      // hook's injected context -- ballooning a trivial prompt to ~100KB
+      // before the ticket's own content was even added. See
+      // isNearDuplicateFact's doc comment for why this checks word overlap
+      // rather than trusting the embedding model's raw similarity score.
+      if (await isNearDuplicateFact(deps.store, vector, text)) continue;
       await deps.store.upsert(
         { text, topic: typeof topic === "string" ? topic : "", sourceSessionId: file, createdAt: new Date().toISOString() },
         vector,
