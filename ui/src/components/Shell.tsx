@@ -23,6 +23,25 @@ export default function Shell({ onSessionExpired }: { onSessionExpired: () => vo
   // than a per-session one -- reopening the app with it expanded again
   // would just mean collapsing it every time.
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === '1')
+  // Same persisted-preference reasoning as collapsed above. The actual
+  // light/dark values live in styles.css as CSS variables under
+  // `:root[data-theme='light']`; this state only owns which one applies.
+  // index.html mirrors the localStorage read in an inline script so the
+  // right theme is already set before React's first paint.
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('theme') === 'light' ? 'light' : 'dark'))
+
+  useEffect(() => {
+    if (theme === 'light') document.documentElement.dataset.theme = 'light'
+    else delete document.documentElement.dataset.theme
+  }, [theme])
+
+  function toggleTheme(): void {
+    setTheme((current) => {
+      const next = current === 'light' ? 'dark' : 'light'
+      localStorage.setItem('theme', next)
+      return next
+    })
+  }
   const [promptState, setPromptState] = useState<{ request: PromptRequest; resolve: (v: string | null) => void } | null>(null)
 
   const askText = useCallback((title: string, opts: Omit<PromptRequest, 'title'> = {}): Promise<string | null> => {
@@ -119,6 +138,9 @@ export default function Shell({ onSessionExpired }: { onSessionExpired: () => vo
         <aside className="sidebar">
           <div className="sidebar-header">
             <h1>Custos</h1>
+            <button className="icon" onClick={toggleTheme} title={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}>
+              {theme === 'light' ? '☀' : '☾'}
+            </button>
             <button className="icon" onClick={() => setCreating(true)} title="New project">
               +
             </button>

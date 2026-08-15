@@ -3,12 +3,49 @@
   --bg: #14161a;
   --panel: #1c1f26;
   --border: #2b2f38;
+  --border-subtle: rgba(43, 47, 56, 0.6);
+  --border-hover: #3d4450;
   --text: #e4e6eb;
+  --text-dim: #c9ced8;
   --muted: #8b93a1;
   --accent: #5b9dd9;
+  --on-accent: #0d1117;
   --danger: #d9705b;
   --ok: #5bd98f;
   --warn: #d9c15b;
+  --epic: #b79ae0;
+  --button-bg: #262a33;
+  --button-hover: #2f3440;
+  --hover-bg: #22262e;
+  --selected-bg: #2a3542;
+  --hover-strong: #333944;
+  --drag-over: #1b222b;
+}
+
+/* Explicit light choice always wins; a bare `:root` with no system
+   preference and no explicit choice stays dark (the default above). */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --border: #dde1e7;
+  --border-subtle: rgba(180, 186, 197, 0.55);
+  --border-hover: #b7bec8;
+  --text: #1b1f27;
+  --text-dim: #3d4452;
+  --muted: #667085;
+  --accent: #2b6cb0;
+  --on-accent: #ffffff;
+  --danger: #b8432c;
+  --ok: #1f8a4c;
+  --warn: #9a7209;
+  --epic: #7c56b8;
+  --button-bg: #eef0f3;
+  --button-hover: #e3e6eb;
+  --hover-bg: #eef1f4;
+  --selected-bg: #dce8f5;
+  --hover-strong: #d7dce3;
+  --drag-over: #eaeef2;
 }
 
 * {
@@ -30,7 +67,7 @@ body {
 }
 
 button {
-  background: #262a33;
+  background: var(--button-bg);
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 6px;
@@ -39,12 +76,12 @@ button {
   cursor: pointer;
 }
 button:hover {
-  background: #2f3440;
+  background: var(--button-hover);
 }
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #0d1117;
+  color: var(--on-accent);
   font-weight: 600;
 }
 button.icon {
@@ -136,7 +173,7 @@ input[type='password'] {
   cursor: pointer;
 }
 .project-header:hover {
-  background: #22262e;
+  background: var(--hover-bg);
 }
 .project-name {
   font-weight: 600;
@@ -165,10 +202,10 @@ input[type='password'] {
   font-size: 12.5px;
 }
 .chat-item:hover {
-  background: #262a33;
+  background: var(--button-bg);
 }
 .chat-item.selected {
-  background: #2a3542;
+  background: var(--selected-bg);
 }
 .chat-dot {
   width: 7px;
@@ -229,7 +266,7 @@ input[type='password'] {
 }
 .tab-close:hover {
   opacity: 1;
-  background: #333944;
+  background: var(--hover-strong);
 }
 
 .tab-content {
@@ -355,7 +392,7 @@ input[type='password'] {
   gap: 6px;
 }
 .entry.approval .entry-label {
-  color: var(--warn, #d9c15b);
+  color: var(--warn);
 }
 .entry.approval.deny {
   background: rgba(217, 112, 91, 0.08);
@@ -506,10 +543,10 @@ input[type='password'] {
   border-bottom: 1px solid var(--border);
 }
 .project-row:hover {
-  background: #22262e;
+  background: var(--hover-bg);
 }
 .project-row.selected {
-  background: #2a3542;
+  background: var(--selected-bg);
 }
 .project-row .project-name {
   flex: 1;
@@ -666,13 +703,13 @@ input[type='password'] {
   gap: 8px;
   padding: 8px 12px;
   cursor: pointer;
-  border-bottom: 1px solid rgba(43, 47, 56, 0.6);
+  border-bottom: 1px solid var(--border-subtle);
 }
 .list-row:hover {
-  background: #22262e;
+  background: var(--hover-bg);
 }
 .list-row.selected {
-  background: #2a3542;
+  background: var(--selected-bg);
 }
 .list-row-main {
   flex: 1;
@@ -771,7 +808,7 @@ input[type='password'] {
   margin-top: 7px;
   font-size: 12.5px;
   line-height: 1.55;
-  color: #c9ced8;
+  color: var(--text-dim);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 220px;
@@ -817,7 +854,7 @@ input[type='password'] {
   padding-left: 18px;
   font-size: 12.5px;
   line-height: 1.6;
-  color: #c9ced8;
+  color: var(--text-dim);
 }
 .child-list {
   margin-top: 10px;
@@ -847,13 +884,13 @@ input[type='password'] {
   letter-spacing: 0.05em;
   padding: 2px 5px;
   border-radius: 4px;
-  background: #2f3440;
+  background: var(--button-hover);
   color: var(--muted);
   flex: none;
 }
 .type-pill.epic {
   background: rgba(155, 120, 217, 0.2);
-  color: #b79ae0;
+  color: var(--epic);
 }
 .type-pill.bug {
   background: rgba(217, 112, 91, 0.2);
@@ -864,7 +901,7 @@ input[type='password'] {
   font-size: 10.5px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: #2f3440;
+  background: var(--button-hover);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -936,7 +973,7 @@ input[type='password'] {
   min-height: 0;
 }
 .board-column.drag-over {
-  background: #1b222b;
+  background: var(--drag-over);
 }
 .board-column-header {
   display: flex;
@@ -950,7 +987,7 @@ input[type='password'] {
   border-bottom: 1px solid var(--border);
 }
 .board-column-header .count {
-  background: #2f3440;
+  background: var(--button-hover);
   border-radius: 10px;
   padding: 1px 7px;
 }
@@ -974,7 +1011,7 @@ input[type='password'] {
   gap: 6px;
 }
 .ticket:hover {
-  border-color: #3d4450;
+  border-color: var(--border-hover);
 }
 .ticket.working {
   border-color: var(--accent);
@@ -1148,7 +1185,7 @@ input[type='password'] {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: #c9ced8;
+  color: var(--text-dim);
 }
 
 .history {
@@ -1333,7 +1370,7 @@ input[type='password'] {
 }
 .secret-desc {
   font-size: 12px;
-  color: #c9ced8;
+  color: var(--text-dim);
   margin-top: 5px;
 }
 .secret-meta {
@@ -1467,7 +1504,7 @@ input[type='password'] {
   margin-top: 5px;
   font-family: ui-monospace, 'Cascadia Code', monospace;
   font-size: 11.5px;
-  color: #c9ced8;
+  color: var(--text-dim);
   overflow-wrap: anywhere;
 }/* Last QA bounce line -- the inline reason QA flipped on this agent's
    most recent output. Sits below running-action inside the same
