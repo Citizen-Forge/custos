@@ -158,7 +158,17 @@ describe("GlobalQueue fallback-set dispatch", () => {
     assert.ok(state.get("gemini")!.coolingUntil !== null, "gemini coolingUntil set");
   });
 
-  it("throws the last ProviderUnavailableError when all available providers fail", async () => {
+  it("queues (not fails fast) when all available providers fail on the first attempt, preserving the last error in the activity log", async () => {
+    // Pre-DEFAULT_ENQUEUE_TIMEOUT_MS behavior threw lastError immediately
+    // here -- see global-queue.ts's own comment on the `if (anyAvailable &&
+    // lastError)` branch for why that was deliberately changed: a fallback
+    // set where the primary is attempted-and-failed while the rest are
+    // momentarily saturated used to fail the caller instantly instead of
+    // giving the other entries a chance to free up. A genuinely broken
+    // provider now surfaces via the queue's own timeout instead of
+    // instantly, with the real reason preserved in the activity log for
+    // whoever's diagnosing it -- this test pins that actual contract
+    // instead of the old fail-fast one.
     const state = new ProviderStateMap();
     state.register("gemini", { cooldownFallbackMs: 60_000 });
     state.register("ollama", { cooldownFallbackMs: 30_000 });
@@ -168,24 +178,39 @@ describe("GlobalQueue fallback-set dispatch", () => {
     const { provider: ollama } = makeControllableProvider("ollama", [
       { throw: new ProviderUnavailableError("ollama 503", 30_000) },
     ]);
-    const q = new GlobalQueue({ gemini, ollama }, state);
+    const q = new GlobalQueue({ gemini, ollama }, state, undefined, { enqueueTimeoutMs: 50 });
 
-    await assert.rejects(
-      () => q.complete(
-        [{ provider: "gemini", model: "g" }, { provider: "ollama", model: "o" }],
-        ZERO_REQ,
-      ),
-      (err: unknown) => {
-        assert.ok(err instanceof ProviderUnavailableError);
-        // The last-available-provider's error should be thrown (ollama's).
-        assert.ok(err.message.includes("503"), "last provider's error message");
-        return true;
-      },
+    const p = q.complete(
+      [{ provider: "gemini", model: "g" }, { provider: "ollama", model: "o" }],
+      ZERO_REQ,
     );
 
-    // Both providers on cooldown.
+    // q.complete() returns before either provider attempt has actually run
+    // (each is still behind its own `await provider.complete(...)`) --
+    // give the per-entry loop a few microtask ticks to try both and mark
+    // them cooling before asserting on state.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Both providers on cooldown after their real attempts failed.
     assert.equal(state.canAccept("gemini"), false, "gemini on cooldown");
     assert.equal(state.canAccept("ollama"), false, "ollama on cooldown");
+
+    // The real reason (the last provider's actual error) is preserved in
+    // the activity log even though the caller doesn't see it directly.
+    const failedEvent = q.queueActivityLog().recent(10).find((e) => e.outcome === "failed");
+    assert.ok(failedEvent, "a failed event was recorded before queuing");
+    assert.ok(failedEvent!.errorMessage?.includes("503"), "last provider's error message preserved in the activity log");
+
+    // Nothing ever frees up, so the request rejects via the queue's own
+    // timeout -- a generic "queue timeout:" message, not the original
+    // provider error (that's the tradeoff the design comment describes).
+    await assert.rejects(p, (err: unknown) => {
+      assert.ok(err instanceof ProviderUnavailableError);
+      assert.ok(err.message.startsWith("queue timeout:"), `expected a queue timeout, got: ${err.message}`);
+      return true;
+    });
   });
 
   it("queues when no provider is available (all at concurrency cap)", async () => {

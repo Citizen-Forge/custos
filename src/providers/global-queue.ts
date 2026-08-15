@@ -484,6 +484,18 @@ export class GlobalQueue {
         ));
       };
       entry.timeoutHandle = setTimeout(onTimeout, this.options.enqueueTimeoutMs);
+      // unref()'d for the same reason as periodicPumpTimer above: this can
+      // be scheduled up to DEFAULT_ENQUEUE_TIMEOUT_MS (40 minutes) out, and
+      // nothing about a still-queued entry should keep the process (or a
+      // test file's node --test process) alive waiting for it. Confirmed
+      // live: the test suite has no per-test GlobalQueue teardown, so any
+      // test that queues a request without dispatching or aborting it left
+      // this exact timer running for the rest of the file's execution --
+      // at the 40-minute default when the test didn't override
+      // enqueueTimeoutMs, which is what made `global-queue.test.ts` take
+      // ~40 minutes and skew unrelated later tests' timing when run as a
+      // full file instead of in isolation.
+      entry.timeoutHandle.unref();
 
       if (!options?.signal) return;
       const onAbort = (): void => {

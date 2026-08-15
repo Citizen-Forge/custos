@@ -10,17 +10,31 @@ import assert from "node:assert/strict";
 import { ProviderStateMap } from "./provider-state.js";
 
 /** Advance the clock by faking Date.now(). All ProviderStateMap code
- * paths that read the wall clock go through Date.now() so this is safe. */
+ * paths that read the wall clock go through Date.now() so this is safe.
+ * Cumulative: bases the new fake value on whatever Date.now() currently
+ * returns (real or already-faked), so a test that calls this more than
+ * once advances further each time rather than resetting to "real now +
+ * ms" on every call. */
 function advanceMs(ms: number): void {
-  const orig = Date.now;
-  const fake = orig() + ms;
+  const fake = Date.now() + ms;
   Date.now = () => fake;
 }
 
+// Restores the REAL Date.now function, not a frozen snapshot of whatever
+// value it happened to return at file-load time. `Date.now = () =>
+// origNow` (the previous version of resetClock/the after() hook below)
+// looked like a reset but wasn't one: it just re-froze the clock to a
+// fixed number, leaving Date.now() permanently stuck for every test that
+// runs afterward in the same process -- including other files, when this
+// one runs as part of a combined `node --test` invocation. Confirmed live:
+// this exact bug (in global-queue.test.ts's copy of the same pattern) made
+// a completely unrelated later test compute `Date.now() - queuedAt === 0`
+// no matter how much real time had actually passed.
 function resetClock(): void {
-  Date.now = () => origNow;
+  Date.now = REAL_DATE_NOW;
 }
 
+const REAL_DATE_NOW = Date.now;
 let origNow: number;
 
 before(() => {
@@ -28,7 +42,7 @@ before(() => {
 });
 
 after(() => {
-  Date.now = () => origNow;
+  resetClock();
 });
 
 describe("ProviderStateMap", () => {

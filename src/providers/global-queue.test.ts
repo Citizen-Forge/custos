@@ -16,12 +16,29 @@
 //
 // Each test uses a fake Provider whose complete() resolves or rejects
 // on a controlled schedule; no network, no module mocking.
-import { describe, it } from "node:test";
+import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { GlobalQueue, type FallbackTarget, type DeadLetterEntry } from "./global-queue.js";
 import { ProviderStateMap } from "./provider-state.js";
 import type { Provider, ProviderResponse, CompleteOptions } from "./types.js";
 import { ProviderUnavailableError, type AnthropicMessagesRequest } from "../types.js";
+
+// The real Date.now function, preserved so the two tests below that fake
+// the clock can restore it properly. `Date.now = () => origNow` (what
+// those tests used to do to "reset") isn't a reset -- it re-freezes the
+// clock to a fixed snapshot instead of restoring the live function,
+// leaving Date.now() permanently stuck for every test that runs
+// afterward in the same process. Confirmed live: that exact bug made a
+// completely unrelated later test ("enqueue timeout fires after the
+// configured deadline") compute `Date.now() - queuedAt === 0` no matter
+// how much real time had actually passed, because both sides of the
+// subtraction were reading the same frozen value. This file-level after()
+// is a safety net on top of each test's own restore, in case an
+// assertion throws between freezing the clock and un-freezing it.
+const REAL_DATE_NOW = Date.now;
+after(() => {
+  Date.now = REAL_DATE_NOW;
+});
 
 const ZERO_REQ = {} as AnthropicMessagesRequest;
 const OK_RESPONSE: ProviderResponse = { status: 200, headers: new Headers(), body: null };
@@ -131,7 +148,7 @@ describe("GlobalQueue", () => {
 
   it("skips an unavailable provider and picks the next", async () => {
     const state = new ProviderStateMap();
-    state.register("ollama");
+    state.register("ollama", { maxConcurrent: 1 });
     state.register("gemini");
     // Make ollama unavailable (at concurrency cap)
     const release = state.acquire("ollama");
@@ -463,13 +480,30 @@ describe("GlobalQueue", () => {
     assert.equal(q.queuedInteractive, 1);
     assert.equal(q.queuedBackground, 1);
 
-    // Release the slot — pump drains interactive bucket first.
+    // Release the slot — pump drains interactive bucket first. releaseA()
+    // only touches ProviderStateMap (acquired directly by this test, not
+    // through the queue's own dispatch flow), which by design doesn't pump
+    // on its own -- see ProviderStateMap.release()'s doc comment. The
+    // queue only learns a slot freed up when something tells it to look,
+    // same as every other test here that manipulates state directly.
     releaseA();
+    q.pump();
+
+    // The pump claimed the slot for interactive (now dispatched, no longer
+    // queued) while background waits its turn -- this is the actual
+    // "drains interactive before background" behavior under test. It has
+    // to be checked right here: interactive's own dispatch is still
+    // in-flight (unresolved provider.complete()) and holds the slot, so
+    // background can't have been dispatched yet either. Checking this
+    // AFTER `await interactive` below is too late -- completing
+    // interactive's request releases its slot and re-pumps in the same
+    // tick, which lets background through immediately, so a check after
+    // that await would pass even if priority ordering were broken.
+    assert.equal(q.queuedInteractive, 0, "interactive was claimed by the pump");
+    assert.equal(q.queuedBackground, 1, "background stays queued while interactive is still in flight");
+
     resolveA(OK_RESPONSE);
     await interactive;
-
-    // Interactive resolved. Background should still be queued.
-    assert.equal(q.queuedBackground, 1, "background stays queued behind interactive");
 
     // Cleanup the remaining background.
     q.abortAll("cleanup");
@@ -516,7 +550,7 @@ describe("GlobalQueue", () => {
     assert.equal(result.providerName, "ollama", "cooldown-expired provider was dispatched");
     assert.equal(q.queuedTotal, 0, "queue drained after pump");
 
-    Date.now = () => origNow; // reset
+    Date.now = REAL_DATE_NOW; // restore the real clock, not another frozen snapshot
   });
 
   it("releases a provider's slot immediately on failure during a queued redispatch, not after the whole re-queue chain settles (regression: active-count leak)", async () => {
@@ -576,7 +610,7 @@ describe("GlobalQueue", () => {
       "second attempt's slot must be released immediately, not held hostage by the still-pending re-queued promise",
     );
 
-    Date.now = () => origNow; // reset
+    Date.now = REAL_DATE_NOW; // restore the real clock, not another frozen snapshot
   });
 
   // -- non-2xx responses -----------------------------------------------
@@ -668,7 +702,11 @@ describe("GlobalQueue", () => {
     const r1 = await p1;
     assert.equal(r1.providerName, "old");
 
-    // Swap in a new provider map — old is gone, fresh is available.
+    // Swap in a new provider map — old is gone, fresh is available. state
+    // needs "fresh" registered too: canAccept() on an unregistered name
+    // always returns false, which would strand this request in the queue
+    // forever regardless of setProviders.
+    state.register("fresh");
     const { provider: fresh, resolvePromise: resolveFresh } = makeRecordingProvider("fresh");
     q.setProviders({ fresh });
     const p2 = q.complete([{ provider: "old", model: "m" }, { provider: "fresh", model: "n" }], ZERO_REQ);
@@ -717,8 +755,11 @@ describe("GlobalQueue", () => {
     // Swap in an empty provider map — "a" is no longer registered.
     q.setProviders({});
 
-    // Free the slot — pump triggers dispatchQueued which should reject.
+    // Free the slot and pump — release() alone doesn't (see the identical
+    // comment on "pump drains interactive before background" above) --
+    // dispatchQueued finds no provider for "a" anymore and rejects.
     release();
+    q.pump();
 
     await assert.rejects(p, (err: unknown) => {
       assert.ok(err instanceof Error);
@@ -921,13 +962,17 @@ describe("GlobalQueue", () => {
     // (it's the only one shifted off); the last-enqueued MUST be
     // present. This is what makes "the most recent overflow stays
     // visible" hold for the operator's mental model.
+    // ActivityLog.recent() returns newest-first (see its own .reverse()),
+    // so the chronological first-enqueued id is the LAST element here and
+    // the last-enqueued id is the FIRST -- inverted from what the names
+    // might suggest at a glance.
     const queuedInOrder = q.queueActivityLog()
       .recent(1000)
       .filter((e) => e.outcome === "queued")
       .map((e) => e.requestId);
     assert.equal(queuedInOrder.length, 51, "all 51 enqueues recorded a queued event");
-    const firstEnqueuedId = queuedInOrder[0];
-    const lastEnqueuedId = queuedInOrder[queuedInOrder.length - 1];
+    const firstEnqueuedId = queuedInOrder[queuedInOrder.length - 1];
+    const lastEnqueuedId = queuedInOrder[0];
 
     const deadIds = new Set(dead.map((d) => d.requestId));
     assert.equal(deadIds.size, 50, "50 distinct request ids in the dead-letter buffer (no duplicates)");
