@@ -18,6 +18,12 @@ export async function ensureProjectAgents(projectId: string): Promise<AgentDef[]
     { role: "devops", name: "DevOps", maxComplexity: "high" },
     { role: "engineer", name: "Generalist Engineer", maxComplexity: "medium" },
     { role: "project-manager", name: "Project Manager", maxComplexity: "high" },
+    // Escalation-only: see orchestrator/escalation.ts. Never picked by the
+    // engineering manager's normal ready-ticket assignment (it's excluded
+    // from listEngineers()'s roster) -- only the escalation stage ever
+    // sets a ticket's assigneeAgentId to this one, and only after 5
+    // consecutive failed attempts.
+    { role: "principal", name: "Principal Engineer", maxComplexity: "high" },
   ];
   for (const spec of roles) {
     const existing = await agents.find((row) => row.projectId === projectId && row.role === spec.role);

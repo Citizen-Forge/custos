@@ -88,9 +88,15 @@ priority-queue semantics.**
 | `qa` | ✓ `agents.ts:201`, `prompts.ts:14/414` | ✓ `resolve("qa")`, `qaRounds`, `canTransition("qa", "in_progress")` | live |
 | `devops` | ✓ `agents.ts:202`, `prompts.ts:15/415` | ✓ `resolve("devops")` ×2, `assignRepo` / `runDevops`, `autonomy.devops` | live |
 | `project-manager` | ✓ `agents.ts:204`, `prompts.ts:16/417` | ✓ `resolve("project-manager")`, `autonomy["project-manager"]`, `filter-out from roster display`, `assignModels` orchestration path | live |
+| `principal` | ✓ `agents/bootstrap.ts` `ensureProjectAgents` seed entry, `prompts/defaults.ts` `ROLE_DEFAULT_FALLBACK_SET.principal = "principal"` | ✓ `agents/store.ts findRoleAgent(projectId, "principal")` (`orchestrator/escalation.ts`), `agents/mutate.ts assertFallbackSetAllowed` role-lock, `board.ts ROLE_TRANSITIONS.principal`, `slack/personas.ts ROLE_PERSONAS.principal`, excluded from `listEngineers()`'s roster and from the EM's/PM's fallback-set menus (`orchestrator/engineering-manager.ts`, `orchestrator/project-manager.ts`) | live |
 
 **Union status: fully live, lowest-count member (`project-manager`) still
-has five+ runtime paths.**
+has five+ runtime paths. `principal` is deliberately excluded from every
+normal assignment path (EM roster, PM reassignment) — its only write
+path is the escalation stage's deterministic reassignment after 5
+consecutive failed attempts on a ticket, gated by
+`agents/mutate.ts`'s `assertFallbackSetAllowed` so no other role can be
+handed its (real-Anthropic-usage) fallback set.**
 
 ### `ChatKind` — `src/remote/chats.ts:11`, mirrored at `ui/src/shared/types.ts:8`
 
@@ -98,11 +104,16 @@ has five+ runtime paths.**
 |---|---|---|---|
 | `chat` | ✓ `createChat` default (`chats.ts:57`), `session-manager.ts:171`, `project-routes.ts:32/171` | ✓ `chat.kind ?? "chat"` defaulting chains, `chatKind !== "steering"` filter | live |
 | `steering` | ✓ `chats createChat(..., "steering")`, `project-routes.ts:189` ("New discussion"), explicit user choice | ✓ `chatKind === "steering"` (session-manager.ts:220, :251), `STEERING_PROMPT` injection (project-routes.ts:30/33/35) | live |
+| `portfolio` | ✓ `chats.listChats(undefined, "portfolio")` / `createChat(null, ..., "portfolio")` (`project-routes.ts:177/188`) — the one kind not scoped to a project, `projectId: null` | ✓ `project-routes.ts:35` `if (kind === "portfolio") return { appendSystemPrompt: PORTFOLIO_PROMPT, mcpConfig: buildPortfolioMcpConfig() }`, `session-manager.ts` null-projectId handling documented at `:51/:68/:274` | live |
 
-**Union status: fully live, both members wired into chat creation,
+**Union status: fully live, all three members wired into chat creation,
 rendering, and prompt injection. Critical: `steering` chats run on the
 project's `steeringModel` — a separate model from `chat`'s default —
-so dropping it would silently fall back to the chat default.**
+so dropping it would silently fall back to the chat default.
+`portfolio` is the only kind not scoped to a single project (`projectId:
+null`) — it's the cross-project assistant chat, routed to
+`PORTFOLIO_PROMPT` and its own MCP config rather than any project's
+tools.**
 
 ### `createdBy` — `src/pm/types.ts:139`
 
@@ -269,8 +280,8 @@ update the audit doc + test together, and document the rationale.
 |---|---|---|---|
 | `TaskKind` | 3 | 3 | 0 |
 | `Priority` | 2 | 2 | 0 |
-| `AgentRole` (backend + UI) | 7 | 7 | 0 |
-| `ChatKind` | 2 | 2 | 0 |
+| `AgentRole` (backend + UI) | 8 | 8 | 0 |
+| `ChatKind` | 3 | 3 | 0 |
 | `createdBy` | 3 | 3 passive | 0 |
 | `WorkItemType` | 3 | 3 | 0 |
 | `BOARD_STATUSES` | 5 | 5 | 0 |

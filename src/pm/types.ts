@@ -96,7 +96,7 @@ export interface Idea {
   updatedAt: number;
 }
 
-export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops" | "project-manager";
+export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops" | "project-manager" | "principal";
 
 /** Built-in service the gateway runs project-orthogonally: memory
  * curation, permission classification, embeddings, future global hooks.
@@ -298,6 +298,11 @@ export interface ProjectSettings {
    * toggles to stop the project, and that survives a restart so it can't
    * quietly resume while nobody is looking. */
   paused: boolean;
+  /** `principal` gates the deterministic escalation stage (see
+   *  orchestrator/escalation.ts), not a normal per-role dispatch loop --
+   *  same kill-switch shape as the others so an operator can turn off
+   *  Anthropic-spending escalation per project without touching the
+   *  agent or the fallback set. */
   autonomy: Record<Exclude<AgentRole, "steering">, boolean>;
   /** Ceiling on engineers working this project at once. Each one gets its
    * own git worktree, so this is a spend-and-load limit rather than a
@@ -366,7 +371,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     lastGroomSignal: null,
     lastAssignSignal: null,
     lastCurateSignal: null,
-    autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true },
+    autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true, principal: true },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,
     updatedAt: Date.now(),

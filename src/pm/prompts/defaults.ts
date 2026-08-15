@@ -9,6 +9,11 @@ export const ROLE_DEFAULT_FALLBACK_SET: Record<AgentRole, string> = {
   "product-owner": "complex",
   "engineering-manager": "complex",
   engineer: "standard",
+  // The one role locked to a single-consumer set (see the "principal"
+  // entry in config/defaults.ts's fallbackSets) -- see mutate.ts's
+  // assertFallbackSetAllowed for the guard that keeps every other role
+  // from ever being assigned it.
+  principal: "principal",
   qa: "standard",
   devops: "standard",
   "project-manager": "complex",
@@ -40,6 +45,7 @@ export const ROLE_DEFAULT_MODEL: Record<AgentRole, [providerKey: string, model: 
   "product-owner": ["anthropic", "claude-sonnet-5"],
   "engineering-manager": ["anthropic", "claude-sonnet-5"],
   engineer: ["anthropic", "claude-sonnet-5"],
+  principal: ["anthropic", "claude-sonnet-5"],
   qa: ["anthropic", "claude-sonnet-5"],
   devops: ["anthropic", "claude-sonnet-5"],
   "project-manager": ["anthropic", "claude-sonnet-5"],

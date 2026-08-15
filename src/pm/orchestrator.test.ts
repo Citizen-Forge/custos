@@ -596,6 +596,88 @@ describe("runEngineer", () => {
   });
 });
 
+describe("escalateStuckTickets", () => {
+  async function setupPrincipal(projectId: string) {
+    return agentStore.createAgent({ projectId, role: "principal", name: "Principal Eng", fallbackSet: "principal" });
+  }
+
+  it("no-ops when no ticket has reached the attempts threshold", async () => {
+    const project = await makeProject();
+    await setupPrincipal(project.id);
+    const engineer = await agentStore.createAgent({ projectId: project.id, role: "engineer", name: "Eng", fallbackSet: "standard" });
+    const ticket = await makeTicket(project.id, { status: "in_progress" });
+    await board.updateWorkItem(ticket.id, { assigneeAgentId: engineer.id });
+    for (let i = 0; i < 4; i++) await board.recordAttemptFailure(ticket.id); // below threshold (5)
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.escalateStuckTickets(project.id);
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.assigneeAgentId, engineer.id, "assignee unchanged below threshold");
+    assert.deepEqual(activity, []);
+  });
+
+  it("reassigns a ticket at the threshold to the principal agent, clears attempts, and comments", async () => {
+    const project = await makeProject();
+    const principal = await setupPrincipal(project.id);
+    const engineer = await agentStore.createAgent({ projectId: project.id, role: "engineer", name: "Eng", fallbackSet: "standard" });
+    const ticket = await makeTicket(project.id, { status: "in_progress" });
+    await board.updateWorkItem(ticket.id, { assigneeAgentId: engineer.id });
+    for (let i = 0; i < 5; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.escalateStuckTickets(project.id);
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.assigneeAgentId, principal.id);
+    assert.equal(fresh!.attempts, 0, "escalation gives the principal a fresh attempt budget");
+    assert.equal(fresh!.nextAttemptAt, null);
+    assert.equal(fresh!.status, "in_progress", "reassignment alone does not change the column");
+    assert.equal((fresh!.comments ?? []).length, 1);
+    assert.match(fresh!.comments![0].body, /Escalated to/);
+    assert.ok(activity.some((m) => m.includes("Escalated") && m.includes(ticket.title)));
+  });
+
+  it("does not re-escalate a ticket already assigned to the principal", async () => {
+    const project = await makeProject();
+    const principal = await setupPrincipal(project.id);
+    const ticket = await makeTicket(project.id, { status: "in_progress" });
+    await board.updateWorkItem(ticket.id, { assigneeAgentId: principal.id });
+    for (let i = 0; i < 6; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.escalateStuckTickets(project.id);
+    assert.deepEqual(activity, [], "already on the principal -- nowhere further to escalate");
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.assigneeAgentId, principal.id);
+    assert.equal(fresh!.attempts, 6, "attempts untouched when no reassignment happens");
+  });
+
+  it("is a no-op (not a crash) when the project has no principal agent yet", async () => {
+    const project = await makeProject();
+    // Deliberately no setupPrincipal() call.
+    const engineer = await agentStore.createAgent({ projectId: project.id, role: "engineer", name: "Eng", fallbackSet: "standard" });
+    const ticket = await makeTicket(project.id, { status: "in_progress" });
+    await board.updateWorkItem(ticket.id, { assigneeAgentId: engineer.id });
+    for (let i = 0; i < 5; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    await assert.doesNotReject(orch.escalateStuckTickets(project.id));
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.assigneeAgentId, engineer.id);
+  });
+
+  it("ignores tickets stuck in other columns (ready, qa) -- only in_progress is eligible", async () => {
+    const project = await makeProject();
+    await setupPrincipal(project.id);
+    const ticket = await makeTicket(project.id, { status: "ready" });
+    for (let i = 0; i < 5; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.escalateStuckTickets(project.id);
+    assert.deepEqual(activity, []);
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.assigneeAgentId, null);
+  });
+});
+
 describe("runQa", () => {
   async function setup() {
     const project = await makeProject();

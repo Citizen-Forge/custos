@@ -4,6 +4,31 @@ import { pickPersonaName } from "../personas.js";
 import type { AgentDef, AgentRole, Complexity, CostProfile, GlobalSystemRole } from "../types.js";
 import { agents, emptyStats } from "./store.js";
 
+/** Reserved fallback set names that may only ever be assigned to the one
+ *  role they exist for. "principal" is real, metered Anthropic usage
+ *  gated behind the escalation stage's 5-failed-attempts trigger (see
+ *  orchestrator/escalation.ts) -- not something a PM tuning pass, an EM
+ *  creating a specialist, or an admin edit should be able to hand to a
+ *  regular engineer, however accidentally. Extend this map rather than
+ *  special-casing "principal" by name if a similar single-consumer set
+ *  is added later. */
+const ROLE_LOCKED_FALLBACK_SETS: Partial<Record<string, AgentRole>> = {
+  principal: "principal",
+};
+
+/** Throws if `fallbackSet` is reserved for a different role than `role`.
+ *  Called from both createAgent and updateAgent so every write path --
+ *  admin PATCH, the EM's create_engineer/tune_engineer, the PM's
+ *  fallback-set reassignment -- goes through the same invariant instead
+ *  of each caller re-implementing (or forgetting) the check. */
+export function assertFallbackSetAllowed(role: AgentRole, fallbackSet: string | undefined): void {
+  if (!fallbackSet) return;
+  const lockedTo = ROLE_LOCKED_FALLBACK_SETS[fallbackSet];
+  if (lockedTo && lockedTo !== role) {
+    throw new Error(`fallback set "${fallbackSet}" is reserved for the "${lockedTo}" role and cannot be assigned to a "${role}" agent`);
+  }
+}
+
 export interface CreateAgentInput {
   projectId: string | null;
   role: AgentRole;
@@ -34,6 +59,7 @@ export interface CreateAgentInput {
 }
 
 export async function createAgent(input: CreateAgentInput): Promise<AgentDef> {
+  assertFallbackSetAllowed(input.role, input.fallbackSet);
   const now = Date.now();
   const taken = (await agents.list()).map((agent) => agent.personaName).filter((name): name is string => !!name);
   return agents.insert({
@@ -63,6 +89,7 @@ export type AgentPatch = Partial<Pick<AgentDef, "name" | "fallbackSet" | "embedd
 
 export async function updateAgent(id: string, patch: AgentPatch): Promise<AgentDef | null> {
   return agents.update(id, (agent) => {
+    if (patch.fallbackSet !== undefined) assertFallbackSetAllowed(agent.role, patch.fallbackSet);
     Object.assign(agent, patch);
     agent.updatedAt = Date.now();
   });

@@ -21,8 +21,8 @@ interface UnionCase {
 const CASES: readonly UnionCase[] = [
   { union: "TaskKind", declared: "src/types.ts", members: ["general", "permissionClassifier", "memoryCurator"] },
   { union: "Priority", declared: "src/providers/types.ts", members: ["interactive", "background"] },
-  { union: "AgentRole", declared: "src/pm/types.ts", members: ["steering", "product-owner", "engineering-manager", "engineer", "qa", "devops", "project-manager"] },
-  { union: "ChatKind", declared: "src/remote/chats.ts", members: ["chat", "steering"] },
+  { union: "AgentRole", declared: "src/pm/types.ts", members: ["steering", "product-owner", "engineering-manager", "engineer", "qa", "devops", "project-manager", "principal"] },
+  { union: "ChatKind", declared: "src/remote/chats.ts", members: ["chat", "steering", "portfolio"] },
   { union: "createdBy", declared: "src/pm/types.ts", members: ["system", "engineering-manager", "human"] },
   { union: "WorkItemType", declared: "src/pm/types.ts", members: ["epic", "story", "bug"] },
   { union: "BOARD_STATUSES", declared: "src/pm/types.ts", members: ["backlog", "ready", "in_progress", "qa", "complete"] },

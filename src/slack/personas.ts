@@ -16,6 +16,7 @@ export const ROLE_PERSONAS: Record<AgentRole, SlackPersona> = {
   "product-owner": { username: "Product Owner", iconEmoji: ":bulb:" },
   "engineering-manager": { username: "Engineering Manager", iconEmoji: ":construction_worker:" },
   engineer: { username: "Engineer", iconEmoji: ":hammer_and_wrench:" },
+  principal: { username: "Principal Engineer", iconEmoji: ":star2:" },
   qa: { username: "QA", iconEmoji: ":mag:" },
   devops: { username: "DevOps", iconEmoji: ":rocket:" },
   steering: { username: "Steering", iconEmoji: ":compass:" },

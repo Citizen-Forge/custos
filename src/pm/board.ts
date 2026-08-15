@@ -16,6 +16,7 @@ export const ROLE_TRANSITIONS: Record<string, BoardStatus[]> = {
   "product-owner": ["backlog", "ready"],
   "engineering-manager": ["ready", "in_progress"],
   engineer: ["qa", "in_progress"],
+  principal: ["qa", "in_progress"],
   qa: ["complete", "in_progress", "ready"],
   devops: ["complete"],
   human: ["backlog", "ready", "in_progress", "qa", "complete"],

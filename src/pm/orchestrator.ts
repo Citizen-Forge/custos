@@ -12,6 +12,7 @@ import { engineerLimit, workItemsSignal } from "./orchestrator/shared.js";
 import { groomBacklog, curateFacts, planIdea } from "./orchestrator/product-owner.js";
 import { pollSlackIdeas } from "./orchestrator/slack-inbox.js";
 import { assignReady } from "./orchestrator/engineering-manager.js";
+import { escalateStuckTickets } from "./orchestrator/escalation.js";
 import { runEngineer } from "./orchestrator/engineer.js";
 import { runQa } from "./orchestrator/qa.js";
 import { surveyProject } from "./orchestrator/survey.js";
@@ -205,6 +206,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (inFlight < limit && assignSignal !== settings.lastAssignSignal) void this.assignReady(project.id);
     }
 
+    // Fire-and-forget like every other stage here -- a ticket it
+    // reassigns becomes dispatchable on the NEXT tick, once
+    // clearAttempts() has actually landed. The engineer block below
+    // dispatches by assigneeAgentId + status alone, regardless of which
+    // role that agent has, so no other wiring is needed for the
+    // principal's own runs to happen.
+    if (settings.autonomy.principal) void this.escalateStuckTickets(project.id);
+
     if (settings.autonomy.engineer) {
       const limit = await engineerLimit(project, settings);
       const inProgress = (await board.listWorkItems(project.id)).filter(
@@ -344,6 +353,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   async assignReady(projectId: string): Promise<void> {
     return assignReady(this, projectId);
+  }
+
+  // ------------------------------------------------------------------- escalation
+
+  async escalateStuckTickets(projectId: string): Promise<void> {
+    return escalateStuckTickets(this, projectId);
   }
 
   // ------------------------------------------------------------------ engineer

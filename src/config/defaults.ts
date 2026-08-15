@@ -72,6 +72,21 @@ export const DEFAULT_CONFIG: GatewayConfig = {
       description: "Gates every tool call from autonomous agents. Should be a small, fast model that follows the JSON-only contract reliably.",
       providers: [{ provider: "ollama-fast", model: "qwen2.5:3b-instruct" }],
     },
+    // Reserved exclusively for the "principal" role's escalation runs (see
+    // pm/orchestrator/escalation.ts) -- a ticket only reaches a principal
+    // agent after 5 consecutive failed attempts by the regular engineer,
+    // so this set trades cost for reliability deliberately: real Anthropic
+    // usage, no local fallback, because at that point local models have
+    // already had 5 tries and the point of escalating is to actually get
+    // a capable model on it. No other role may be assigned this set --
+    // enforced in pm/agents/mutate.ts's assertFallbackSetAllowed, not just
+    // convention, so an operator's edit elsewhere can't quietly widen
+    // which runs are billed.
+    "principal": {
+      name: "Principal escalation",
+      description: "Reserved for the principal-engineer escalation path only (5+ failed attempts). Real Anthropic usage, no local fallback -- never assign this to any other agent.",
+      providers: [{ provider: "anthropic", model: "claude-sonnet-5" }],
+    },
   },
   tasks: {
     general: [

@@ -24,9 +24,16 @@ export async function assignModels(orch: Orchestrator, projectId: string): Promi
     const ctx = await resolveProjectAgent(projectId, "project-manager");
     if (!ctx) return;
 
-    const fallbackSets = orch.runtime.config.fallbackSets ?? {};
+    // "principal" is excluded from both the menu offered to other roles
+    // and the roster the PM manages at all -- its fallback set is fixed
+    // (see agents/bootstrap.ts) and reserved for the escalation stage's
+    // 5-failed-attempts trigger, not something the PM should reassign
+    // away, and not something any other role should be offered.
+    const fallbackSets = Object.fromEntries(
+      Object.entries(orch.runtime.config.fallbackSets ?? {}).filter(([key]) => key !== "principal"),
+    );
     const allAgents = await agentStore.listAgents(projectId);
-    const roster = allAgents.filter((a) => a.role !== "project-manager" && a.role !== "steering");
+    const roster = allAgents.filter((a) => a.role !== "project-manager" && a.role !== "steering" && a.role !== "principal");
 
     const prompt = [
       await projectHeader(ctx.project, ctx.settings),
@@ -73,7 +80,7 @@ export async function assignModels(orch: Orchestrator, projectId: string): Promi
 
     // Build a map of current agents by role for quick lookup.
     const agentByRole = new Map(roster.map((a) => [a.role, a]));
-    const knownSets = new Set(Object.keys(orch.runtime.config.fallbackSets ?? {}));
+    const knownSets = new Set(Object.keys(fallbackSets));
     let changed = 0;
 
     for (const assignment of result.parsed.assignments) {

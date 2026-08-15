@@ -19,7 +19,14 @@ export async function assignReady(orch: Orchestrator, projectId: string): Promis
     const ready = all.filter((item) => item.type !== "epic" && item.status === "ready");
     if (!ready.length) return;
     const roster = await agentStore.listEngineers(projectId);
-    const fallbackSets = orch.runtime.config.fallbackSets ?? {};
+    // "principal" is reserved for the escalation-only role and is never a
+    // choice the EM can hand to a regular engineer -- excluded from both
+    // the menu it's shown and the set names create_engineer/tune_engineer
+    // will accept, on top of the hard guard in agents/mutate.ts. listEngineers()
+    // already keeps the principal agent itself off the roster above.
+    const fallbackSets = Object.fromEntries(
+      Object.entries(orch.runtime.config.fallbackSets ?? {}).filter(([key]) => key !== "principal"),
+    );
     const limit = await engineerLimit(ctx.project, ctx.settings);
     const inFlight = all.filter((item) => item.status === "in_progress").length;
 
@@ -52,7 +59,7 @@ export async function assignReady(orch: Orchestrator, projectId: string): Promis
       agentId: ctx.agent.id,
       agentName: agentStore.displayName(ctx.agent),
       validTicketIds: new Set(ready.map((item) => item.id)),
-      fallbackSetNames: new Set(Object.keys(orch.runtime.config.fallbackSets ?? {})),
+      fallbackSetNames: new Set(Object.keys(fallbackSets)),
       knownAgentIds: new Set(roster.map((a) => a.id)),
       unavailableFallbackSets,
       slotsRemaining: Math.max(0, limit - inFlight),

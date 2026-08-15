@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Runtime } from "../../runtime.js";
 import * as agentStore from "../../pm/agents.js";
+import type { AgentDef } from "../../pm/types.js";
 import { notFound } from "./shared.js";
 
 export function registerAgentRoutes(app: FastifyInstance, runtime: Runtime): void {
@@ -31,7 +32,17 @@ export function registerAgentRoutes(app: FastifyInstance, runtime: Runtime): voi
       reply.code(400);
       return { error: `fallback set "${body.fallbackSet}" is not configured` };
     }
-    const agent = await agentStore.updateAgent(agentId, body);
+    // Role-locked sets (e.g. "principal") are rejected inside updateAgent
+    // itself, which is the one place that already has the agent's role in
+    // hand -- surfaced here as a clean 400 rather than the framework's
+    // default 500 for an unhandled rejection.
+    let agent: AgentDef | null;
+    try {
+      agent = await agentStore.updateAgent(agentId, body);
+    } catch (err) {
+      reply.code(400);
+      return { error: (err as Error).message };
+    }
     if (!agent) return notFound(reply, "agent");
     return { agent };
   });
