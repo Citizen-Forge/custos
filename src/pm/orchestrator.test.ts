@@ -651,9 +651,12 @@ describe("escalateStuckTickets", () => {
     assert.equal(fresh!.attempts, 6, "attempts untouched when no reassignment happens");
   });
 
-  it("is a no-op (not a crash) when the project has no principal agent yet", async () => {
+  it("self-seeds the principal agent via ensureProjectAgents when the project doesn't have one yet", async () => {
     const project = await makeProject();
-    // Deliberately no setupPrincipal() call.
+    // Deliberately no setupPrincipal() call -- this project has never had
+    // any stage call resolveProjectAgent for it, matching a project with
+    // every OTHER autonomy toggle off. The stage must not depend on some
+    // other stage having incidentally seeded the roster first.
     const engineer = await agentStore.createAgent({ projectId: project.id, role: "engineer", name: "Eng", fallbackSet: "standard" });
     const ticket = await makeTicket(project.id, { status: "in_progress" });
     await board.updateWorkItem(ticket.id, { assigneeAgentId: engineer.id });
@@ -661,7 +664,9 @@ describe("escalateStuckTickets", () => {
     const orch = makeOrchestrator();
     await assert.doesNotReject(orch.escalateStuckTickets(project.id));
     const fresh = await board.getWorkItem(ticket.id);
-    assert.equal(fresh!.assigneeAgentId, engineer.id);
+    const seeded = await agentStore.findRoleAgent(project.id, "principal");
+    assert.ok(seeded, "ensureProjectAgents should have seeded a principal agent");
+    assert.equal(fresh!.assigneeAgentId, seeded!.id, "and the stuck ticket escalates to it in the same pass");
   });
 
   it("ignores tickets stuck in other columns (ready, qa) -- only in_progress is eligible", async () => {

@@ -26,10 +26,14 @@ const ESCALATION_THRESHOLD = 5;
  *  the strongest one configured. */
 export async function escalateStuckTickets(orch: Orchestrator, projectId: string): Promise<void> {
   await orch.guard(`escalate:${projectId}`, projectId, async () => {
+    // Don't rely on some OTHER stage (product-owner, EM, ...) having
+    // already called resolveProjectAgent for this project this session --
+    // a project with every autonomy toggle off except this one would
+    // never get its principal agent seeded otherwise. Idempotent and
+    // cheap (a no-op once every built-in role already exists), same as
+    // every other stage's resolveProjectAgent call.
+    await agentStore.ensureProjectAgents(projectId);
     const principal = await agentStore.findRoleAgent(projectId, "principal");
-    // Not fatal -- ensureProjectAgents backfills this on the next
-    // agents-list read (see bootstrap.ts's doc comment); until then,
-    // stuck tickets just keep retrying with the regular roster.
     if (!principal) return;
 
     const stuck = (await board.listWorkItems(projectId)).filter(
