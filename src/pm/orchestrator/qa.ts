@@ -44,15 +44,15 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
       "",
       item.worktreePath
         ? hasPr
-          ? `The engineer's worktree is at \`${reviewCwd}\` with branch \`${item.branch}\` checked out. Start by reading the PR diff — only check out the branch and run the code if the diff alone can't answer a criterion.`
+          ? `The engineer's worktree is at \`${reviewCwd}\` with branch \`${item.branch}\` checked out. Start by reading the PR diff with \`gh pr diff\` from inside that directory — only check out the branch and run the code if the diff alone can't answer a criterion.`
           : `The engineer's worktree is at \`${reviewCwd}\` with branch \`${item.branch}\` checked out, but no pull request is linked (this ticket predates PR-based review). There is no PR diff to read and no PR to comment on -- instead, from inside \`${reviewCwd}\`, diff the branch against the project's default branch yourself (e.g. \`git diff main...${item.branch}\` or \`git log main..${item.branch} -p\`) to see exactly what changed, then review it the same way you would a PR diff. Post your verdict as a comment on this ticket instead of a PR comment.`
         : item.branch
           ? `The work is on branch \`${item.branch}\`.`
           : "The engineer did not report a branch — find the work yourself before judging it.",
-      item.prUrl ? `Pull request: ${item.prUrl} — this is your primary review surface. Read the diff and post your findings as inline PR comments.` : "",
+      item.prUrl ? `Pull request: ${item.prUrl} — this is your primary review surface. Read it with \`gh pr diff\` (Bash), not WebFetch — a GitHub PR URL renders a web app page, not a diff, and fetching it will not tell you what changed. Post your findings as inline PR comments.` : "",
       "",
       hasPr
-        ? "Verify each acceptance criterion. Read the PR diff first, then run the code if needed. Post inline findings as comments on the PR — use the `gh pr comment` command."
+        ? "Verify each acceptance criterion. Read the PR diff with `gh pr diff` first, then run the code if needed. Post inline findings as comments on the PR — use the `gh pr comment` command."
         : "Verify each acceptance criterion. Diff the branch yourself first, then run the code if needed.",
       "",
       "Reporting your result is different from what you're used to: call `report_qa_verdict` once you've reached a verdict. That tool call IS your result — there is no separate summary block to write, and nothing transitions the ticket automatically just because you believe the work passes or fails. Use `record_fact` only for something durable and cross-cutting the next agent on this project will need, not a note about this ticket.",
