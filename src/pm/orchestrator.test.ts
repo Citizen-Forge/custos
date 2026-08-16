@@ -427,6 +427,37 @@ describe("assignReady", () => {
     const settings = await settingsMod.getSettings(project.id);
     assert.match(settings.lastAssignSignal ?? "", /\|inFlight=0$/);
   });
+
+  it("success also stamps lastAssignCheckedAt, independent of the fingerprint", async () => {
+    const project = await makeProject();
+    await makeTicket(project.id, { status: "ready" });
+    const orch = makeOrchestrator();
+    const before = Date.now();
+    runAgentImpl = async () => ({ ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" });
+    await orch.assignReady(project.id);
+    const settings = await settingsMod.getSettings(project.id);
+    assert.ok(settings.lastAssignCheckedAt !== null && settings.lastAssignCheckedAt >= before);
+  });
+
+  it("a genuine failure (not unavailable) still stamps lastAssignCheckedAt", async () => {
+    const project = await makeProject();
+    await makeTicket(project.id, { status: "ready" });
+    const orch = makeOrchestrator();
+    runAgentImpl = async () => ({ ok: false, unavailable: false, parsed: null, error: "boom", text: "", costUsd: null, runMs: 5, runId: "r1" });
+    await orch.assignReady(project.id);
+    const settings = await settingsMod.getSettings(project.id);
+    assert.notEqual(settings.lastAssignCheckedAt, null);
+  });
+
+  it("an 'unavailable' failure does NOT stamp lastAssignCheckedAt -- nothing was actually attempted", async () => {
+    const project = await makeProject();
+    await makeTicket(project.id, { status: "ready" });
+    const orch = makeOrchestrator();
+    runAgentImpl = async () => ({ ok: false, unavailable: true, parsed: null, error: null, text: "", costUsd: null, runMs: 0, runId: "r1" });
+    await orch.assignReady(project.id);
+    const settings = await settingsMod.getSettings(project.id);
+    assert.equal(settings.lastAssignCheckedAt, null);
+  });
 });
 
 describe("pollSlackIdeas", () => {

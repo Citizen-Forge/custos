@@ -29,6 +29,25 @@ export function workItemsSignal(items: readonly { id: string; updatedAt: number 
     .join(",");
 }
 
+/** How long assignReady's fingerprint gate (see ProjectSettings.lastAssignCheckedAt's
+ *  doc comment) is allowed to suppress dispatch before tickProject forces
+ *  another look regardless of whether the fingerprint changed. The
+ *  fingerprint is a genuine fixed point when a ready ticket is blocked on
+ *  something external (a PR merge, a credential fix) with no engineer
+ *  in-flight to free a slot -- neither half of the fingerprint ever moves,
+ *  so without this the EM would never be reconsidered again even after the
+ *  real-world blocker resolves. One hour caps the wasted spend (at most one
+ *  extra sizing pass per hour on a project that's genuinely stuck) against
+ *  how long a resolved blocker can sit unnoticed. */
+export const ASSIGN_STALE_RECHECK_MS = 60 * 60_000;
+
+/** True once lastAssignCheckedAt is missing or older than the recheck
+ *  window -- factored out from the tickProject gate so it's independently
+ *  testable without spinning up a whole tick. */
+export function isAssignCheckStale(lastAssignCheckedAt: number | null, now: number): boolean {
+  return lastAssignCheckedAt === null || now - lastAssignCheckedAt >= ASSIGN_STALE_RECHECK_MS;
+}
+
 /**
  * How many engineers may run at once. Normally the project's own setting,
  * but a project that isn't a git repository has nothing to cut isolated

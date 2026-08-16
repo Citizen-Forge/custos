@@ -95,12 +95,21 @@ export async function assignReady(orch: Orchestrator, projectId: string): Promis
           slackText: `My assignment pass failed: ${result.error ?? "unknown error"}`,
           agent: va,
         });
+        // Marks that a real attempt happened just now, independent of
+        // whether it succeeded -- see ProjectSettings.lastAssignCheckedAt's
+        // doc comment. Skipped for result.unavailable (nothing was actually
+        // attempted; the next tick already retries that for free) so an
+        // unavailable provider can't itself suppress the hourly recheck.
+        await updateSettings(projectId, { lastAssignCheckedAt: Date.now() });
       }
     } else {
       const freshAll = await board.listWorkItems(projectId);
       const freshReady = freshAll.filter((item) => item.type !== "epic" && item.status === "ready");
       const freshInFlight = freshAll.filter((item) => item.status === "in_progress").length;
-      await updateSettings(projectId, { lastAssignSignal: `${workItemsSignal(freshReady)}|inFlight=${freshInFlight}` });
+      await updateSettings(projectId, {
+        lastAssignSignal: `${workItemsSignal(freshReady)}|inFlight=${freshInFlight}`,
+        lastAssignCheckedAt: Date.now(),
+      });
     }
   });
 }

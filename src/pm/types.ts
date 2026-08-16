@@ -362,6 +362,21 @@ export interface ProjectSettings {
   lastGroomSignal: string | null;
   lastAssignSignal: string | null;
   lastCurateSignal: string | null;
+  /** Wall-clock time of the end of the last assign pass (success OR
+   *  failure), independent of lastAssignSignal. Exists because the
+   *  fingerprint above can become a genuine fixed point: a ready ticket
+   *  blocked on an external event (a PR merge landing, a credential being
+   *  fixed) leaves both the ready column AND inFlight unchanged indefinitely
+   *  once nothing is actively assigning or completing -- the fingerprint
+   *  never moves, so the tick gate never re-fires, even after the real-world
+   *  blocker resolves. tickProject also re-dispatches when this is stale
+   *  past ASSIGN_STALE_RECHECK_MS regardless of whether the fingerprint
+   *  matches, so a permanently-blocked-looking ready column still gets
+   *  reconsidered periodically instead of being skipped forever. Confirmed
+   *  live: three tickets sat in ready for four days after their blocking PR
+   *  merged, because inFlight had settled at 0 before AND after the last
+   *  pass and the ready set itself never changed while blocked. */
+  lastAssignCheckedAt: number | null;
   updatedAt: number;
 }
 
@@ -384,6 +399,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     lastGroomSignal: null,
     lastAssignSignal: null,
     lastCurateSignal: null,
+    lastAssignCheckedAt: null,
     autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true, principal: true, "principal-qa": true },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,

@@ -8,7 +8,7 @@ import { getSettings, updateSettings } from "./project-settings.js";
 import { listPendingFacts } from "./facts.js";
 import type { AgentDef, ProjectSettings } from "./types.js";
 import { HUMAN_ASSIGNEE_ID } from "./types.js";
-import { engineerLimit, workItemsSignal } from "./orchestrator/shared.js";
+import { engineerLimit, workItemsSignal, isAssignCheckStale } from "./orchestrator/shared.js";
 import { groomBacklog, curateFacts, planIdea } from "./orchestrator/product-owner.js";
 import { pollSlackIdeas } from "./orchestrator/slack-inbox.js";
 import { assignReady } from "./orchestrator/engineering-manager.js";
@@ -224,11 +224,23 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     // alongside the ready items themselves so a slot freeing up (a
     // different ticket completing or bouncing) still counts as something
     // worth another look even when the ready column itself is unchanged.
+    //
+    // That fingerprint can become a genuine fixed point, though: a ready
+    // ticket blocked on something external (a PR merge landing, a
+    // credential being fixed) leaves both the ready set AND inFlight
+    // unchanged indefinitely while nothing else moves -- confirmed live,
+    // three tickets sat in ready for four days after their blocking PR
+    // actually merged, because inFlight had settled at 0 both before and
+    // after the last pass. isAssignCheckStale forces a recheck at least
+    // once an hour regardless of the fingerprint, so a resolved blocker
+    // doesn't sit unnoticed indefinitely.
     if (settings.autonomy["engineering-manager"] && readyWork.length) {
       const limit = await engineerLimit(project, settings);
       const inFlight = (await board.listWorkItems(project.id)).filter((item) => item.status === "in_progress").length;
       const assignSignal = `${workItemsSignal(readyWork)}|inFlight=${inFlight}`;
-      if (inFlight < limit && assignSignal !== settings.lastAssignSignal) void this.assignReady(project.id);
+      const changed = assignSignal !== settings.lastAssignSignal;
+      const stale = isAssignCheckStale(settings.lastAssignCheckedAt, Date.now());
+      if (inFlight < limit && (changed || stale)) void this.assignReady(project.id);
     }
 
     // Fire-and-forget like every other stage here -- a ticket it
