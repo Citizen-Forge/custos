@@ -12,7 +12,7 @@ import { engineerLimit, workItemsSignal } from "./orchestrator/shared.js";
 import { groomBacklog, curateFacts, planIdea } from "./orchestrator/product-owner.js";
 import { pollSlackIdeas } from "./orchestrator/slack-inbox.js";
 import { assignReady } from "./orchestrator/engineering-manager.js";
-import { escalateStuckTickets } from "./orchestrator/escalation.js";
+import { escalateStuckTickets, escalateTicketManually, type EscalationResult } from "./orchestrator/escalation.js";
 import { runEngineer } from "./orchestrator/engineer.js";
 import { runQa } from "./orchestrator/qa.js";
 import { surveyProject } from "./orchestrator/survey.js";
@@ -384,6 +384,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   async escalateStuckTickets(projectId: string): Promise<void> {
     return escalateStuckTickets(this, projectId);
+  }
+
+  /** Human override, called from the ticket detail UI's "Escalate"
+   *  button -- see orchestrator/escalation.ts's doc comment. */
+  async escalateTicketManually(projectId: string, workItemId: string): Promise<EscalationResult> {
+    return escalateTicketManually(this, projectId, workItemId);
   }
 
   // ------------------------------------------------------------------ engineer

@@ -59,6 +59,16 @@ export default function TicketDetail({
     onChanged()
   }
 
+  async function escalate(): Promise<void> {
+    if (!data) return
+    const target = data.item.status === 'in_progress' ? 'the Principal Engineer' : 'Principal QA'
+    if (!confirm(`Escalate "${data.item.title}" to ${target} now? This uses real, metered Anthropic usage.`)) return
+    const res = await call<{ ok: true; escalatedTo: string }>('POST', `/admin/api/work-items/${itemId}/escalate`)
+    if (!res) return
+    await refresh()
+    onChanged()
+  }
+
   return (
     <div className="drawer-overlay" onClick={onClose}>
       <aside className="drawer" onClick={(e) => e.stopPropagation()}>
@@ -70,6 +80,11 @@ export default function TicketDetail({
               <span className={`type-pill ${data.item.type}`}>{data.item.type}</span>
               <span className={`badge status-${data.item.status}`}>{data.item.status.replace('_', ' ')}</span>
               <span style={{ flex: 1 }} />
+              {(data.item.status === 'in_progress' || data.item.status === 'qa') && (
+                <button onClick={escalate} title="Hand this ticket to the Principal Engineer / Principal QA now, instead of waiting for repeated failures">
+                  Escalate
+                </button>
+              )}
               <button className="danger" onClick={remove}>
                 Delete
               </button>
@@ -82,6 +97,11 @@ export default function TicketDetail({
                 <span>{data.item.complexity ? `complexity: ${data.item.complexity}` : 'not sized'}</span>
                 {data.item.assigneeAgentId && (
                   <span>assigned to {agentLabel(data.agents.find((a) => a.id === data.item.assigneeAgentId)) ?? 'unknown agent'}</span>
+                )}
+                {data.item.qaAssigneeAgentId && (
+                  <span className="warn-text">
+                    escalated to {agentLabel(data.agents.find((a) => a.id === data.item.qaAssigneeAgentId)) ?? 'Principal QA'}
+                  </span>
                 )}
                 {data.item.branch && <span>branch {data.item.branch}</span>}
                 {data.item.worktreePath && <span>own checkout</span>}

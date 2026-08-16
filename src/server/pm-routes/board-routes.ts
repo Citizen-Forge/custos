@@ -89,6 +89,22 @@ export function registerBoardRoutes(app: FastifyInstance, orchestrator: Orchestr
     return { item };
   });
 
+  /** Human override of the deterministic escalation stage (see
+   *  orchestrator/escalation.ts) -- lets an operator hand a ticket to the
+   *  Principal Engineer or Principal QA immediately instead of waiting out
+   *  the 5-failed-attempts threshold. */
+  app.post("/admin/api/work-items/:itemId/escalate", async (req, reply) => {
+    const { itemId } = req.params as { itemId: string };
+    const item = await board.getWorkItem(itemId);
+    if (!item) return notFound(reply, "work item");
+    const result = await orchestrator.escalateTicketManually(item.projectId, itemId);
+    if (!result.ok) {
+      reply.code(400);
+      return { error: result.error };
+    }
+    return { ok: true, escalatedTo: result.escalatedTo, item: await board.getWorkItem(itemId) };
+  });
+
   app.delete("/admin/api/work-items/:itemId", async (req, reply) => {
     const { itemId } = req.params as { itemId: string };
     const item = await board.getWorkItem(itemId);

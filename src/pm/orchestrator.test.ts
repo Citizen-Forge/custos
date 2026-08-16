@@ -792,6 +792,66 @@ describe("escalateStuckTickets", () => {
   });
 });
 
+describe("escalateTicketManually", () => {
+  it("escalates an in_progress ticket to the Principal Engineer, bypassing the attempts threshold", async () => {
+    const project = await makeProject();
+    const engineer = await agentStore.createAgent({ projectId: project.id, role: "engineer", name: "Eng", fallbackSet: "standard" });
+    const ticket = await makeTicket(project.id, { status: "in_progress" });
+    await board.updateWorkItem(ticket.id, { assigneeAgentId: engineer.id });
+    // Deliberately below ESCALATION_THRESHOLD (5) -- the manual override
+    // is exactly for not waiting on that.
+    await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    const result = await orch.escalateTicketManually(project.id, ticket.id);
+    assert.ok(result.ok);
+    const principal = await agentStore.findRoleAgent(project.id, "principal");
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.assigneeAgentId, principal!.id);
+    assert.equal(fresh!.attempts, 0);
+    assert.match(fresh!.comments![0].body, /by manual operator request/);
+  });
+
+  it("escalates a qa ticket to Principal QA, bypassing the attempts threshold", async () => {
+    const project = await makeProject();
+    const ticket = await makeTicket(project.id, { status: "qa" });
+    const orch = makeOrchestrator();
+    const result = await orch.escalateTicketManually(project.id, ticket.id);
+    assert.ok(result.ok);
+    const principalQa = await agentStore.findRoleAgent(project.id, "principal-qa");
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.qaAssigneeAgentId, principalQa!.id);
+    assert.match(fresh!.comments![0].body, /by manual operator request/);
+  });
+
+  it("rejects a ticket in a non-escalatable column", async () => {
+    const project = await makeProject();
+    const ticket = await makeTicket(project.id, { status: "ready" });
+    const orch = makeOrchestrator();
+    const result = await orch.escalateTicketManually(project.id, ticket.id);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /cannot be escalated/);
+  });
+
+  it("returns a clear error when the ticket is already escalated", async () => {
+    const project = await makeProject();
+    const ticket = await makeTicket(project.id, { status: "in_progress" });
+    const orch = makeOrchestrator();
+    const first = await orch.escalateTicketManually(project.id, ticket.id);
+    assert.ok(first.ok);
+    const second = await orch.escalateTicketManually(project.id, ticket.id);
+    assert.equal(second.ok, false);
+    if (!second.ok) assert.match(second.error, /Already escalated/);
+  });
+
+  it("returns a clear error for a nonexistent ticket", async () => {
+    const project = await makeProject();
+    const orch = makeOrchestrator();
+    const result = await orch.escalateTicketManually(project.id, "no-such-ticket");
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /not found/i);
+  });
+});
+
 describe("runQa", () => {
   async function setup() {
     const project = await makeProject();
