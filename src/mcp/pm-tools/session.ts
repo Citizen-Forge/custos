@@ -81,7 +81,31 @@ export interface EngineerSession extends BaseSession {
   outcome: EngineerOutcome | null;
 }
 
-export type PmSession = GroomSession | AssignSession | CurateSession | EngineerSession;
+/** What report_qa_verdict captures, read back by orchestrator.ts's runQa
+ *  once the run completes. Shaped like the old `custos-qa` fenced JSON
+ *  block this replaces -- same fields, but there's nothing left to parse
+ *  out of the transcript, the tool call itself is the result. prComments
+ *  mirrors what the agent already posted live via `gh pr comment`
+ *  (Bash is still in its toolkit -- see tool-policy.ts's DISALLOWED_TOOLS_BY_TAG
+ *  entry for "custos-qa"), kept here purely so the ticket detail UI can
+ *  show them without a second GitHub round-trip. */
+export type QaOutcome = {
+  verdict: "pass" | "fail";
+  summary: string;
+  criteriaChecked: Array<{ criterion: string; result: "pass" | "fail"; evidence: string }>;
+  prComments: string[];
+  followUps: string[];
+};
+
+export interface QaSession extends BaseSession {
+  kind: "qa";
+  workItemId: string;
+  /** Null until report_qa_verdict is called. Last call wins, same
+   *  reasoning as EngineerSession.outcome. */
+  outcome: QaOutcome | null;
+}
+
+export type PmSession = GroomSession | AssignSession | CurateSession | EngineerSession | QaSession;
 
 const sessions = new Map<string, PmSession>();
 
@@ -145,6 +169,18 @@ export function mintEngineerSession(input: {
   sweepExpired();
   const token = newToken();
   sessions.set(token, { kind: "engineer", token, expiresAt: Date.now() + SESSION_TTL_MS, actions: [], outcome: null, ...input });
+  return token;
+}
+
+export function mintQaSession(input: {
+  projectId: string;
+  agentId: string;
+  agentName: string;
+  workItemId: string;
+}): string {
+  sweepExpired();
+  const token = newToken();
+  sessions.set(token, { kind: "qa", token, expiresAt: Date.now() + SESSION_TTL_MS, actions: [], outcome: null, ...input });
   return token;
 }
 

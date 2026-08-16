@@ -728,10 +728,12 @@ describe("runQa", () => {
     const { project, ticket } = await setup();
     let released = false;
     worktreesImpl.releaseWorkspace = async () => { released = true; };
-    runAgentImpl = async () => ({
-      ok: true, unavailable: false, error: null, text: "", costUsd: null, runMs: 5, runId: "r1",
-      parsed: { summary: "Looks good.", verdict: "pass", criteriaChecked: [], prComments: [] },
-    });
+    runAgentImpl = async (_runtime: unknown, options: { mcpConfig: string }) => {
+      const token = tokenFromMcpConfig(options.mcpConfig);
+      const session = pmTools.lookupSession(token) as { outcome: unknown };
+      session.outcome = { verdict: "pass", summary: "Looks good.", criteriaChecked: [], prComments: [], followUps: [] };
+      return { ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" };
+    };
     const orch = makeOrchestrator();
     const { activity } = collectEvents(orch);
     await orch.runQa(project.id, ticket.id);
@@ -745,10 +747,12 @@ describe("runQa", () => {
     const { project, ticket } = await setup();
     const agent = await agentStore.createAgent({ projectId: project.id, role: "engineer", name: "Eng", fallbackSet: "default" });
     await board.updateWorkItem(ticket.id, { assigneeAgentId: agent.id });
-    runAgentImpl = async () => ({
-      ok: true, unavailable: false, error: null, text: "", costUsd: null, runMs: 5, runId: "r1",
-      parsed: { summary: "Missing a case.", verdict: "fail", criteriaChecked: [{ criterion: "handles empty input", result: "fail", evidence: "crashes" }], prComments: [] },
-    });
+    runAgentImpl = async (_runtime: unknown, options: { mcpConfig: string }) => {
+      const token = tokenFromMcpConfig(options.mcpConfig);
+      const session = pmTools.lookupSession(token) as { outcome: unknown };
+      session.outcome = { verdict: "fail", summary: "Missing a case.", criteriaChecked: [{ criterion: "handles empty input", result: "fail", evidence: "crashes" }], prComments: [], followUps: [] };
+      return { ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" };
+    };
     const orch = makeOrchestrator();
     const { activity } = collectEvents(orch);
     await orch.runQa(project.id, ticket.id);
@@ -768,6 +772,17 @@ describe("runQa", () => {
     assert.deepEqual(activity, []);
     const fresh = await board.getWorkItem(ticket.id);
     assert.equal((fresh!.comments ?? []).length, 0);
+  });
+
+  it("no verdict reported (ok but no outcome) is treated as a failure", async () => {
+    const { project, ticket } = await setup();
+    runAgentImpl = async () => ({ ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" });
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.runQa(project.id, ticket.id);
+    assert.ok(activity.some((m) => m.includes("did not report a verdict")));
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.status, "qa");
   });
 });
 
