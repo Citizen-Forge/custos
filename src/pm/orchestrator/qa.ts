@@ -8,7 +8,7 @@ import { runAgent } from "../agent-runner.js";
 import { mintQaSession, releaseSession, lookupSession, buildPmMcpConfig, type QaOutcome } from "../../mcp/pm-tools.js";
 import { resolveProjectAgent, projectHeader } from "../pm-prompts.js";
 import { renderWorkItem } from "../context.js";
-import { release } from "./shared.js";
+import { handleDispatchFailure, release } from "./shared.js";
 import type { Orchestrator } from "../orchestrator.js";
 
 export async function runQa(orch: Orchestrator, projectId: string, workItemId: string): Promise<void> {
@@ -94,16 +94,21 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
       // OS's ARG_MAX (EBIG) on every subsequent attempt -- a ticket that
       // could never recover once poisoned. The live activity feed still
       // surfaces the failure without persisting it into ticket history.
-      // No provider being available (result.unavailable) isn't worth an
-      // activity line at all -- nothing was attempted, the next ~20s
-      // tick retries for free, and with Slack now posting every
-      // activity line (see slack/activity.ts), routine concurrency
-      // contention would otherwise spam the channel on every tick.
-      if (result.unavailable) return;
+      //
+      // Backed off via the same handleDispatchFailure/attempts machinery
+      // engineer.ts uses -- previously QA never called this at all, so a
+      // ticket that couldn't converge (rate limit, a model that gives up
+      // without calling report_qa_verdict, a 90-minute timeout) was
+      // redispatched fresh on every tick forever, and `attempts` never
+      // moved, which also meant escalateStuckTickets' `attempts >= 5`
+      // check could never fire for a QA-stuck ticket -- only in_progress
+      // (engineer-owned) tickets could ever reach it.
+      const attempt = await handleDispatchFailure(workItemId, result.unavailable);
+      if (attempt === null) return;
       const reason = result.ok ? "did not report a verdict via report_qa_verdict" : (result.error ?? "unknown error");
       orch.emit("activity", projectId, {
-        text: `${ctx.agent.name} QA run failed on "${item.title}": ${reason}`,
-        slackText: `My QA run failed on "${item.title}": ${reason}`,
+        text: `${ctx.agent.name} QA run failed on "${item.title}" (attempt ${attempt}): ${reason}; will retry.`,
+        slackText: `My QA run failed on "${item.title}" (attempt ${attempt}): ${reason}. I'll retry.`,
         agent: va,
       });
       return;
@@ -166,6 +171,7 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
     }
 
     if (outcome.verdict === "pass") {
+      await board.clearAttempts(workItemId);
       // Passing frees the checkout for the next ticket. The branch and
       // its pull request survive -- that's where the work actually lives.
       await release(ctx.project, workItemId);
@@ -178,6 +184,7 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
       return;
     }
 
+    await board.clearAttempts(workItemId);
     await board.transitionWorkItem(workItemId, "ready", ctx.agent.id, "QA found problems — needs rework");
     // The bounce is charged to the engineer who produced the work, which
     // is exactly the signal the engineering manager reads back when it

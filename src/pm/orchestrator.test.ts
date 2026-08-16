@@ -774,15 +774,32 @@ describe("runQa", () => {
     assert.equal((fresh!.comments ?? []).length, 0);
   });
 
-  it("no verdict reported (ok but no outcome) is treated as a failure", async () => {
+  it("no verdict reported (ok but no outcome) is treated as a failure and backs off", async () => {
     const { project, ticket } = await setup();
     runAgentImpl = async () => ({ ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" });
     const orch = makeOrchestrator();
     const { activity } = collectEvents(orch);
     await orch.runQa(project.id, ticket.id);
-    assert.ok(activity.some((m) => m.includes("did not report a verdict")));
+    assert.ok(activity.some((m) => m.includes("did not report a verdict") && m.includes("attempt 1")));
     const fresh = await board.getWorkItem(ticket.id);
     assert.equal(fresh!.status, "qa");
+    assert.equal(fresh!.attempts, 1);
+  });
+
+  it("a passing verdict clears any accumulated attempts", async () => {
+    const { project, ticket } = await setup();
+    await board.recordAttemptFailure(ticket.id);
+    await board.recordAttemptFailure(ticket.id);
+    runAgentImpl = async (_runtime: unknown, options: { mcpConfig: string }) => {
+      const token = tokenFromMcpConfig(options.mcpConfig);
+      const session = pmTools.lookupSession(token) as { outcome: unknown };
+      session.outcome = { verdict: "pass", summary: "Looks good.", criteriaChecked: [], prComments: [], followUps: [] };
+      return { ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" };
+    };
+    const orch = makeOrchestrator();
+    await orch.runQa(project.id, ticket.id);
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.attempts, 0);
   });
 });
 
