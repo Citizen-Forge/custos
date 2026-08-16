@@ -15,6 +15,11 @@ export const ROLE_DEFAULT_FALLBACK_SET: Record<AgentRole, string> = {
   // from ever being assigned it.
   principal: "principal",
   qa: "standard",
+  // Same locked set as "principal" -- see the comment above. Reused
+  // rather than a second single-consumer set since the justification
+  // (real Anthropic spend, only after the deterministic escalation
+  // stage fires) is identical.
+  "principal-qa": "principal",
   devops: "standard",
   "project-manager": "complex",
 };
@@ -47,6 +52,7 @@ export const ROLE_DEFAULT_MODEL: Record<AgentRole, [providerKey: string, model: 
   engineer: ["anthropic", "claude-sonnet-5"],
   principal: ["anthropic", "claude-sonnet-5"],
   qa: ["anthropic", "claude-sonnet-5"],
+  "principal-qa": ["anthropic", "claude-sonnet-5"],
   devops: ["anthropic", "claude-sonnet-5"],
   "project-manager": ["anthropic", "claude-sonnet-5"],
 };

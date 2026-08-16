@@ -4,19 +4,21 @@ import { pickPersonaName } from "../personas.js";
 import type { AgentDef, AgentRole, Complexity, CostProfile, GlobalSystemRole } from "../types.js";
 import { agents, emptyStats } from "./store.js";
 
-/** Reserved fallback set names that may only ever be assigned to the one
- *  role they exist for. "principal" is real, metered Anthropic usage
+/** Reserved fallback set names that may only ever be assigned to the
+ *  role(s) they exist for. "principal" is real, metered Anthropic usage
  *  gated behind the escalation stage's 5-failed-attempts trigger (see
  *  orchestrator/escalation.ts) -- not something a PM tuning pass, an EM
  *  creating a specialist, or an admin edit should be able to hand to a
- *  regular engineer, however accidentally. Extend this map rather than
- *  special-casing "principal" by name if a similar single-consumer set
- *  is added later. */
-const ROLE_LOCKED_FALLBACK_SETS: Partial<Record<string, AgentRole>> = {
-  principal: "principal",
+ *  regular engineer, however accidentally. Both "principal" (engineer-side
+ *  escalation) and "principal-qa" (QA-side escalation) share this one set
+ *  rather than each getting their own -- same justification, same real
+ *  spend gate. Extend this map rather than special-casing a set by name
+ *  if a similar single-consumer set is added later. */
+const ROLE_LOCKED_FALLBACK_SETS: Partial<Record<string, AgentRole[]>> = {
+  principal: ["principal", "principal-qa"],
 };
 
-/** Throws if `fallbackSet` is reserved for a different role than `role`.
+/** Throws if `fallbackSet` is reserved for roles that don't include `role`.
  *  Called from both createAgent and updateAgent so every write path --
  *  admin PATCH, the EM's create_engineer/tune_engineer, the PM's
  *  fallback-set reassignment -- goes through the same invariant instead
@@ -24,8 +26,8 @@ const ROLE_LOCKED_FALLBACK_SETS: Partial<Record<string, AgentRole>> = {
 export function assertFallbackSetAllowed(role: AgentRole, fallbackSet: string | undefined): void {
   if (!fallbackSet) return;
   const lockedTo = ROLE_LOCKED_FALLBACK_SETS[fallbackSet];
-  if (lockedTo && lockedTo !== role) {
-    throw new Error(`fallback set "${fallbackSet}" is reserved for the "${lockedTo}" role and cannot be assigned to a "${role}" agent`);
+  if (lockedTo && !lockedTo.includes(role)) {
+    throw new Error(`fallback set "${fallbackSet}" is reserved for the ${lockedTo.map((r) => `"${r}"`).join("/")} role(s) and cannot be assigned to a "${role}" agent`);
   }
 }
 

@@ -6,7 +6,7 @@ import * as agentStore from "../agents.js";
 import * as runs from "../runs.js";
 import { runAgent } from "../agent-runner.js";
 import { mintQaSession, releaseSession, lookupSession, buildPmMcpConfig, type QaOutcome } from "../../mcp/pm-tools.js";
-import { resolveProjectAgent, projectHeader } from "../pm-prompts.js";
+import { resolveProjectAgent, resolveSpecificAgent, projectHeader } from "../pm-prompts.js";
 import { renderWorkItem } from "../context.js";
 import { handleDispatchFailure, release } from "./shared.js";
 import type { Orchestrator } from "../orchestrator.js";
@@ -15,7 +15,14 @@ export async function runQa(orch: Orchestrator, projectId: string, workItemId: s
   await orch.guard(`qa:${workItemId}`, projectId, async (signal) => {
     const item = await board.getWorkItem(workItemId);
     if (!item || item.status !== "qa") return;
-    const ctx = await resolveProjectAgent(projectId, "qa");
+    // Escalated tickets (see orchestrator/escalation.ts) are reviewed by
+    // the project's Principal QA agent instead of the regular roster QA
+    // agent -- falls through to the normal resolution if the escalated
+    // agent record has since been deleted, rather than stalling the
+    // ticket entirely.
+    const ctx = item.qaAssigneeAgentId
+      ? (await resolveSpecificAgent(projectId, item.qaAssigneeAgentId)) ?? (await resolveProjectAgent(projectId, "qa"))
+      : await resolveProjectAgent(projectId, "qa");
     if (!ctx) return;
     const va = { personaName: ctx.agent.personaName, name: ctx.agent.name, role: ctx.agent.role };
 

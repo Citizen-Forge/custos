@@ -34,6 +34,7 @@ const BASE_ITEM: WorkItem = {
   priority: 0,
   complexity: null,
   assigneeAgentId: null,
+  qaAssigneeAgentId: null,
   subtasks: [],
   comments: [],
   labels: [],

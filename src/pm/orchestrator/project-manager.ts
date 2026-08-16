@@ -29,11 +29,14 @@ export async function assignModels(orch: Orchestrator, projectId: string): Promi
     // (see agents/bootstrap.ts) and reserved for the escalation stage's
     // 5-failed-attempts trigger, not something the PM should reassign
     // away, and not something any other role should be offered.
+    // "principal-qa" shares that same locked set (see mutate.ts's
+    // ROLE_LOCKED_FALLBACK_SETS) for QA-side escalation, so it's excluded
+    // from the roster for the identical reason.
     const fallbackSets = Object.fromEntries(
       Object.entries(orch.runtime.config.fallbackSets ?? {}).filter(([key]) => key !== "principal"),
     );
     const allAgents = await agentStore.listAgents(projectId);
-    const roster = allAgents.filter((a) => a.role !== "project-manager" && a.role !== "steering" && a.role !== "principal");
+    const roster = allAgents.filter((a) => a.role !== "project-manager" && a.role !== "steering" && a.role !== "principal" && a.role !== "principal-qa");
 
     const prompt = [
       await projectHeader(ctx.project, ctx.settings),

@@ -89,14 +89,20 @@ priority-queue semantics.**
 | `devops` | ✓ `agents.ts:202`, `prompts.ts:15/415` | ✓ `resolve("devops")` ×2, `assignRepo` / `runDevops`, `autonomy.devops` | live |
 | `project-manager` | ✓ `agents.ts:204`, `prompts.ts:16/417` | ✓ `resolve("project-manager")`, `autonomy["project-manager"]`, `filter-out from roster display`, `assignModels` orchestration path | live |
 | `principal` | ✓ `agents/bootstrap.ts` `ensureProjectAgents` seed entry, `prompts/defaults.ts` `ROLE_DEFAULT_FALLBACK_SET.principal = "principal"` | ✓ `agents/store.ts findRoleAgent(projectId, "principal")` (`orchestrator/escalation.ts`), `agents/mutate.ts assertFallbackSetAllowed` role-lock, `board.ts ROLE_TRANSITIONS.principal`, `slack/personas.ts ROLE_PERSONAS.principal`, excluded from `listEngineers()`'s roster and from the EM's/PM's fallback-set menus (`orchestrator/engineering-manager.ts`, `orchestrator/project-manager.ts`) | live |
+| `principal-qa` | ✓ `agents/bootstrap.ts` `ensureProjectAgents` seed entry, `prompts/defaults.ts` `ROLE_DEFAULT_FALLBACK_SET["principal-qa"] = "principal"` (shares the same locked set as `principal`) | ✓ `agents/store.ts findRoleAgent(projectId, "principal-qa")` (`orchestrator/escalation.ts`'s QA branch), read back per-ticket via `WorkItem.qaAssigneeAgentId` → `pm-prompts.ts resolveSpecificAgent` (`orchestrator/qa.ts runQa`), `agents/mutate.ts assertFallbackSetAllowed` role-lock (shared list with `principal`), `board.ts ROLE_TRANSITIONS["principal-qa"]`, `slack/personas.ts ROLE_PERSONAS["principal-qa"]`, excluded from the EM's/PM's fallback-set menus and the PM's roster | live |
 
 **Union status: fully live, lowest-count member (`project-manager`) still
-has five+ runtime paths. `principal` is deliberately excluded from every
-normal assignment path (EM roster, PM reassignment) — its only write
-path is the escalation stage's deterministic reassignment after 5
-consecutive failed attempts on a ticket, gated by
-`agents/mutate.ts`'s `assertFallbackSetAllowed` so no other role can be
-handed its (real-Anthropic-usage) fallback set.**
+has five+ runtime paths. `principal` and `principal-qa` are both
+deliberately excluded from every normal assignment path (EM roster, PM
+reassignment) — their only write paths are the escalation stage's
+deterministic reassignment after 5 consecutive failed attempts (engineer-
+side for `principal`, QA-side for `principal-qa`, both in
+`orchestrator/escalation.ts`), gated by `agents/mutate.ts`'s
+`assertFallbackSetAllowed` so no other role can be handed their shared
+(real-Anthropic-usage) `principal` fallback set. `principal-qa` is the one
+role resolved per-ticket rather than per-project (`WorkItem.qaAssigneeAgentId`),
+since a project has exactly one QA agent but escalation needs to target a
+specific ticket without disturbing every other ticket still in `qa`.**
 
 ### `ChatKind` — `src/remote/chats.ts:11`, mirrored at `ui/src/shared/types.ts:8`
 
@@ -280,7 +286,7 @@ update the audit doc + test together, and document the rationale.
 |---|---|---|---|
 | `TaskKind` | 3 | 3 | 0 |
 | `Priority` | 2 | 2 | 0 |
-| `AgentRole` (backend + UI) | 8 | 8 | 0 |
+| `AgentRole` (backend + UI) | 9 | 9 | 0 |
 | `ChatKind` | 3 | 3 | 0 |
 | `createdBy` | 3 | 3 passive | 0 |
 | `WorkItemType` | 3 | 3 | 0 |

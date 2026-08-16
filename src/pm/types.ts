@@ -50,6 +50,16 @@ export interface WorkItem {
    * agent (and therefore which model tier) can be assigned. */
   complexity: Complexity | null;
   assigneeAgentId: string | null;
+  /** Set only by escalateStuckTickets when a ticket stuck in "qa" past the
+   * escalation threshold is handed to the project's Principal QA agent
+   * instead of the regular roster QA agent. Null means "use the project's
+   * normal QA agent," which is every ticket, always, until this fires --
+   * QA otherwise has no per-ticket assignee (there's exactly one QA agent
+   * per project, unlike engineer). Reset to null on every column change,
+   * same as attempts, so a ticket that re-enters qa after rework goes
+   * through the regular reviewer again rather than staying pinned to the
+   * escalated one from a previous round. */
+  qaAssigneeAgentId: string | null;
   subtasks: Subtask[];
   comments: Comment[];
   labels: string[];
@@ -96,7 +106,7 @@ export interface Idea {
   updatedAt: number;
 }
 
-export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops" | "project-manager" | "principal";
+export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops" | "project-manager" | "principal" | "principal-qa";
 
 /** Built-in service the gateway runs project-orthogonally: memory
  * curation, permission classification, embeddings, future global hooks.
@@ -302,7 +312,10 @@ export interface ProjectSettings {
    *  orchestrator/escalation.ts), not a normal per-role dispatch loop --
    *  same kill-switch shape as the others so an operator can turn off
    *  Anthropic-spending escalation per project without touching the
-   *  agent or the fallback set. */
+   *  agent or the fallback set. `principal-qa` exists only because this
+   *  Record is exhaustive over AgentRole -- escalateStuckTickets' QA-side
+   *  branch reuses the SAME `principal` toggle (one kill-switch for the
+   *  whole escalation stage, not two), so this key is never read. */
   autonomy: Record<Exclude<AgentRole, "steering">, boolean>;
   /** Ceiling on engineers working this project at once. Each one gets its
    * own git worktree, so this is a spend-and-load limit rather than a
@@ -371,7 +384,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     lastGroomSignal: null,
     lastAssignSignal: null,
     lastCurateSignal: null,
-    autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true, principal: true },
+    autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true, principal: true, "principal-qa": true },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,
     updatedAt: Date.now(),

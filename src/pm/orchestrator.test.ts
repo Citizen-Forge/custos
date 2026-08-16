@@ -703,7 +703,7 @@ describe("escalateStuckTickets", () => {
     assert.equal(fresh!.assigneeAgentId, seeded!.id, "and the stuck ticket escalates to it in the same pass");
   });
 
-  it("ignores tickets stuck in other columns (ready, qa) -- only in_progress is eligible", async () => {
+  it("ignores a stuck ticket in 'ready' -- the engineer-side branch only watches in_progress", async () => {
     const project = await makeProject();
     await setupPrincipal(project.id);
     const ticket = await makeTicket(project.id, { status: "ready" });
@@ -714,6 +714,81 @@ describe("escalateStuckTickets", () => {
     assert.deepEqual(activity, []);
     const fresh = await board.getWorkItem(ticket.id);
     assert.equal(fresh!.assigneeAgentId, null);
+  });
+
+  async function setupPrincipalQa(projectId: string) {
+    return agentStore.createAgent({ projectId, role: "principal-qa", name: "Principal QA", fallbackSet: "principal" });
+  }
+
+  it("QA branch: no-ops when a qa-stuck ticket hasn't reached the attempts threshold", async () => {
+    const project = await makeProject();
+    await setupPrincipalQa(project.id);
+    const ticket = await makeTicket(project.id, { status: "qa" });
+    for (let i = 0; i < 4; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.escalateStuckTickets(project.id);
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.qaAssigneeAgentId, null);
+    assert.deepEqual(activity, []);
+  });
+
+  it("QA branch: reassigns a qa-stuck ticket at the threshold to Principal QA, clears attempts, and comments", async () => {
+    const project = await makeProject();
+    const principalQa = await setupPrincipalQa(project.id);
+    const ticket = await makeTicket(project.id, { status: "qa" });
+    for (let i = 0; i < 5; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.escalateStuckTickets(project.id);
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.qaAssigneeAgentId, principalQa.id);
+    assert.equal(fresh!.assigneeAgentId, null, "escalating the reviewer doesn't touch the engineer assignee");
+    assert.equal(fresh!.attempts, 0);
+    assert.equal(fresh!.status, "qa", "reassignment alone does not change the column");
+    assert.equal((fresh!.comments ?? []).length, 1);
+    assert.match(fresh!.comments![0].body, /Escalated to/);
+    assert.ok(activity.some((m) => m.includes("Escalated") && m.includes(ticket.title)));
+  });
+
+  it("QA branch: does not re-escalate a ticket already assigned to Principal QA", async () => {
+    const project = await makeProject();
+    const principalQa = await setupPrincipalQa(project.id);
+    const ticket = await makeTicket(project.id, { status: "qa" });
+    await board.updateWorkItem(ticket.id, { qaAssigneeAgentId: principalQa.id });
+    for (let i = 0; i < 6; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.escalateStuckTickets(project.id);
+    assert.deepEqual(activity, [], "already on Principal QA -- nowhere further to escalate");
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.qaAssigneeAgentId, principalQa.id);
+    assert.equal(fresh!.attempts, 6, "attempts untouched when no reassignment happens");
+  });
+
+  it("QA branch: self-seeds the Principal QA agent via ensureProjectAgents when the project doesn't have one yet", async () => {
+    const project = await makeProject();
+    const ticket = await makeTicket(project.id, { status: "qa" });
+    for (let i = 0; i < 5; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    await assert.doesNotReject(orch.escalateStuckTickets(project.id));
+    const fresh = await board.getWorkItem(ticket.id);
+    const seeded = await agentStore.findRoleAgent(project.id, "principal-qa");
+    assert.ok(seeded, "ensureProjectAgents should have seeded a principal-qa agent");
+    assert.equal(fresh!.qaAssigneeAgentId, seeded!.id, "and the stuck ticket escalates to it in the same pass");
+  });
+
+  it("QA branch: ignores a stuck ticket in 'ready' -- only qa is eligible for this branch", async () => {
+    const project = await makeProject();
+    await setupPrincipalQa(project.id);
+    const ticket = await makeTicket(project.id, { status: "ready" });
+    for (let i = 0; i < 5; i++) await board.recordAttemptFailure(ticket.id);
+    const orch = makeOrchestrator();
+    const { activity } = collectEvents(orch);
+    await orch.escalateStuckTickets(project.id);
+    assert.deepEqual(activity, []);
+    const fresh = await board.getWorkItem(ticket.id);
+    assert.equal(fresh!.qaAssigneeAgentId, null);
   });
 });
 
@@ -800,6 +875,40 @@ describe("runQa", () => {
     await orch.runQa(project.id, ticket.id);
     const fresh = await board.getWorkItem(ticket.id);
     assert.equal(fresh!.attempts, 0);
+  });
+
+  it("an escalated ticket (qaAssigneeAgentId set) dispatches with the Principal QA agent, not the roster QA agent", async () => {
+    const { project, ticket } = await setup();
+    const principalQa = await agentStore.createAgent({ projectId: project.id, role: "principal-qa", name: "Principal QA", fallbackSet: "principal" });
+    await board.updateWorkItem(ticket.id, { qaAssigneeAgentId: principalQa.id });
+    let dispatchedAgentId: string | undefined;
+    runAgentImpl = async (_runtime: unknown, options: { mcpConfig: string; agent: { id: string } }) => {
+      dispatchedAgentId = options.agent.id;
+      const token = tokenFromMcpConfig(options.mcpConfig);
+      const session = pmTools.lookupSession(token) as { outcome: unknown };
+      session.outcome = { verdict: "pass", summary: "Looks good.", criteriaChecked: [], prComments: [], followUps: [] };
+      return { ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" };
+    };
+    const orch = makeOrchestrator();
+    await orch.runQa(project.id, ticket.id);
+    assert.equal(dispatchedAgentId, principalQa.id);
+  });
+
+  it("falls back to the regular QA agent when the escalated agent record no longer exists", async () => {
+    const { project, ticket } = await setup();
+    await board.updateWorkItem(ticket.id, { qaAssigneeAgentId: "deleted-agent-id" });
+    let dispatchedAgentId: string | undefined;
+    runAgentImpl = async (_runtime: unknown, options: { mcpConfig: string; agent: { id: string } }) => {
+      dispatchedAgentId = options.agent.id;
+      const token = tokenFromMcpConfig(options.mcpConfig);
+      const session = pmTools.lookupSession(token) as { outcome: unknown };
+      session.outcome = { verdict: "pass", summary: "Looks good.", criteriaChecked: [], prComments: [], followUps: [] };
+      return { ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" };
+    };
+    const orch = makeOrchestrator();
+    await orch.runQa(project.id, ticket.id);
+    const regularQa = await agentStore.findRoleAgent(project.id, "qa");
+    assert.equal(dispatchedAgentId, regularQa!.id);
   });
 });
 

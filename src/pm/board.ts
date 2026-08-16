@@ -18,6 +18,7 @@ export const ROLE_TRANSITIONS: Record<string, BoardStatus[]> = {
   engineer: ["qa", "in_progress"],
   principal: ["qa", "in_progress"],
   qa: ["complete", "in_progress", "ready"],
+  "principal-qa": ["complete", "in_progress", "ready"],
   devops: ["complete"],
   human: ["backlog", "ready", "in_progress", "qa", "complete"],
 };
@@ -56,6 +57,7 @@ function hydrate(item: WorkItem): WorkItem {
   item.worktreePath ??= null;
   item.attempts ??= 0;
   item.nextAttemptAt ??= null;
+  item.qaAssigneeAgentId ??= null;
   item.prComments ??= [];
   item.comments ??= [];
   item.subtasks ??= [];
@@ -90,6 +92,7 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
     priority: input.priority ?? now / 1000,
     complexity: input.complexity ?? null,
     assigneeAgentId: null,
+    qaAssigneeAgentId: null,
     subtasks: [],
     comments: [],
     labels: input.labels ?? [],
@@ -126,6 +129,7 @@ export type WorkItemPatch = Partial<
     | "branch"
     | "worktreePath"
     | "assigneeAgentId"
+    | "qaAssigneeAgentId"
     | "subtasks"
   >
 >;
@@ -176,6 +180,11 @@ export async function transitionWorkItem(id: string, to: BoardStatus, actor: str
     // that reached a new state isn't the stuck one the backoff was for.
     item.attempts = 0;
     item.nextAttemptAt = null;
+    // Same reasoning for a QA escalation: a ticket that re-enters "qa"
+    // after rework should go through the project's regular QA agent
+    // again, not stay pinned to whichever Principal QA agent reviewed a
+    // previous round.
+    item.qaAssigneeAgentId = null;
     item.updatedAt = Date.now();
   });
 }

@@ -13,6 +13,7 @@ import {
   ENGINEER_PROMPT,
   PRINCIPAL_PROMPT,
   QA_PROMPT,
+  PRINCIPAL_QA_PROMPT,
   DEVOPS_PROMPT,
   PROJECT_MANAGER_PROMPT,
 } from "./prompts/role-prompts.js";
@@ -27,6 +28,7 @@ export {
   ENGINEER_PROMPT,
   PRINCIPAL_PROMPT,
   QA_PROMPT,
+  PRINCIPAL_QA_PROMPT,
   DEVOPS_PROMPT,
   PROJECT_MANAGER_PROMPT,
 } from "./prompts/role-prompts.js";
@@ -69,6 +71,7 @@ export const ROLE_PROMPTS: Record<AgentRole, string> = {
   engineer: ENGINEER_PROMPT,
   principal: PRINCIPAL_PROMPT,
   qa: QA_PROMPT,
+  "principal-qa": PRINCIPAL_QA_PROMPT,
   devops: DEVOPS_PROMPT,
   "project-manager": PROJECT_MANAGER_PROMPT,
 };

@@ -24,6 +24,13 @@ export async function ensureProjectAgents(projectId: string): Promise<AgentDef[]
     // sets a ticket's assigneeAgentId to this one, and only after 5
     // consecutive failed attempts.
     { role: "principal", name: "Principal Engineer", maxComplexity: "high" },
+    // Same escalation-only shape as "principal" above, but for tickets
+    // stuck in "qa" instead of "in_progress" -- see escalateStuckTickets'
+    // QA branch. Never picked for a ticket's regular per-project QA agent
+    // (resolveProjectAgent(projectId, "qa") only ever returns the "qa"
+    // role); only set via WorkItem.qaAssigneeAgentId, and only after 5
+    // consecutive failed QA attempts.
+    { role: "principal-qa", name: "Principal QA", maxComplexity: "high" },
   ];
   for (const spec of roles) {
     const existing = await agents.find((row) => row.projectId === projectId && row.role === spec.role);

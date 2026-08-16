@@ -26,6 +26,21 @@ export async function resolveProjectAgent(projectId: string, role: AgentRole): P
   return { project, settings: await getSettings(projectId), agent };
 }
 
+/** Same shape as resolveProjectAgent, but for a run that already knows
+ *  exactly which agent should handle it -- a ticket escalated to Principal
+ *  QA (see WorkItem.qaAssigneeAgentId) needs THAT specific agent, not
+ *  whichever one findRoleAgent would resolve for a role. Returns null when
+ *  the project or the agent record no longer exists (an agent deleted out
+ *  from under an escalated ticket), same failure shape as
+ *  resolveProjectAgent's own "run just doesn't happen this tick" contract. */
+export async function resolveSpecificAgent(projectId: string, agentId: string): Promise<{ project: Project; settings: ProjectSettings; agent: AgentDef } | null> {
+  const project = await getProject(projectId);
+  if (!project) return null;
+  const agent = await agentStore.getAgent(agentId);
+  if (!agent) return null;
+  return { project, settings: await getSettings(projectId), agent };
+}
+
 /** The project-context block every role prompt opens with: name/settings,
  *  the shared facts store, and which exposed secrets are available. */
 export async function projectHeader(project: Project, settings: ProjectSettings): Promise<string> {

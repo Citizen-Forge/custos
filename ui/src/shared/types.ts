@@ -69,7 +69,7 @@ export const BOARD_STATUSES = ["backlog", "ready", "in_progress", "qa", "complet
 export type BoardStatus = (typeof BOARD_STATUSES)[number];
 export type WorkItemType = "epic" | "story" | "bug";
 export type Complexity = "low" | "medium" | "high";
-export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops" | "project-manager" | "principal";
+export type AgentRole = "steering" | "product-owner" | "engineering-manager" | "engineer" | "qa" | "devops" | "project-manager" | "principal" | "principal-qa";
 export type DeployTarget = "none" | "docker-local" | "aws";
 
 export interface Subtask {
@@ -106,6 +106,7 @@ export interface WorkItem {
   priority: number;
   complexity: Complexity | null;
   assigneeAgentId: string | null;
+  qaAssigneeAgentId: string | null;
   subtasks: Subtask[];
   comments: WorkItemComment[];
   labels: string[];
