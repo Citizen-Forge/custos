@@ -76,6 +76,7 @@ export class ProviderStateMap {
     this.state.set(name, {
       coolingUntil: null,
       breakerUntil: null,
+      halfOpenProbeInFlight: false,
       maxConcurrent: init?.maxConcurrent ?? 0,
       active: 0,
       queuedInteractive: 0,
@@ -109,8 +110,20 @@ export class ProviderStateMap {
     const now = Date.now();
     // Cooldown gate
     if (entry.coolingUntil !== null && now < entry.coolingUntil) return false;
-    // Circuit breaker gate
-    if (entry.breakerUntil !== null && now < entry.breakerUntil) return false;
+    // Circuit breaker gate. Still fully blocked before the deadline. Once
+    // past it, only ONE half-open probe is let through at a time (see
+    // acquire()/release()) instead of flooding every queued caller back
+    // in at once -- a burst hitting a provider that's still marginal
+    // would otherwise blow straight back through CB_THRESHOLD and re-trip
+    // almost instantly. Confirmed live: local-cpu's breaker escalated to
+    // the full 30-minute cap during an extended outage under classifier
+    // traffic (every tool call gated through it) and had no way to test
+    // recovery early once the underlying service actually came back --
+    // it just sat blocked until the deadline, unrelated to actual health.
+    if (entry.breakerUntil !== null) {
+      if (now < entry.breakerUntil) return false;
+      if (entry.halfOpenProbeInFlight) return false;
+    }
     // Concurrency gate (0 = unlimited)
     if (entry.maxConcurrent > 0 && entry.active >= entry.maxConcurrent) return false;
     // RPM gate: the next slot hasn't opened yet.
@@ -125,6 +138,16 @@ export class ProviderStateMap {
     const entry = this.state.get(name);
     if (!entry) throw new Error(`Provider "${name}" is not registered`);
     entry.active++;
+    // This acquire is the half-open probe iff the breaker's deadline has
+    // already passed -- canAccept() only let it through because
+    // halfOpenProbeInFlight was still false. Set it now, synchronously
+    // (acquire is never awaited between the canAccept() check and this
+    // call), so every other concurrent caller's canAccept() sees the
+    // probe as already in flight and stays queued until release() clears
+    // it (recordSuccess/recordFailure will have already run by then).
+    if (entry.breakerUntil !== null && Date.now() >= entry.breakerUntil) {
+      entry.halfOpenProbeInFlight = true;
+    }
     if (entry.rpmLimit !== null) {
       const now = Date.now();
       const spacingMs = 60_000 / entry.rpmLimit;
@@ -143,6 +166,13 @@ export class ProviderStateMap {
     const entry = this.state.get(name);
     if (!entry) return;
     entry.active = Math.max(0, entry.active - 1);
+    // Always safe to clear unconditionally -- false when this wasn't a
+    // probe. By the time release() runs, recordSuccess/recordFailure has
+    // already recorded the probe's outcome (called from the try/catch
+    // block that precedes the finally this runs in), so clearing here
+    // just lets the NEXT probe through if this one failed, or is a no-op
+    // if it succeeded (breakerUntil is already null from recordSuccess).
+    entry.halfOpenProbeInFlight = false;
     // Signal any waiting observers that a slot freed up.
     // Pump is called externally via pumpAll().
   }
@@ -199,21 +229,9 @@ export class ProviderStateMap {
   private static readonly CB_BASE_MS = 60_000;
   private static readonly CB_MAX_MS = 30 * 60 * 1000;
 
-  /** Record a failure with a proper sliding window. Prunes failures
-   * older than CB_WINDOW_MS, then checks if the remaining count exceeds
-   * CB_THRESHOLD. Returns the breaker deadline if tripped, else null. */
-  recordFailure(name: string): number | null {
-    const entry = this.state.get(name);
-    if (!entry) return null;
-    const now = Date.now();
-    const failures = this.recentFailures.get(name) ?? [];
-    failures.push(now);
-    const cutoff = now - ProviderStateMap.CB_WINDOW_MS;
-    while (failures.length > 0 && failures[0] < cutoff) failures.shift();
-    this.recentFailures.set(name, failures);
-
-    if (failures.length < ProviderStateMap.CB_THRESHOLD) return null;
-
+  /** Compute and apply the next exponential trip deadline, advancing
+   *  consecutiveOpens. Shared by the two trip paths below. */
+  private tripBreaker(name: string, entry: ProviderStateEntry, now: number): number {
     const openCount = this.consecutiveOpens.get(name) ?? 0;
     const cooldown = Math.min(
       ProviderStateMap.CB_BASE_MS * Math.pow(2, openCount),
@@ -223,6 +241,44 @@ export class ProviderStateMap {
     entry.breakerUntil = deadline;
     this.consecutiveOpens.set(name, openCount + 1);
     return deadline;
+  }
+
+  /** Record a failure with a proper sliding window. Prunes failures
+   * older than CB_WINDOW_MS, then checks if the remaining count exceeds
+   * CB_THRESHOLD. Returns the breaker deadline if tripped, else null.
+   *
+   * HALF-OPEN PROBE FAILURE: a failure that lands while breakerUntil has
+   * already passed can only be the single half-open probe acquire() let
+   * through (see canAccept()) -- decisive evidence the provider still
+   * isn't ready, unlike an isolated failure during normal operation which
+   * needs CB_THRESHOLD repeats within the window to mean anything.
+   * Re-trips immediately at the next exponential step rather than waiting
+   * for CB_THRESHOLD-1 more failures to accumulate, which would otherwise
+   * let a burst of unrelated traffic queue up against a provider already
+   * known to still be down. */
+  recordFailure(name: string): number | null {
+    const entry = this.state.get(name);
+    if (!entry) return null;
+    const now = Date.now();
+
+    if (entry.breakerUntil !== null && now >= entry.breakerUntil) {
+      const deadline = this.tripBreaker(name, entry, now);
+      // Keep the sliding window in sync so a subsequent probe within the
+      // same CB_WINDOW_MS doesn't also need CB_THRESHOLD raw failures to
+      // re-trip a third time -- one probe failure is already conclusive.
+      this.recentFailures.set(name, [now]);
+      return deadline;
+    }
+
+    const failures = this.recentFailures.get(name) ?? [];
+    failures.push(now);
+    const cutoff = now - ProviderStateMap.CB_WINDOW_MS;
+    while (failures.length > 0 && failures[0] < cutoff) failures.shift();
+    this.recentFailures.set(name, failures);
+
+    if (failures.length < ProviderStateMap.CB_THRESHOLD) return null;
+
+    return this.tripBreaker(name, entry, now);
   }
 
   /** Called on success — clears the recent-failure list and resets the

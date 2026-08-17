@@ -3,6 +3,13 @@ export interface ProviderStateEntry {
   coolingUntil: number | null;
   /** When the circuit breaker expires. ms epoch. null when not broken. */
   breakerUntil: number | null;
+  /** True while a single half-open probe request is in flight past an
+   *  expired breakerUntil. Blocks every OTHER caller from also slipping
+   *  through the instant the deadline passes -- without this, a burst of
+   *  queued callers would all retry a still-marginal provider at once,
+   *  which is exactly what can blow back through CB_THRESHOLD and re-trip
+   *  the breaker almost immediately. See canAccept()/acquire()/release(). */
+  halfOpenProbeInFlight: boolean;
   /** Max concurrent in-flight requests. 0 = unlimited. */
   maxConcurrent: number;
   /** Currently in-flight requests. */

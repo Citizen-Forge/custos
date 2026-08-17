@@ -437,7 +437,63 @@ describe("ProviderStateMap", () => {
     assert.equal(m.get("recovering")!.breakerUntil, null);
   });
 
-  // -- queue depth counters ---------------------------------------------------
+  // -- half-open probe ---------------------------------------------------------
+  // A tripped breaker only lets ONE trial request through once its deadline
+  // passes, instead of flooding every queued caller back in at once. See
+  // provider-state.ts's canAccept()/acquire()/release() comments for why: a
+  // burst hitting a still-marginal provider can blow straight back through
+  // CB_THRESHOLD and re-trip almost instantly, and a provider with high
+  // request volume during an outage (the classifier fallback set, which
+  // gates every tool call) can escalate all the way to the 30-minute cap
+  // and then just sit blocked long after the underlying service recovers.
+
+  it("canAccept blocks before the deadline and allows exactly one probe after it", () => {
+    const m = new ProviderStateMap();
+    m.register("flaky");
+    for (let i = 0; i < 5; i++) m.recordFailure("flaky");
+    assert.equal(m.canAccept("flaky"), false, "still blocked before the deadline");
+
+    advanceMs(70_000); // past the 60s first-trip cooldown
+    assert.equal(m.canAccept("flaky"), true, "past the deadline: the probe is allowed");
+
+    const release = m.acquire("flaky");
+    assert.equal(m.canAccept("flaky"), false, "a second caller must not slip through while the probe is in flight");
+    release();
+    assert.equal(m.canAccept("flaky"), true, "releasing the failed-or-unresolved probe lets the next one try");
+  });
+
+  it("a successful probe clears the breaker for everyone", () => {
+    const m = new ProviderStateMap();
+    m.register("recovers");
+    for (let i = 0; i < 5; i++) m.recordFailure("recovers");
+    advanceMs(70_000);
+
+    assert.equal(m.canAccept("recovers"), true);
+    const release = m.acquire("recovers");
+    m.recordSuccess("recovers");
+    release();
+
+    assert.equal(m.get("recovers")!.breakerUntil, null);
+    assert.equal(m.get("recovers")!.halfOpenProbeInFlight, false);
+    assert.equal(m.canAccept("recovers"), true, "fully open now, not just for one more probe");
+  });
+
+  it("a failed probe re-trips immediately at the next exponential step, without needing 5 fresh failures", () => {
+    const m = new ProviderStateMap();
+    m.register("still-down");
+    for (let i = 0; i < 5; i++) m.recordFailure("still-down");
+    const firstTrip = m.get("still-down")!.breakerUntil!;
+    advanceMs(70_000); // past the ~60s first trip
+
+    assert.equal(m.canAccept("still-down"), true);
+    const release = m.acquire("still-down");
+    const secondDeadline = m.recordFailure("still-down");
+    release();
+
+    assert.ok(secondDeadline !== null, "a single probe failure must re-trip on its own");
+    assert.ok(secondDeadline! > firstTrip, "the second trip's deadline is further out (exponential step)");
+    assert.equal(m.canAccept("still-down"), false, "blocked again immediately, no window to slip through");
+  });
 
   it("incrementQueued / decrementQueued track per-provider queue depth by priority", () => {
     const m = new ProviderStateMap();
