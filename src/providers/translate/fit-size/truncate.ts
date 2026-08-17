@@ -137,13 +137,58 @@ function isErrorMessage(msg: OpenAIMessage): boolean {
   return false;
 }
 
+/** Groups an assistant `tool_calls` message together with every
+ *  immediately-following `tool`-role message that answers one of those
+ *  calls (by `tool_call_id`) into one atomic unit. OpenAI-format chat
+ *  history always places a tool_calls message's responses directly after
+ *  it, before the next user/assistant turn, so a single forward scan is
+ *  enough. Every other message (user, or an assistant turn with no
+ *  tool_calls) is its own single-message unit.
+ *
+ *  Removing only one side of a tool_calls/tool-response pair produces a
+ *  request some backends reject outright -- confirmed live 2026-08-17: a
+ *  self-hosted provider's chat-template rendering threw "Message has
+ *  tool role, but there was no tool call" after the age-based removal
+ *  below (which worked purely by raw index/age, with no notion of this
+ *  pairing) dropped an assistant tool_calls turn while leaving its
+ *  tool-role response behind. This had been a latent bug since
+ *  truncateOldestMessages was first written, but rarely surfaced: it
+ *  only reached the wire when truncation actually got the request under
+ *  the cap AND happened to split a pair on the way there. Grouping into
+ *  units before any removal pass makes that split structurally
+ *  impossible. */
+function groupIntoUnits(messages: OpenAIMessage[]): number[][] {
+  const units: number[][] = [];
+  let i = 0;
+  while (i < messages.length) {
+    const msg = messages[i];
+    if (msg.role === "assistant" && msg.tool_calls?.length) {
+      const ids = new Set(msg.tool_calls.map((tc) => tc.id));
+      const unit = [i];
+      let j = i + 1;
+      while (j < messages.length && messages[j].role === "tool" && messages[j].tool_call_id !== undefined && ids.has(messages[j].tool_call_id as string)) {
+        unit.push(j);
+        j++;
+      }
+      units.push(unit);
+      i = j;
+    } else {
+      units.push([i]);
+      i++;
+    }
+  }
+  return units;
+}
+
 /** Remove the oldest messages (everything after the system prompt) from
  *  an OpenAI request until its serialized body fits `maxBytes`. Keeps the
- *  system prompt at index 0 and the newest messages. Returns a
- *  FitRequestResult when truncation succeeds (stillOverLimit can still be
- *  true if even keeping only the system + one message still exceeds the
- *  limit), or undefined when the request has < 3 messages total (nothing
- *  worth dropping).
+ *  system prompt at index 0 and the newest messages. Removal always
+ *  operates on groupIntoUnits' atomic units, never a lone message out of
+ *  a tool_calls/tool-response pair (see that function's comment). Returns
+ *  a FitRequestResult when truncation succeeds (stillOverLimit can still
+ *  be true if even keeping only the system + one message still exceeds
+ *  the limit), or undefined when the request has < 3 messages total
+ *  (nothing worth dropping).
  *
  *  PROTECTED MESSAGE: the most recent `role: "user"` message is never a
  *  removal candidate. Agent-style conversations (the dominant case)
@@ -205,17 +250,27 @@ export function truncateOldestMessages(req: OpenAIRequest, currentBytes: number,
   const protectedIdx = (): number => (protectedMsg ? clone.messages.indexOf(protectedMsg) : -1);
 
   // ERROR-FIRST PASS: Strip known error-pattern messages before the
-  // age-based loop. In a conversation saturated with retry errors (e.g.
-  // a PM agent that retried 50 times before succeeding), this single
-  // pass removes all the dead weight at once — no need to touch healthy
-  // exchanges. Check every non-system, non-protected message.
-  let i = clone.messages.length - 1;
-  while (i >= 1) {
-    if (i !== protectedIdx() && isErrorMessage(clone.messages[i])) {
-      clone.messages.splice(i, 1);
-      removedCount++;
+  // age-based loop, one whole unit at a time so a flagged tool-response
+  // never gets removed without its triggering tool_calls message (or
+  // vice versa). In a conversation saturated with retry errors (e.g. a
+  // PM agent that retried 50 times before succeeding), this single pass
+  // removes all the dead weight at once — no need to touch healthy
+  // exchanges.
+  {
+    const pIdx = protectedIdx();
+    const units = groupIntoUnits(clone.messages);
+    const toRemove = new Set<number>();
+    for (const unit of units) {
+      if (unit[0] === 0) continue; // never touch the system message
+      if (unit.includes(pIdx)) continue;
+      if (unit.some((idx) => isErrorMessage(clone.messages[idx]))) {
+        for (const idx of unit) toRemove.add(idx);
+      }
     }
-    i--;
+    if (toRemove.size > 0) {
+      clone.messages = clone.messages.filter((_, idx) => !toRemove.has(idx));
+      removedCount += toRemove.size;
+    }
   }
   if (removedCount > 0) {
     const finalBytes = serializeRequestBytes(clone);
@@ -233,18 +288,19 @@ export function truncateOldestMessages(req: OpenAIRequest, currentBytes: number,
   }
 
   // AGE-BASED LOOP: remove the oldest ~25% of removable (non-system,
-  // non-protected) messages per iteration until the body fits or nothing
-  // removable remains.
+  // non-protected) UNITS per iteration until the body fits or nothing
+  // removable remains. Units, not raw messages, so a tool_calls message
+  // and its tool-response(s) are always removed together.
   for (;;) {
-    const removable: number[] = [];
     const pIdx = protectedIdx();
-    for (let idx = 1; idx < clone.messages.length; idx++) {
-      if (idx !== pIdx) removable.push(idx);
-    }
-    if (removable.length === 0) break;
+    const units = groupIntoUnits(clone.messages).filter((unit) => unit[0] !== 0 && !unit.includes(pIdx));
+    if (units.length === 0) break;
 
-    const chunkSize = Math.max(1, Math.floor(removable.length * 0.25));
-    const toRemove = new Set(removable.slice(0, chunkSize));
+    const chunkSize = Math.max(1, Math.floor(units.length * 0.25));
+    const toRemove = new Set<number>();
+    for (const unit of units.slice(0, chunkSize)) {
+      for (const idx of unit) toRemove.add(idx);
+    }
     clone.messages = clone.messages.filter((_, idx) => !toRemove.has(idx));
     removedCount += toRemove.size;
 

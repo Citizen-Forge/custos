@@ -76,6 +76,45 @@ test("falls back to content-truncation of the protected message only as a last r
   assert.equal(result, undefined);
 });
 
+test("removes an assistant tool_calls message and its tool-response together, never splitting the pair", () => {
+  // Confirmed live 2026-08-17: a self-hosted upstream's chat-template
+  // rendering rejects a request outright ("Message has tool role, but
+  // there was no tool call") when an assistant tool_calls message and
+  // its tool-role response get split by removal -- one survives, the
+  // other doesn't. The pre-fix age-based loop removed by raw index with
+  // no notion of this pairing.
+  const messages: OpenAIMessage[] = [msg("system", "sys")];
+  messages.push(msg("user", "LIVE TASK: do the real work"));
+  for (let i = 0; i < 20; i++) {
+    const callId = `call-${i}`;
+    messages.push({
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: callId, type: "function", function: { name: "read_file", arguments: `{"path":"file-${i}.ts"}` } }],
+    });
+    messages.push({ role: "tool", content: `result-${i}-`.repeat(50), tool_call_id: callId });
+  }
+  const request = req(messages);
+  const before = Buffer.byteLength(JSON.stringify(request), "utf8");
+  const result = truncateOldestMessages(request, before, Math.floor(before * 0.2));
+  assert.ok(result);
+
+  const survivingCalls = new Set(result!.request.messages.flatMap((m) => m.tool_calls?.map((tc) => tc.id) ?? []));
+  const answeredCalls = new Set(
+    result!.request.messages.filter((m) => m.role === "tool").map((m) => m.tool_call_id),
+  );
+  for (const m of result!.request.messages) {
+    if (m.role === "tool") {
+      assert.ok(m.tool_call_id && survivingCalls.has(m.tool_call_id), `orphaned tool message answering missing call ${m.tool_call_id}`);
+    }
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      for (const tc of m.tool_calls) {
+        assert.ok(answeredCalls.has(tc.id), `assistant tool_calls id=${tc.id} has no surviving tool response`);
+      }
+    }
+  }
+});
+
 test("still drops old turns normally when there is no user-role message at all", () => {
   // Defensive: a conversation with no user role (shouldn't happen in
   // practice, but the function must not throw) still truncates old
