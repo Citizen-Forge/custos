@@ -42,13 +42,29 @@ const ALL_TOOLS = [
  *  never Write/Edit/NotebookEdit, since its whole point is judging the
  *  engineer's diff, not modifying it. custos-qa is governed by
  *  TOOL_ALLOWLIST_BY_TAG below instead of an entry here -- see that
- *  export's comment for why a denylist doesn't get it. Tags not listed
- *  in either map keep full tool access: they have a real, legitimate
- *  reason to touch the filesystem or run commands. */
+ *  export's comment for why a denylist doesn't get it.
+ *
+ *  custos-assign-models (the PM's once-per-project fallback-set
+ *  assignment pass) belongs in the same tool-free bucket as
+ *  custos-groom/-assign/-curate for the identical reason -- its entire
+ *  prompt is self-contained (budget, roster, fallback-set menu), nothing
+ *  to gain from touching the filesystem -- but was missed when it was
+ *  added, so it kept its full, unrestricted default. Found live
+ *  2026-08-17: a brand-new project's PM agent sat with 0 completed runs
+ *  for 3+ hours, retrying every ~20s against a capped local provider --
+ *  same root cause as the custos-qa case above (a pure-judgment task's
+ *  unrestricted tool-schema floor alone exceeded the provider's request
+ *  cap before a single byte of real content), just never diagnosed
+ *  because nothing about a brand-new, unconfigured project stood out as
+ *  the trigger.
+ *
+ *  Tags not listed in either map keep full tool access: they have a
+ *  real, legitimate reason to touch the filesystem or run commands. */
 export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
   "custos-assign": ALL_TOOLS,
   "custos-groom": ALL_TOOLS,
   "custos-curate": ALL_TOOLS,
+  "custos-assign-models": ALL_TOOLS,
 };
 
 /** Tags whose entire legitimate action surface is their MCP tools (see
@@ -63,7 +79,7 @@ export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
  *  slow turn per miss. MCP-server tools are unaffected by `--tools` -- it
  *  only governs the built-in roster -- so this doesn't touch the very
  *  tools these tags exist to use. */
-export const TOOL_FREE_TAGS = new Set(["custos-groom", "custos-assign", "custos-curate"]);
+export const TOOL_FREE_TAGS = new Set(["custos-groom", "custos-assign", "custos-curate", "custos-assign-models"]);
 
 /** Tags with an explicit tool ALLOWLIST (RunTurnOptions.tools, the CLI's
  *  own `--tools`) instead of DISALLOWED_TOOLS_BY_TAG's denylist. A denylist
