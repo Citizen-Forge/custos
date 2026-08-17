@@ -40,14 +40,15 @@ const ALL_TOOLS = [
  *  QA (custos-qa) legitimately needs Read/Bash/Glob/Grep to check out and
  *  run the diff it's reviewing, and Task to delegate exploration -- but
  *  never Write/Edit/NotebookEdit, since its whole point is judging the
- *  engineer's diff, not modifying it. Tags not listed here keep full
- *  tool access: they have a real, legitimate reason to touch the
- *  filesystem or run commands. */
+ *  engineer's diff, not modifying it. custos-qa is governed by
+ *  TOOL_ALLOWLIST_BY_TAG below instead of an entry here -- see that
+ *  export's comment for why a denylist doesn't get it. Tags not listed
+ *  in either map keep full tool access: they have a real, legitimate
+ *  reason to touch the filesystem or run commands. */
 export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
   "custos-assign": ALL_TOOLS,
   "custos-groom": ALL_TOOLS,
   "custos-curate": ALL_TOOLS,
-  "custos-qa": ["Write", "Edit", "NotebookEdit"],
 };
 
 /** Tags whose entire legitimate action surface is their MCP tools (see
@@ -63,3 +64,21 @@ export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
  *  only governs the built-in roster -- so this doesn't touch the very
  *  tools these tags exist to use. */
 export const TOOL_FREE_TAGS = new Set(["custos-groom", "custos-assign", "custos-curate"]);
+
+/** Tags with an explicit tool ALLOWLIST (RunTurnOptions.tools, the CLI's
+ *  own `--tools`) instead of DISALLOWED_TOOLS_BY_TAG's denylist. A denylist
+ *  leaves in every built-in it doesn't name, and Claude Code's roster keeps
+ *  growing (BashOutput, KillShell, SlashCommand, ExitPlanMode, ...) -- a
+ *  role with a small, known tool need pays the full tool-schema JSON for
+ *  all of those on every request regardless of ever calling them. Measured
+ *  live 2026-08-17 investigating a recurring "Request too large" failure on
+ *  a 45,000B-capped local provider: custos-qa's request floor (system
+ *  prompt + tool schemas, before a single byte of ticket content) was
+ *  ~92.7KB under the old denylist (Write/Edit/NotebookEdit excluded, all
+ *  built-ins) vs ~23.6KB with this allowlist of exactly the 5 tools it
+ *  legitimately uses -- the gap was entirely built-ins QA never calls.
+ *  That ~92.7KB floor alone was already over-cap before any real
+ *  conversation content, on every single QA run against that provider. */
+export const TOOL_ALLOWLIST_BY_TAG: Record<string, string[]> = {
+  "custos-qa": ["Read", "Bash", "Glob", "Grep", "Task"],
+};

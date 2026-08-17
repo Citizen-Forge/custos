@@ -17,14 +17,14 @@ import { RUN_TIMEOUT_MS } from "./types.js";
 import { ProbeUnavailableError, runPreSpawnProbe } from "./probe.js";
 import { extractContract } from "./agent-runner/contract.js";
 import { buildSystemPrompt } from "./agent-runner/system-prompt.js";
-import { DISALLOWED_TOOLS_BY_TAG, TOOL_FREE_TAGS } from "./agent-runner/tool-policy.js";
+import { DISALLOWED_TOOLS_BY_TAG, TOOL_FREE_TAGS, TOOL_ALLOWLIST_BY_TAG } from "./agent-runner/tool-policy.js";
 import { describeEvent } from "./agent-runner/describe-event.js";
 import type { AgentRunResult, RunAgentOptions } from "./agent-runner/types.js";
 
 export type { AgentRunResult, RunAgentOptions } from "./agent-runner/types.js";
 export { extractContract } from "./agent-runner/contract.js";
 export { buildSystemPrompt } from "./agent-runner/system-prompt.js";
-export { DISALLOWED_TOOLS_BY_TAG, TOOL_FREE_TAGS } from "./agent-runner/tool-policy.js";
+export { DISALLOWED_TOOLS_BY_TAG, TOOL_FREE_TAGS, TOOL_ALLOWLIST_BY_TAG } from "./agent-runner/tool-policy.js";
 
 /**
  * Runs one autonomous agent to completion and returns its parsed contract.
@@ -242,7 +242,7 @@ export async function runAgent<T>(runtime: Runtime, options: RunAgentOptions): P
       env: await resolveAgentEnv(projectId),
       hookProfile: "agent",
       disallowedTools: DISALLOWED_TOOLS_BY_TAG[tag],
-      tools: TOOL_FREE_TAGS.has(tag) ? [] : undefined,
+      tools: TOOL_FREE_TAGS.has(tag) ? [] : TOOL_ALLOWLIST_BY_TAG[tag],
       onEvent,
       signal: controller.signal,
     });
