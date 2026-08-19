@@ -42,11 +42,13 @@ const ALL_TOOLS = [
  *  never Write/Edit/NotebookEdit, since its whole point is judging the
  *  engineer's diff, not modifying it. custos-qa is governed by
  *  TOOL_ALLOWLIST_BY_TAG below instead of an entry here -- see that
- *  export's comment for why a denylist doesn't get it.
+ *  export's comment for why a denylist doesn't get it. custos-groom
+ *  moved to that same allowlist mechanism 2026-08-19 (see its comment)
+ *  for the identical reason -- it now has one narrow tool, not zero.
  *
  *  custos-assign-models (the PM's once-per-project fallback-set
  *  assignment pass) belongs in the same tool-free bucket as
- *  custos-groom/-assign/-curate for the identical reason -- its entire
+ *  custos-assign/-curate for the identical reason -- its entire
  *  prompt is self-contained (budget, roster, fallback-set menu), nothing
  *  to gain from touching the filesystem -- but was missed when it was
  *  added, so it kept its full, unrestricted default. Found live
@@ -62,7 +64,6 @@ const ALL_TOOLS = [
  *  real, legitimate reason to touch the filesystem or run commands. */
 export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
   "custos-assign": ALL_TOOLS,
-  "custos-groom": ALL_TOOLS,
   "custos-curate": ALL_TOOLS,
   "custos-assign-models": ALL_TOOLS,
 };
@@ -79,7 +80,7 @@ export const DISALLOWED_TOOLS_BY_TAG: Record<string, string[]> = {
  *  slow turn per miss. MCP-server tools are unaffected by `--tools` -- it
  *  only governs the built-in roster -- so this doesn't touch the very
  *  tools these tags exist to use. */
-export const TOOL_FREE_TAGS = new Set(["custos-groom", "custos-assign", "custos-curate", "custos-assign-models"]);
+export const TOOL_FREE_TAGS = new Set(["custos-assign", "custos-curate", "custos-assign-models"]);
 
 /** Tags with an explicit tool ALLOWLIST (RunTurnOptions.tools, the CLI's
  *  own `--tools`) instead of DISALLOWED_TOOLS_BY_TAG's denylist. A denylist
@@ -94,7 +95,25 @@ export const TOOL_FREE_TAGS = new Set(["custos-groom", "custos-assign", "custos-
  *  built-ins) vs ~23.6KB with this allowlist of exactly the 5 tools it
  *  legitimately uses -- the gap was entirely built-ins QA never calls.
  *  That ~92.7KB floor alone was already over-cap before any real
- *  conversation content, on every single QA run against that provider. */
+ *  conversation content, on every single QA run against that provider.
+ *
+ *  custos-groom got Bash added here 2026-08-19, moving it out of
+ *  TOOL_FREE_TAGS: grooming can only ever repeat whatever a ticket's own
+ *  comments already say, with no way to notice a cited external blocker
+ *  (almost always "PR #N is QA-approved but unmerged") has since
+ *  resolved -- confirmed live, a fresh grooming pass re-read a comment
+ *  citing a PR as unmerged 10 days after that PR had actually merged,
+ *  and correctly-by-its-own-lights concluded nothing had changed. Bash
+ *  (for `gh pr view`/`gh issue view`, per buildGroomPrompt's updated
+ *  instructions) lets it check a cited blocker's current state instead
+ *  of trusting stale text. Deliberately NOT Read/Glob/Grep/Task: those
+ *  are exactly what the ALL_TOOLS doc comment above describes going
+ *  wrong live (exploring the codebase, spawning a Task sub-agent,
+ *  starting to implement code for an interesting-looking ticket) --
+ *  Bash alone still goes through the permission classifier for anything
+ *  beyond a safe read-only command, which narrow `gh`/`git` read
+ *  commands should clear without the broader wandering risk. */
 export const TOOL_ALLOWLIST_BY_TAG: Record<string, string[]> = {
   "custos-qa": ["Read", "Bash", "Glob", "Grep", "Task"],
+  "custos-groom": ["Bash"],
 };
