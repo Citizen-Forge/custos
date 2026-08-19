@@ -8,7 +8,7 @@ import { getSettings, updateSettings } from "./project-settings.js";
 import { listPendingFacts } from "./facts.js";
 import type { AgentDef, ProjectSettings } from "./types.js";
 import { HUMAN_ASSIGNEE_ID } from "./types.js";
-import { engineerLimit, workItemsSignal, isAssignCheckStale } from "./orchestrator/shared.js";
+import { engineerLimit, workItemsSignal, isAssignCheckStale, isGroomCheckStale } from "./orchestrator/shared.js";
 import { groomBacklog, curateFacts, planIdea } from "./orchestrator/product-owner.js";
 import { pollSlackIdeas } from "./orchestrator/slack-inbox.js";
 import { assignReady } from "./orchestrator/engineering-manager.js";
@@ -196,8 +196,20 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       // after the last SUCCESSFUL pass (see workItemsSignal) means "we
       // already considered exactly this" skips the redundant re-ask,
       // while a genuinely new/edited item still triggers one immediately.
+      //
+      // That fingerprint can become a genuine fixed point, though: a
+      // backlog ticket blocked on something external (most commonly "PR
+      // #N is QA-approved but unmerged" in its own groom comment) leaves
+      // the backlog itself completely unchanged once the PR actually
+      // merges -- confirmed live, 19 tickets sat un-promoted for 10 days
+      // after their blocking PR merged, because none of the tickets
+      // themselves were ever edited. isGroomCheckStale forces a recheck
+      // at least once an hour regardless of the fingerprint, so a
+      // resolved blocker doesn't sit unnoticed indefinitely.
       const backlog = (await board.listWorkItems(project.id)).filter((item) => item.status === "backlog");
-      if (backlog.length && workItemsSignal(backlog) !== settings.lastGroomSignal) void this.groomBacklog(project.id);
+      const groomChanged = backlog.length > 0 && workItemsSignal(backlog) !== settings.lastGroomSignal;
+      const groomStale = backlog.length > 0 && isGroomCheckStale(settings.lastGroomCheckedAt, Date.now());
+      if (groomChanged || groomStale) void this.groomBacklog(project.id);
 
       const pendingFacts = await listPendingFacts(project.id);
       if (pendingFacts.length && workItemsSignal(pendingFacts) !== settings.lastCurateSignal) void this.curateFacts(project.id);

@@ -48,6 +48,20 @@ export function isAssignCheckStale(lastAssignCheckedAt: number | null, now: numb
   return lastAssignCheckedAt === null || now - lastAssignCheckedAt >= ASSIGN_STALE_RECHECK_MS;
 }
 
+/** Same reasoning as ASSIGN_STALE_RECHECK_MS, for groomBacklog -- see
+ *  ProjectSettings.lastGroomCheckedAt's doc comment. A groomed backlog
+ *  ticket's blocker is routinely external (a dependency PR merging), so
+ *  lastGroomSignal alone can become a fixed point long after the real
+ *  blocker clears. One hour caps the wasted spend the same way it does
+ *  for assign. */
+export const GROOM_STALE_RECHECK_MS = 60 * 60_000;
+
+/** True once lastGroomCheckedAt is missing or older than the recheck
+ *  window -- mirrors isAssignCheckStale. */
+export function isGroomCheckStale(lastGroomCheckedAt: number | null, now: number): boolean {
+  return lastGroomCheckedAt === null || now - lastGroomCheckedAt >= GROOM_STALE_RECHECK_MS;
+}
+
 /**
  * How many engineers may run at once. Normally the project's own setting,
  * but a project that isn't a git repository has nothing to cut isolated

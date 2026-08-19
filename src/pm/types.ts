@@ -377,6 +377,18 @@ export interface ProjectSettings {
    *  merged, because inFlight had settled at 0 before AND after the last
    *  pass and the ready set itself never changed while blocked. */
   lastAssignCheckedAt: number | null;
+  /** Same fixed-point problem as lastAssignCheckedAt above, for grooming:
+   *  a backlog ticket's groom comment routinely cites an external blocker
+   *  (most commonly "PR #N is QA-approved but unmerged") -- once that PR
+   *  merges, the blocker is gone, but nothing about the TICKET itself
+   *  changed, so lastGroomSignal still matches and groomBacklog never
+   *  re-fires to notice. tickProject also re-dispatches when this is stale
+   *  past GROOM_STALE_RECHECK_MS regardless of the signal, so a backlog
+   *  that looks unchanged still gets reconsidered periodically. Confirmed
+   *  live: 19 backlog tickets sat un-promoted for 10 days after the PR
+   *  every one of their groom comments cited as blocking had already
+   *  merged, because none of the tickets themselves were ever touched. */
+  lastGroomCheckedAt: number | null;
   updatedAt: number;
 }
 
@@ -400,6 +412,7 @@ export function defaultProjectSettings(projectId: string): ProjectSettings {
     lastAssignSignal: null,
     lastCurateSignal: null,
     lastAssignCheckedAt: null,
+    lastGroomCheckedAt: null,
     autonomy: { "product-owner": true, "engineering-manager": false, engineer: false, qa: false, devops: false, "project-manager": true, principal: true, "principal-qa": true },
     maxConcurrentEngineers: 3,
     steeringModel: DEFAULT_STEERING_MODEL,

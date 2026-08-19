@@ -351,6 +351,17 @@ describe("groomBacklog", () => {
     assert.notEqual(settings.lastGroomSignal, null);
   });
 
+  it("success also stamps lastGroomCheckedAt, independent of the fingerprint", async () => {
+    const project = await makeProject();
+    await makeTicket(project.id, { status: "backlog" });
+    const orch = makeOrchestrator();
+    const before = Date.now();
+    runAgentImpl = async () => ({ ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" });
+    await orch.groomBacklog(project.id);
+    const settings = await settingsMod.getSettings(project.id);
+    assert.ok(settings.lastGroomCheckedAt !== null && settings.lastGroomCheckedAt >= before);
+  });
+
   it("a real failure (not unavailable) emits an activity line", async () => {
     const project = await makeProject();
     await makeTicket(project.id, { status: "backlog" });
@@ -361,6 +372,16 @@ describe("groomBacklog", () => {
     assert.ok(activity.some((m) => m.includes("grooming failed") && m.includes("provider exploded")));
   });
 
+  it("a genuine failure (not unavailable) still stamps lastGroomCheckedAt", async () => {
+    const project = await makeProject();
+    await makeTicket(project.id, { status: "backlog" });
+    const orch = makeOrchestrator();
+    runAgentImpl = async () => ({ ok: false, unavailable: false, parsed: null, error: "boom", text: "", costUsd: null, runMs: 5, runId: "r1" });
+    await orch.groomBacklog(project.id);
+    const settings = await settingsMod.getSettings(project.id);
+    assert.notEqual(settings.lastGroomCheckedAt, null);
+  });
+
   it("an 'unavailable' failure (routine concurrency contention) emits no activity at all", async () => {
     const project = await makeProject();
     await makeTicket(project.id, { status: "backlog" });
@@ -369,6 +390,16 @@ describe("groomBacklog", () => {
     runAgentImpl = async () => ({ ok: false, unavailable: true, parsed: null, error: null, text: "", costUsd: null, runMs: 0, runId: "r1" });
     await orch.groomBacklog(project.id);
     assert.deepEqual(activity, []);
+  });
+
+  it("an 'unavailable' failure does NOT stamp lastGroomCheckedAt -- nothing was actually attempted", async () => {
+    const project = await makeProject();
+    await makeTicket(project.id, { status: "backlog" });
+    const orch = makeOrchestrator();
+    runAgentImpl = async () => ({ ok: false, unavailable: true, parsed: null, error: null, text: "", costUsd: null, runMs: 0, runId: "r1" });
+    await orch.groomBacklog(project.id);
+    const settings = await settingsMod.getSettings(project.id);
+    assert.equal(settings.lastGroomCheckedAt, null);
   });
 
   it("tool actions recorded on the groom session surface as one combined activity line", async () => {
@@ -1153,5 +1184,34 @@ describe("tickProject gating (via tick())", () => {
     await orch.tick();
     await waitUntilIdle(orch);
     assert.equal(calls, 1, "second tick sees the same fingerprint and does not re-groom");
+  });
+
+  it("groom re-fires once lastGroomCheckedAt is stale, even with an unchanged fingerprint", async () => {
+    // Duplicated rather than imported from ./orchestrator/shared.js: that
+    // module also imports worktrees.js (mocked below via mock.module()),
+    // and a top-level static import of it here changes ESM resolution
+    // order enough to make the worktrees.js mock miss for unrelated
+    // tests -- confirmed live, importing GROOM_STALE_RECHECK_MS this way
+    // broke "releases the workspace" assertions in the runEngineer/runQa
+    // blocks despite touching nothing about them.
+    const GROOM_STALE_RECHECK_MS = 60 * 60_000;
+    const project = await makeProject();
+    await settingsMod.updateSettings(project.id, { pmConfigured: true });
+    await makeTicket(project.id, { status: "backlog" });
+    let calls = 0;
+    runAgentImpl = async () => { calls++; return { ok: true, unavailable: false, parsed: null, error: null, text: "", costUsd: null, runMs: 5, runId: "r1" }; };
+    const orch = makeOrchestrator();
+    await orch.tick();
+    await waitUntilIdle(orch);
+    assert.equal(calls, 1, "first tick grooms the untouched backlog");
+
+    // Same fingerprint as the first tick would produce, but the checked-at
+    // stamp is pushed back past GROOM_STALE_RECHECK_MS -- simulates the
+    // real symptom (a backlog ticket's external blocker resolved without
+    // the ticket itself ever being touched) without waiting a real hour.
+    await settingsMod.updateSettings(project.id, { lastGroomCheckedAt: Date.now() - GROOM_STALE_RECHECK_MS - 1 });
+    await orch.tick();
+    await waitUntilIdle(orch);
+    assert.equal(calls, 2, "third tick re-grooms once the checked-at stamp is stale, despite the matching fingerprint");
   });
 });

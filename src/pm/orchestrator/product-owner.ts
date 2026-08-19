@@ -67,6 +67,13 @@ export async function groomBacklog(orch: Orchestrator, projectId: string): Promi
           slackText: `My grooming pass failed: ${result.error ?? "unknown error"}`,
           agent: va,
         });
+        // Marks that a real attempt happened just now, independent of
+        // whether it succeeded -- see ProjectSettings.lastGroomCheckedAt's
+        // doc comment. Skipped for result.unavailable (nothing was
+        // actually attempted; the next tick already retries that for
+        // free) so an unavailable provider can't itself suppress the
+        // hourly recheck.
+        await updateSettings(projectId, { lastGroomCheckedAt: Date.now() });
       }
     } else {
       // Fingerprint the POST-pass state, not what was fed in -- whatever
@@ -74,7 +81,7 @@ export async function groomBacklog(orch: Orchestrator, projectId: string): Promi
       // accounted for, so the very next tick doesn't immediately see a
       // "different" backlog and re-trigger on the pass's own writes.
       const freshBacklog = (await board.listWorkItems(projectId)).filter((item) => item.status === "backlog");
-      await updateSettings(projectId, { lastGroomSignal: workItemsSignal(freshBacklog) });
+      await updateSettings(projectId, { lastGroomSignal: workItemsSignal(freshBacklog), lastGroomCheckedAt: Date.now() });
     }
   });
 }
